@@ -288,15 +288,32 @@ WantedBy=multi-user.target
     def service_logs(
         follow: Annotated[bool, typer.Option("--follow", "-f", help="Follow log output")] = False,
         lines: Annotated[int, typer.Option("--lines", "-n", help="Number of lines to show")] = 50,
+        current: Annotated[bool, typer.Option("--current", "-c", help="Only show logs from current service run")] = False,
     ):
         """View Shadow9 service logs."""
         _check_linux()
         _check_installed()
 
-        cmd = ["journalctl", "-u", SERVICE_NAME, f"-n{lines}", "--no-pager"]
+        cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager"]
+        
+        # If --current, get logs only since the service last started
+        if current:
+            # Get the timestamp when the service was last activated
+            result = subprocess.run(
+                ["systemctl", "show", SERVICE_NAME, "--property=ActiveEnterTimestamp", "--value"],
+                capture_output=True, text=True
+            )
+            timestamp = result.stdout.strip()
+            if timestamp:
+                cmd.extend(["--since", timestamp])
+                console.print(f"[dim]Showing logs since service start: {timestamp}[/dim]\n")
+        else:
+            cmd.append(f"-n{lines}")
+        
         if follow:
             cmd.append("-f")
-            console.print("[dim]Following logs (Ctrl+C to exit)...[/dim]\n")
+            if not current:
+                console.print("[dim]Following logs (Ctrl+C to exit)...[/dim]\n")
             subprocess.run(cmd)
         else:
             result = subprocess.run(cmd, capture_output=True, text=True)
