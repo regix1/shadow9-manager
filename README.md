@@ -22,7 +22,7 @@ A secure SOCKS5 proxy server with Tor network support, authentication, and DPI b
 ### 1. Clone and Install Python Environment
 
 ```bash
-git clone https://github.com/yourusername/shadow9-manager.git
+git clone https://github.com/regix1/shadow9-manager.git
 cd shadow9-manager
 
 # Run the setup script (creates virtual environment and installs Python dependencies)
@@ -79,7 +79,7 @@ Each user has their own credentials and routing settings (Tor/direct, security l
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/shadow9-manager.git
+git clone https://github.com/regix1/shadow9-manager.git
 cd shadow9-manager
 
 # Create virtual environment
