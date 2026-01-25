@@ -241,6 +241,12 @@ def run_test(args):
 
 
 def main():
+    # Skip everything if this is a completion request
+    if "_SHADOW9_COMPLETE" in os.environ:
+        from shadow9.cli import cli
+        cli()
+        return
+    
     args = sys.argv[1:]
     
     # Handle custom test command
