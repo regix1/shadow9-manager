@@ -19,25 +19,27 @@ A secure SOCKS5 proxy server with Tor network support, authentication, and DPI b
 
 ## Quick Start
 
-### 1. Clone and Setup
+### 1. Clone and Install Python Environment
 
 ```bash
 git clone https://github.com/yourusername/shadow9-manager.git
 cd shadow9-manager
 
-# Run the setup script (creates virtual environment and first user)
+# Run the setup script (creates virtual environment and installs Python dependencies)
 ./setup
 ```
 
-### 2. Start the Server
+### 2. Install Tor and Bridges (Optional)
 
 ```bash
-# Basic usage (after setup)
-./shadow9 serve
+# Check what's already installed
+./shadow9 setup --check-only
 
-# Or with Python directly
-python -m shadow9 serve
+# Install Tor daemon and pluggable transports (obfs4proxy, snowflake)
+./shadow9 setup
 ```
+
+This step is optional if you only want to use the proxy without Tor routing.
 
 ### 3. Create a User
 
@@ -49,7 +51,13 @@ python -m shadow9 serve
 ./shadow9 user generate
 ```
 
-### 4. Connect
+### 4. Start the Server
+
+```bash
+./shadow9 serve
+```
+
+### 5. Connect
 
 Configure your application to use SOCKS5 proxy:
 - **Host:** 127.0.0.1
