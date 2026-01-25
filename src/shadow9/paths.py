@@ -226,7 +226,7 @@ class Shadow9Paths:
         Args:
             username: The username
             password: The plaintext password
-            routing: The routing description (e.g., "Tor + meek-azure")
+            routing: The routing description (e.g., "Tor + obfs4")
             security: The security level
             bind_port: Optional custom bind port
             allowed_ports: Optional list of allowed ports

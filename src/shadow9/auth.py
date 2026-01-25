@@ -39,7 +39,7 @@ class Credential:
 
     # Routing settings
     use_tor: bool = True  # Whether to route this user's traffic through Tor
-    bridge_type: str = "none"  # none, obfs4, snowflake, meek
+    bridge_type: str = "none"  # none, obfs4, snowflake
 
     # Security settings
     security_level: str = "basic"  # none, basic, moderate, paranoid
@@ -223,7 +223,7 @@ class AuthManager:
             username: The username (must be unique)
             password: The plaintext password (will be hashed)
             use_tor: Whether to route this user's traffic through Tor
-            bridge_type: Tor bridge type (none, obfs4, snowflake, meek)
+            bridge_type: Tor bridge type (none, obfs4, snowflake)
             security_level: Security level (none, basic, moderate, paranoid)
             allowed_ports: List of allowed destination ports (None = all)
             rate_limit: Max requests per minute (None = server default)
@@ -241,8 +241,8 @@ class AuthManager:
         if security_level not in ("none", "basic", "moderate", "paranoid"):
             raise ValueError("Invalid security level. Must be: none, basic, moderate, paranoid")
 
-        if bridge_type not in ("none", "obfs4", "snowflake", "meek"):
-            raise ValueError("Invalid bridge type. Must be: none, obfs4, snowflake, meek")
+        if bridge_type not in ("none", "obfs4", "snowflake"):
+            raise ValueError("Invalid bridge type. Must be: none, obfs4, snowflake")
 
         if bind_port is not None and (bind_port < 1 or bind_port > 65535):
             raise ValueError("Invalid bind port. Must be 1-65535")
@@ -603,12 +603,12 @@ class AuthManager:
 
         Args:
             username: The username to update
-            bridge_type: Bridge type (none, obfs4, snowflake, meek)
+            bridge_type: Bridge type (none, obfs4, snowflake)
 
         Returns:
             True if updated, False if user not found
         """
-        if bridge_type not in ("none", "obfs4", "snowflake", "meek"):
+        if bridge_type not in ("none", "obfs4", "snowflake"):
             raise ValueError("Invalid bridge type")
 
         if username not in self._credentials:

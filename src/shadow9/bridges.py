@@ -3,7 +3,7 @@ Tor Bridge and Pluggable Transport Support for Shadow9.
 
 Provides stealth Tor connectivity using:
 - obfs4 bridges (most effective against DPI)
-- meek bridges (looks like cloud traffic)
+
 - snowflake bridges (uses WebRTC)
 - webtunnel bridges (looks like HTTPS)
 
@@ -30,7 +30,6 @@ class BridgeType(Enum):
     """Supported bridge/pluggable transport types."""
     NONE = "none"           # Direct Tor connection (detectable)
     OBFS4 = "obfs4"         # Obfuscated traffic (recommended)
-    MEEK_AZURE = "meek"     # Looks like Azure cloud traffic
     SNOWFLAKE = "snowflake" # Uses WebRTC peers
     WEBTUNNEL = "webtunnel" # Looks like HTTPS to allowed domains
 
@@ -48,13 +47,8 @@ class Bridge:
         if self.type == BridgeType.NONE:
             return ""
 
-        # Get the transport name (meek uses meek_lite in Tor)
-        transport_name = self.type.value
-        if self.type == BridgeType.MEEK_AZURE:
-            transport_name = "meek_lite"
-
         # Format: Bridge <transport> <address> <fingerprint> <params>
-        parts = [transport_name, self.address]
+        parts = [self.type.value, self.address]
 
         if self.fingerprint:
             parts.append(self.fingerprint)
@@ -158,37 +152,6 @@ SNOWFLAKE_BRIDGES = [SNOWFLAKE_BRIDGE_AZURE, SNOWFLAKE_BRIDGE_FASTLY]
 # Backwards compatibility alias
 SNOWFLAKE_BRIDGE = SNOWFLAKE_BRIDGE_AZURE
 
-# Meek bridges (multiple options for reliability)
-# Primary: Azure (still working as of Dec 2025)
-MEEK_BRIDGE_AZURE = Bridge(
-    type=BridgeType.MEEK_AZURE,
-    address="192.0.2.18:80",
-    fingerprint="BE776A53492E1E044A26F17306E1BC46A55A1625",
-    params={
-        "url": "https://meek.azureedge.net/",
-        "front": "ajax.aspnetcdn.com"
-    }
-)
-
-# Fallback: CDN77-based meek
-MEEK_BRIDGE_CDN77 = Bridge(
-    type=BridgeType.MEEK_AZURE,
-    address="192.0.2.20:80",
-    fingerprint="",
-    params={
-        "url": "https://1314488750.rsc.cdn77.org",
-        "front": "www.phpmyadmin.net",
-        "utls": "HelloRandomizedALPN"
-    }
-)
-
-# All meek bridges for fallback
-MEEK_BRIDGES = [MEEK_BRIDGE_AZURE, MEEK_BRIDGE_CDN77]
-
-# Backwards compatibility alias
-MEEK_AZURE_BRIDGE = MEEK_BRIDGE_AZURE
-
-
 class PluggableTransportManager:
     """
     Manages pluggable transport binaries and Tor bridge configuration.
@@ -229,18 +192,6 @@ class PluggableTransportManager:
         if self.config.snowflake_path and Path(self.config.snowflake_path).exists():
             transports[BridgeType.SNOWFLAKE] = self.config.snowflake_path
 
-        # Look for meek-client (often bundled with obfs4proxy or as separate binary)
-        meek_names = ["meek-client", "meek-client.exe"]
-        for name in meek_names:
-            path = shutil.which(name)
-            if path:
-                transports[BridgeType.MEEK_AZURE] = path
-                break
-
-        # obfs4proxy can also handle meek transport
-        if BridgeType.MEEK_AZURE not in transports and BridgeType.OBFS4 in transports:
-            transports[BridgeType.MEEK_AZURE] = transports[BridgeType.OBFS4]
-
         return transports
 
     def generate_torrc(self, data_dir: Path, socks_port: int = 9050, control_port: int = 0) -> str:
@@ -275,8 +226,6 @@ class PluggableTransportManager:
                 bridges = BUILTIN_OBFS4_BRIDGES
             elif self.config.bridge_type == BridgeType.SNOWFLAKE:
                 bridges = SNOWFLAKE_BRIDGES  # Use multiple bridges for fallback
-            elif self.config.bridge_type == BridgeType.MEEK_AZURE:
-                bridges = MEEK_BRIDGES  # Use multiple bridges for fallback
             else:
                 bridges = []
         else:
@@ -296,9 +245,6 @@ class PluggableTransportManager:
 
         if BridgeType.SNOWFLAKE in transports and self.config.bridge_type == BridgeType.SNOWFLAKE:
             lines.append(f"ClientTransportPlugin snowflake exec {transports[BridgeType.SNOWFLAKE]}")
-
-        if BridgeType.MEEK_AZURE in transports and self.config.bridge_type == BridgeType.MEEK_AZURE:
-            lines.append(f"ClientTransportPlugin meek_lite exec {transports[BridgeType.MEEK_AZURE]}")
 
         return "\n".join(lines)
 
@@ -348,7 +294,7 @@ class TorBridgeConnector:
 
     This makes your Tor connection undetectable by:
     - Using obfs4 to obfuscate traffic patterns
-    - Using meek to disguise as cloud service traffic
+
     - Using snowflake to use WebRTC peer connections
     """
 
@@ -516,9 +462,6 @@ def print_bridge_info(config: BridgeConfig) -> str:
     if config.bridge_type == BridgeType.OBFS4:
         lines.append("  → Traffic looks like random noise")
         lines.append("  → Most effective against DPI")
-    elif config.bridge_type == BridgeType.MEEK_AZURE:
-        lines.append("  → Traffic looks like Microsoft Azure")
-        lines.append("  → Good for networks blocking Tor")
     elif config.bridge_type == BridgeType.SNOWFLAKE:
         lines.append("  → Uses WebRTC peer connections")
         lines.append("  → Hard to block, uses volunteer proxies")

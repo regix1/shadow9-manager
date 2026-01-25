@@ -35,7 +35,6 @@ class BridgeChoice(str, Enum):
     none = "none"
     obfs4 = "obfs4"
     snowflake = "snowflake"
-    meek = "meek"
 
 
 def register_user_commands(app: typer.Typer):
@@ -109,15 +108,9 @@ def register_user_commands(app: typer.Typer):
             console.print("     Routes through volunteer browser proxies via WebRTC.")
             console.print("     [dim]Best for: When obfs4 is blocked, dynamic endpoints[/dim]\n")
             
-            console.print("  [cyan]4. meek-azure[/cyan]")
-            console.print("     Tunnels through Microsoft Azure cloud (ajax.aspnetcdn.com).")
-            console.print("     Traffic appears as normal HTTPS to Microsoft CDN.")
-            console.print("     [dim]Best for: Heavily censored networks (China, Iran)[/dim]")
-            console.print("     [dim]Note: Slowest option due to cloud routing overhead[/dim]\n")
-            
-            bridge_choice = typer.prompt("Select bridge [1-4]", default="1")
+            bridge_choice = typer.prompt("Select bridge [1-3]", default="1")
             bridge_map = {"1": BridgeChoice.none, "2": BridgeChoice.obfs4, 
-                          "3": BridgeChoice.snowflake, "4": BridgeChoice.meek}
+                          "3": BridgeChoice.snowflake}
             bridge = bridge_map.get(bridge_choice, BridgeChoice.none)
         elif bridge is None:
             bridge = BridgeChoice.none
@@ -179,8 +172,7 @@ def register_user_commands(app: typer.Typer):
         
         routing = "Tor" if use_tor else "Direct"
         if bridge != BridgeChoice.none:
-            bridge_display = "meek-azure" if bridge == BridgeChoice.meek else bridge.value
-            routing += f" + {bridge_display}"
+            routing += f" + {bridge.value}"
 
         try:
             auth_manager.add_user(

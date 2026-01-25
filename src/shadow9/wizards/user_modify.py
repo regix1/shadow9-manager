@@ -169,8 +169,7 @@ def _show_current_settings(info: dict) -> None:
     
     # Bridge
     bridge = info.get("bridge_type", "none")
-    bridge_display = "meek-azure" if bridge == "meek" else bridge
-    table.add_row("Bridge", bridge_display if info["use_tor"] else "[dim]N/A (Direct routing)[/dim]")
+    table.add_row("Bridge", bridge if info["use_tor"] else "[dim]N/A (Direct routing)[/dim]")
     
     # Security
     security = info.get("security_level", "basic")
@@ -256,9 +255,8 @@ def _modify_bridge(auth_manager: AuthManager, username: str, info: dict) -> Opti
             return None
     
     current = info.get("bridge_type", "none")
-    current_display = "meek-azure" if current == "meek" else current
     
-    console.print(f"\n[bold]Modify Bridge Type[/bold] [dim](current: {current_display})[/dim]\n")
+    console.print(f"\n[bold]Modify Bridge Type[/bold] [dim](current: {current})[/dim]\n")
     
     console.print("  [cyan]1. none[/cyan]")
     console.print("     Direct connection to Tor network.")
@@ -272,18 +270,12 @@ def _modify_bridge(auth_manager: AuthManager, username: str, info: dict) -> Opti
     console.print("     Routes through volunteer browser proxies via WebRTC.")
     console.print("     [dim]Best for: When obfs4 is blocked, dynamic endpoints[/dim]\n")
     
-    console.print("  [cyan]4. meek-azure[/cyan]")
-    console.print("     Tunnels through Microsoft Azure cloud.")
-    console.print("     Traffic appears as normal HTTPS to Microsoft CDN.")
-    console.print("     [dim]Best for: Heavily censored networks (China, Iran)[/dim]")
-    console.print("     [dim]Note: Slowest option due to cloud routing overhead[/dim]\n")
-    
     # Determine default based on current
-    default_map = {"none": "1", "obfs4": "2", "snowflake": "3", "meek": "4"}
+    default_map = {"none": "1", "obfs4": "2", "snowflake": "3"}
     default = default_map.get(current, "1")
     
-    bridge_choice = typer.prompt("  Select bridge [1-4]", default=default)
-    bridge_map = {"1": "none", "2": "obfs4", "3": "snowflake", "4": "meek"}
+    bridge_choice = typer.prompt("  Select bridge [1-3]", default=default)
+    bridge_map = {"1": "none", "2": "obfs4", "3": "snowflake"}
     new_bridge = bridge_map.get(bridge_choice, current)
     
     if new_bridge == current:
@@ -291,9 +283,8 @@ def _modify_bridge(auth_manager: AuthManager, username: str, info: dict) -> Opti
         return None
     
     auth_manager.set_user_bridge_type(username, new_bridge)
-    new_display = "meek-azure" if new_bridge == "meek" else new_bridge
-    console.print(f"  [green]Bridge updated to: {new_display}[/green]")
-    return f"Bridge: {current_display} → {new_display}"
+    console.print(f"  [green]Bridge updated to: {new_bridge}[/green]")
+    return f"Bridge: {current} → {new_bridge}"
 
 
 def _modify_security(auth_manager: AuthManager, username: str, info: dict) -> Optional[str]:

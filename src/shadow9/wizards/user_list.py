@@ -146,10 +146,9 @@ def _user_action_menu(auth_manager: AuthManager, username: str, config_path: str
         if action.lower() == 'b':
             console.print("\n  [cyan]1.[/cyan] none - No bridge")
             console.print("  [cyan]2.[/cyan] obfs4 - Obfuscated bridge")
-            console.print("  [cyan]3.[/cyan] meek - Domain fronting")
-            console.print("  [cyan]4.[/cyan] snowflake - WebRTC-based\n")
-            bridge_choice = typer.prompt("  Select bridge [1-4]", default="1")
-            bridge_map = {"1": "none", "2": "obfs4", "3": "meek", "4": "snowflake"}
+            console.print("  [cyan]3.[/cyan] snowflake - WebRTC-based\n")
+            bridge_choice = typer.prompt("  Select bridge [1-3]", default="1")
+            bridge_map = {"1": "none", "2": "obfs4", "3": "snowflake"}
             new_bridge = bridge_map.get(bridge_choice, "none")
             if new_bridge != "none" and not use_tor:
                 auth_manager.set_user_tor_preference(username, True)

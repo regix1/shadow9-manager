@@ -134,7 +134,7 @@ def register_util_commands(app: typer.Typer):
             "[bold cyan]Shadow9 Automated Setup[/bold cyan]\n\n"
             "This will install and configure:\n"
             "- Tor daemon\n"
-            "- obfs4proxy (for obfs4 and meek-azure bridges)\n"
+            "- obfs4proxy (for obfs4 bridges)\n"
             "- snowflake-client (for snowflake bridges)\n\n"
             "[dim]Some operations require sudo privileges[/dim]",
             title="Setup",

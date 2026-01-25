@@ -146,14 +146,8 @@ def _prompt_bridge() -> str:
     console.print("     Routes through volunteer browser proxies via WebRTC.")
     console.print("     [dim]Best for: When obfs4 is blocked, dynamic endpoints[/dim]\n")
     
-    console.print("  [cyan]4. meek-azure[/cyan]")
-    console.print("     Tunnels through Microsoft Azure cloud (ajax.aspnetcdn.com).")
-    console.print("     Traffic appears as normal HTTPS to Microsoft CDN.")
-    console.print("     [dim]Best for: Heavily censored networks (China, Iran)[/dim]")
-    console.print("     [dim]Note: Slowest option due to cloud routing overhead[/dim]\n")
-    
-    bridge_choice = typer.prompt("  Select bridge [1-4]", default="1")
-    bridge_map = {"1": "none", "2": "obfs4", "3": "snowflake", "4": "meek"}
+    bridge_choice = typer.prompt("  Select bridge [1-3]", default="1")
+    bridge_map = {"1": "none", "2": "obfs4", "3": "snowflake"}
     return bridge_map.get(bridge_choice, "none")
 
 
@@ -223,8 +217,7 @@ def _show_summary(username: str, password: str, use_tor: bool, bridge_type: str,
     console.print(f"  Password:  [cyan]{'*' * len(password)}[/cyan]")
     console.print(f"  Routing:   [cyan]{'Tor' if use_tor else 'Direct'}[/cyan]")
     if use_tor and bridge_type != "none":
-        bridge_display = "meek-azure" if bridge_type == "meek" else bridge_type
-        console.print(f"  Bridge:    [cyan]{bridge_display}[/cyan]")
+        console.print(f"  Bridge:    [cyan]{bridge_type}[/cyan]")
     console.print(f"  Security:  [cyan]{security_level}[/cyan]")
     if allowed_ports:
         console.print(f"  Ports:     [cyan]{', '.join(map(str, allowed_ports))}[/cyan]")

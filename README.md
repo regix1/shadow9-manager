@@ -6,7 +6,7 @@ A secure SOCKS5 proxy server with Tor routing, per-user settings, and DPI bypass
 
 - **SOCKS5 Proxy** - RFC 1928/1929 compliant with authentication
 - **Per-User Tor Routing** - Each user gets isolated Tor circuits
-- **Bridge Support** - obfs4, snowflake, meek to hide Tor usage
+- **Bridge Support** - obfs4, snowflake to hide Tor usage
 - **DPI Bypass** - Multiple security levels for restrictive networks
 - **Per-User Ports** - Dedicated listener ports per user
 
@@ -66,7 +66,7 @@ Create users with custom settings:
 | Option | Flag | Values | Default |
 |--------|------|--------|---------|
 | Tor Routing | `--tor/--no-tor` | - | `--tor` |
-| Bridge | `--bridge` | none, obfs4, snowflake, meek | none |
+| Bridge | `--bridge` | none, obfs4, snowflake | none |
 | Security | `--security` | none, basic, moderate, paranoid | basic |
 | Ports | `--ports` | comma-separated or "all" | all |
 | Rate Limit | `--rate-limit` | requests/min | unlimited |
@@ -88,7 +88,6 @@ Create users with custom settings:
 | none | Unrestricted networks |
 | obfs4 | ISPs blocking Tor |
 | snowflake | Heavy censorship |
-| meek | Extreme censorship (Azure CDN) |
 
 ## Per-User Ports
 
