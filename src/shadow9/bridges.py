@@ -284,6 +284,25 @@ class PluggableTransportManager:
             f"SocksPort {socks_port}",
             "UseBridges 1",
         ]
+        
+        # Performance and timeout tuning for bridges (especially snowflake)
+        # These settings help reduce connection timeouts on slow/constrained links
+        lines.extend([
+            # Disable adaptive timeout learning, use fixed values
+            "LearnCircuitBuildTimeout 0",
+            # Higher timeout for bridges (snowflake is slow) - default is 60
+            "CircuitBuildTimeout 120",
+            # Stream timeout before trying new circuit
+            "CircuitStreamTimeout 60",
+            # Keep connections alive
+            "KeepalivePeriod 60",
+            # Retry failed connections more aggressively  
+            "NewCircuitPeriod 15",
+            # Don't give up on slow circuits too quickly
+            "CloseHSClientCircuitsImmediatelyOnTimeout 0",
+            # Connection padding helps with stability
+            "ConnectionPadding 1",
+        ])
 
         # Add control port for bootstrap monitoring
         if control_port > 0:
@@ -397,8 +416,10 @@ class TorBridgeConnector:
         """
         Start a Tor process configured with bridges.
         
-        For snowflake bridges, this will try each bridge in SNOWFLAKE_BRIDGES
-        until one successfully bootstraps.
+        For snowflake bridges, this will:
+        1. Run a quick speed test on all bridges (measure time to reach 15%)
+        2. Sort bridges by speed (fastest first)
+        3. Try to fully connect using the fastest bridges first
 
         Returns:
             Tuple of (socks_host, socks_port)
@@ -418,18 +439,45 @@ class TorBridgeConnector:
             # No fallback list, use default behavior
             return await self._try_single_bridge(None)
         
-        # Try each bridge until one works
+        # Phase 1: Speed test all bridges
+        print(f"\n  Testing {len(fallback_bridges)} bridges for speed...")
+        bridge_speeds = await self._test_bridge_speeds(fallback_bridges)
+        
+        # Sort by speed (fastest first), failed bridges at the end
+        sorted_bridges = sorted(
+            bridge_speeds,
+            key=lambda x: x[1] if x[1] is not None else float('inf')
+        )
+        
+        # Show speed test results
+        print("\n  Speed test results:")
+        for bridge, speed in sorted_bridges:
+            bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+            if speed is not None:
+                print(f"    {bridge_name}: {speed:.1f}s to 15%")
+            else:
+                print(f"    {bridge_name}: failed/timeout")
+        
+        # Filter to only working bridges
+        working_bridges = [(b, s) for b, s in sorted_bridges if s is not None]
+        
+        if not working_bridges:
+            raise RuntimeError("All bridges failed speed test - none could reach 15% bootstrap")
+        
+        print(f"\n  Connecting using fastest bridge...")
+        
+        # Phase 2: Try to fully connect using sorted bridges (fastest first)
         last_error = None
-        for i, bridge in enumerate(fallback_bridges):
+        for i, (bridge, speed) in enumerate(working_bridges):
             bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
             logger.info(
-                f"Trying bridge {i+1}/{len(fallback_bridges)}: {bridge_name}",
+                f"Connecting with bridge {i+1}/{len(working_bridges)}: {bridge_name} ({speed:.1f}s)",
                 bridge_type=self.config.bridge_type.value
             )
-            print(f"  Trying bridge {i+1}/{len(fallback_bridges)}: {bridge_name}")
+            print(f"  Trying {bridge_name} (ranked #{i+1} by speed)...")
             
             try:
-                result = await self._try_single_bridge(bridge, timeout=120)  # 2 min per bridge
+                result = await self._try_single_bridge(bridge, timeout=180)  # 3 min for full connect
                 self._current_bridge = bridge
                 logger.info(f"Successfully connected using bridge: {bridge_name}")
                 print(f"  ✓ Connected using: {bridge_name}")
@@ -443,7 +491,130 @@ class TorBridgeConnector:
                 continue
         
         # All bridges failed
-        raise RuntimeError(f"All {len(fallback_bridges)} bridges failed to connect. Last error: {last_error}")
+        raise RuntimeError(f"All {len(working_bridges)} bridges failed to connect. Last error: {last_error}")
+
+    async def _test_bridge_speeds(self, bridges: List[Bridge]) -> List[tuple[Bridge, Optional[float]]]:
+        """
+        Test multiple bridges in parallel and measure time to reach 15% bootstrap.
+        
+        Returns:
+            List of (bridge, time_to_15_percent) tuples. time is None if failed.
+        """
+        import time as time_module
+        
+        results = []
+        test_timeout = 30  # 30 seconds max per bridge for speed test
+        target_progress = 15  # Target bootstrap percentage for speed test
+        
+        for bridge in bridges:
+            bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+            print(f"    Testing {bridge_name}...", end=" ", flush=True)
+            
+            start_time = time_module.time()
+            speed = await self._quick_bridge_test(bridge, test_timeout, target_progress)
+            
+            if speed is not None:
+                print(f"{speed:.1f}s")
+            else:
+                print("timeout/failed")
+            
+            results.append((bridge, speed))
+        
+        return results
+
+    async def _quick_bridge_test(self, bridge: Bridge, timeout: int, target_progress: int) -> Optional[float]:
+        """
+        Quick test a bridge - measure time to reach target bootstrap percentage.
+        
+        Returns:
+            Time in seconds to reach target_progress, or None if failed/timeout.
+        """
+        import re
+        import time as time_module
+        
+        temp_dir = None
+        tor_process = None
+        
+        try:
+            # Create temp directory
+            temp_dir = tempfile.TemporaryDirectory(prefix="shadow9_test_")
+            data_dir = Path(temp_dir.name)
+            
+            # Use a different port for testing to avoid conflicts
+            test_port = self.socks_port + 100 + hash(bridge.address) % 100
+            
+            # Generate torrc
+            torrc_content = self.pt_manager.generate_torrc(
+                data_dir, 
+                test_port,
+                specific_bridge=bridge
+            )
+            
+            # Add log file
+            log_file = data_dir / "tor.log"
+            torrc_content += f"\nLog notice file {log_file}"
+            
+            torrc_path = data_dir / "torrc"
+            torrc_path.write_text(torrc_content)
+            
+            # Find tor binary
+            tor_path = shutil.which("tor")
+            if not tor_path:
+                return None
+            
+            # Start Tor process
+            tor_process = subprocess.Popen(
+                [tor_path, "-f", str(torrc_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            
+            start_time = time_module.time()
+            log_position = 0
+            
+            while True:
+                elapsed = time_module.time() - start_time
+                if elapsed > timeout:
+                    return None  # Timeout
+                
+                if tor_process.poll() is not None:
+                    return None  # Process died
+                
+                # Check log file for bootstrap progress
+                try:
+                    if log_file.exists():
+                        with open(log_file, 'r') as f:
+                            f.seek(log_position)
+                            new_content = f.read()
+                            log_position = f.tell()
+                            
+                            for line in new_content.splitlines():
+                                if 'Bootstrapped' in line:
+                                    match = re.search(r'Bootstrapped (\d+)%', line)
+                                    if match:
+                                        progress = int(match.group(1))
+                                        if progress >= target_progress:
+                                            return time_module.time() - start_time
+                except Exception:
+                    pass
+                
+                await asyncio.sleep(0.5)
+                
+        except Exception:
+            return None
+        finally:
+            # Cleanup
+            if tor_process:
+                tor_process.terminate()
+                try:
+                    tor_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    tor_process.kill()
+            if temp_dir:
+                try:
+                    temp_dir.cleanup()
+                except Exception:
+                    pass
 
     async def _try_single_bridge(self, bridge: Optional[Bridge], timeout: int = 180) -> tuple[str, int]:
         """
@@ -528,12 +699,22 @@ class TorBridgeConnector:
 
         start_time = asyncio.get_event_loop().time()
         last_progress = 0
+        last_progress_time = start_time
         log_position = 0
+        stall_timeout = 60  # If no progress for 60s, consider it stalled
 
         while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
+            current_time = asyncio.get_event_loop().time()
+            elapsed = current_time - start_time
+            time_since_progress = current_time - last_progress_time
+            
+            # Check for overall timeout
             if elapsed > timeout:
                 raise RuntimeError(f"Tor bootstrap timeout after {timeout}s (last progress: {last_progress}%)")
+            
+            # Check for stall - no progress for stall_timeout seconds
+            if time_since_progress > stall_timeout and last_progress < 90:
+                raise RuntimeError(f"Tor bootstrap stalled at {last_progress}% (no progress for {stall_timeout}s)")
 
             if self._tor_process.poll() is not None:
                 stderr = self._tor_process.stderr.read().decode() if self._tor_process.stderr else ""
@@ -555,12 +736,18 @@ class TorBridgeConnector:
                                     progress = int(match.group(1))
                                     if progress != last_progress:
                                         last_progress = progress
+                                        last_progress_time = current_time  # Reset stall timer
                                         logger.info(f"Tor bootstrap: {progress}%")
                                     if progress >= 100:
                                         # Give it a moment to fully stabilize
                                         await asyncio.sleep(1)
                                         logger.info("Tor bootstrap complete", socks_port=self.socks_port)
                                         return
+                            
+                            # Check for error messages that indicate bridge issues
+                            if 'WARN' in line and ('timeout' in line.lower() or 'failed' in line.lower()):
+                                logger.debug(f"Tor warning: {line.strip()}")
+                                
                 except Exception as e:
                     logger.debug(f"Error reading log file: {e}")
 
@@ -573,7 +760,7 @@ class TorBridgeConnector:
                     )
                     writer.close()
                     await writer.wait_closed()
-                    if last_progress >= 95:  # Close enough
+                    if last_progress >= 90:  # Accept 90% as good enough
                         logger.info("Tor bootstrap complete (connection test)", socks_port=self.socks_port)
                         return
                 except (ConnectionRefusedError, asyncio.TimeoutError):
