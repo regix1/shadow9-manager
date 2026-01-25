@@ -28,8 +28,98 @@ echo -e "${NC}"
 chmod +x "$SCRIPT_DIR/shadow9" 2>/dev/null || true
 chmod +x "$SCRIPT_DIR/setup" 2>/dev/null || true
 
+# Function to check if running as root
+is_root() {
+    [ "$EUID" -eq 0 ] || [ "$(id -u)" -eq 0 ]
+}
+
+# Function to run commands with sudo if needed
+run_privileged() {
+    if is_root; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+# Function to detect OS and install system dependencies
+install_system_deps() {
+    echo -e "${CYAN}[1/7]${NC} Installing system dependencies..."
+    
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        OS_LIKE=$ID_LIKE
+    elif [ -f /etc/debian_version ]; then
+        OS="debian"
+    elif [ -f /etc/redhat-release ]; then
+        OS="rhel"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        OS="macos"
+    else
+        OS="unknown"
+    fi
+    
+    case "$OS" in
+        ubuntu|debian|linuxmint|pop)
+            echo -e "${CYAN}Detected Debian/Ubuntu-based system${NC}"
+            run_privileged apt-get update -qq
+            run_privileged apt-get install -y -qq python3 python3-pip python3-venv python3-dev curl 2>/dev/null
+            echo -e "${GREEN}[OK] System packages installed${NC}"
+            ;;
+        fedora)
+            echo -e "${CYAN}Detected Fedora${NC}"
+            run_privileged dnf install -y -q python3 python3-pip python3-devel curl 2>/dev/null
+            echo -e "${GREEN}[OK] System packages installed${NC}"
+            ;;
+        centos|rhel|rocky|almalinux)
+            echo -e "${CYAN}Detected RHEL-based system${NC}"
+            run_privileged yum install -y -q python3 python3-pip python3-devel curl 2>/dev/null
+            echo -e "${GREEN}[OK] System packages installed${NC}"
+            ;;
+        arch|manjaro)
+            echo -e "${CYAN}Detected Arch-based system${NC}"
+            run_privileged pacman -Sy --noconfirm --quiet python python-pip curl 2>/dev/null
+            echo -e "${GREEN}[OK] System packages installed${NC}"
+            ;;
+        alpine)
+            echo -e "${CYAN}Detected Alpine Linux${NC}"
+            run_privileged apk add --quiet python3 py3-pip python3-dev curl 2>/dev/null
+            echo -e "${GREEN}[OK] System packages installed${NC}"
+            ;;
+        macos)
+            echo -e "${CYAN}Detected macOS${NC}"
+            if command -v brew &> /dev/null; then
+                brew install python3 2>/dev/null || true
+                echo -e "${GREEN}[OK] System packages installed${NC}"
+            else
+                echo -e "${YELLOW}[INFO] Homebrew not found. Please install Python manually.${NC}"
+            fi
+            ;;
+        *)
+            # Try to detect based on ID_LIKE
+            if [[ "$OS_LIKE" == *"debian"* ]]; then
+                run_privileged apt-get update -qq
+                run_privileged apt-get install -y -qq python3 python3-pip python3-venv python3-dev curl 2>/dev/null
+                echo -e "${GREEN}[OK] System packages installed${NC}"
+            elif [[ "$OS_LIKE" == *"rhel"* ]] || [[ "$OS_LIKE" == *"fedora"* ]]; then
+                run_privileged yum install -y -q python3 python3-pip python3-devel curl 2>/dev/null || \
+                run_privileged dnf install -y -q python3 python3-pip python3-devel curl 2>/dev/null
+                echo -e "${GREEN}[OK] System packages installed${NC}"
+            else
+                echo -e "${YELLOW}[WARN] Unknown OS: $OS. Skipping system package installation.${NC}"
+                echo -e "${YELLOW}       Make sure python3, pip, and venv are installed.${NC}"
+            fi
+            ;;
+    esac
+}
+
+# Install system dependencies first
+install_system_deps
+
 # Check Python version
-echo -e "${CYAN}[1/6]${NC} Checking Python version..."
+echo -e "\n${CYAN}[2/7]${NC} Checking Python version..."
 if ! command -v python3 &> /dev/null; then
     if ! command -v python &> /dev/null; then
         echo -e "${RED}[ERROR] Python 3.10+ is required but not found.${NC}"
@@ -52,7 +142,7 @@ fi
 echo -e "${GREEN}[OK] Python $PYTHON_VERSION found${NC}"
 
 # Create virtual environment
-echo -e "\n${CYAN}[2/6]${NC} Setting up virtual environment..."
+echo -e "\n${CYAN}[3/7]${NC} Setting up virtual environment..."
 if [ ! -d "venv" ]; then
     $PYTHON_CMD -m venv venv
     echo -e "${GREEN}[OK] Virtual environment created${NC}"
@@ -64,7 +154,7 @@ fi
 source venv/bin/activate
 
 # Install dependencies
-echo -e "\n${CYAN}[3/6]${NC} Installing dependencies..."
+echo -e "\n${CYAN}[4/7]${NC} Installing dependencies..."
 pip install --upgrade pip -q
 pip install -e . -q
 echo -e "${GREEN}[OK] Dependencies installed${NC}"
@@ -73,7 +163,7 @@ echo -e "${GREEN}[OK] Dependencies installed${NC}"
 mkdir -p config
 
 # Generate master key (only if not exists)
-echo -e "\n${CYAN}[4/6]${NC} Checking encryption key..."
+echo -e "\n${CYAN}[5/7]${NC} Checking encryption key..."
 
 if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
     # Load existing key
@@ -97,7 +187,7 @@ EOF
 fi
 
 # Install shadow9 globally
-echo -e "\n${CYAN}[5/6]${NC} Installing shadow9 command..."
+echo -e "\n${CYAN}[6/7]${NC} Installing shadow9 command..."
 
 # Determine install location
 if [ -d "$HOME/.local/bin" ]; then
@@ -146,7 +236,7 @@ else
 fi
 
 # Create first user (only if no users exist)
-echo -e "\n${CYAN}[6/6]${NC} Checking users..."
+echo -e "\n${CYAN}[7/7]${NC} Checking users..."
 echo ""
 
 # Export the master key for the Python process
