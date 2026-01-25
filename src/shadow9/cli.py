@@ -26,6 +26,7 @@ app = typer.Typer(
     help="Shadow9 Manager - Secure SOCKS5 Proxy with Tor Support",
     add_completion=True,
     rich_markup_mode="rich",
+    no_args_is_help=True,
 )
 
 

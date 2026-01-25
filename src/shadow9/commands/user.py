@@ -40,7 +40,11 @@ class BridgeChoice(str, Enum):
 def register_user_commands(app: typer.Typer):
     """Register user subcommands with the app."""
     
-    user_app = typer.Typer(help="Manage proxy users.")
+    user_app = typer.Typer(
+        help="Manage proxy users.",
+        invoke_without_command=True,
+        no_args_is_help=True,
+    )
     app.add_typer(user_app, name="user")
 
     @user_app.command("add")
