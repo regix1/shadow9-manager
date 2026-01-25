@@ -158,18 +158,35 @@ SNOWFLAKE_BRIDGES = [SNOWFLAKE_BRIDGE_AZURE, SNOWFLAKE_BRIDGE_FASTLY]
 # Backwards compatibility alias
 SNOWFLAKE_BRIDGE = SNOWFLAKE_BRIDGE_AZURE
 
-# Meek bridge (CDN77-based, replaces deprecated Azure bridge as of Jan 2025)
-# Azure stopped supporting domain fronting, so Tor switched to CDN77
-MEEK_AZURE_BRIDGE = Bridge(
+# Meek bridges (multiple options for reliability)
+# Primary: Azure (still working as of Dec 2025)
+MEEK_BRIDGE_AZURE = Bridge(
     type=BridgeType.MEEK_AZURE,
-    address="192.0.2.20:80",  # Standard meek address
-    fingerprint="",  # CDN77 bridge doesn't use fingerprint
+    address="192.0.2.18:80",
+    fingerprint="BE776A53492E1E044A26F17306E1BC46A55A1625",
+    params={
+        "url": "https://meek.azureedge.net/",
+        "front": "ajax.aspnetcdn.com"
+    }
+)
+
+# Fallback: CDN77-based meek
+MEEK_BRIDGE_CDN77 = Bridge(
+    type=BridgeType.MEEK_AZURE,
+    address="192.0.2.20:80",
+    fingerprint="",
     params={
         "url": "https://1314488750.rsc.cdn77.org",
         "front": "www.phpmyadmin.net",
         "utls": "HelloRandomizedALPN"
     }
 )
+
+# All meek bridges for fallback
+MEEK_BRIDGES = [MEEK_BRIDGE_AZURE, MEEK_BRIDGE_CDN77]
+
+# Backwards compatibility alias
+MEEK_AZURE_BRIDGE = MEEK_BRIDGE_AZURE
 
 
 class PluggableTransportManager:
@@ -259,7 +276,7 @@ class PluggableTransportManager:
             elif self.config.bridge_type == BridgeType.SNOWFLAKE:
                 bridges = SNOWFLAKE_BRIDGES  # Use multiple bridges for fallback
             elif self.config.bridge_type == BridgeType.MEEK_AZURE:
-                bridges = [MEEK_AZURE_BRIDGE]
+                bridges = MEEK_BRIDGES  # Use multiple bridges for fallback
             else:
                 bridges = []
         else:
