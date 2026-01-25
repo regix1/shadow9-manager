@@ -5,6 +5,7 @@ Contains init, check-tor, fetch, setup, status, and update commands.
 """
 
 import asyncio
+import shutil
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -279,26 +280,29 @@ def register_util_commands(app: typer.Typer):
                 if script_path.exists():
                     script_path.chmod(0o755)
 
-            # Reinstall package using venv pip
+            # Reinstall package using system pip
             console.print("[>] Reinstalling package...")
-            venv_dir = script_dir / "venv"
-            if sys.platform == "win32":
-                venv_pip = venv_dir / "Scripts" / "pip.exe"
-            else:
-                venv_pip = venv_dir / "bin" / "pip"
-
-            if venv_pip.exists():
+            
+            # Determine pip command and args
+            pip_cmd = "pip3" if shutil.which("pip3") else "pip"
+            pip_args = ["--break-system-packages"] if sys.version_info >= (3, 11) else []
+            
+            result = subprocess.run(
+                [pip_cmd, "install"] + pip_args + ["-e", ".", "-q"],
+                cwd=script_dir,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                # Try without --break-system-packages if it failed
                 result = subprocess.run(
-                    [str(venv_pip), "install", "-e", ".", "-q"],
+                    [pip_cmd, "install", "-e", ".", "-q"],
                     cwd=script_dir,
                     capture_output=True,
                     text=True
                 )
                 if result.returncode != 0:
                     console.print(f"[yellow]Warning: pip install failed: {result.stderr}[/yellow]")
-            else:
-                console.print("[yellow]Warning: Virtual environment not found, skipping reinstall[/yellow]")
-                console.print("[dim]Run ./setup to create the virtual environment[/dim]")
 
             console.print("\n[green][OK] Shadow9 updated successfully![/green]")
 
@@ -316,7 +320,7 @@ def register_util_commands(app: typer.Typer):
                 )
                 console.print("[green][OK] Server restarted![/green]")
             else:
-                console.print("[dim]Server was not running. Start with: ./shadow9 serve[/dim]")
+                console.print("[dim]Server was not running. Start with: shadow9 serve[/dim]")
 
         except FileNotFoundError:
             console.print("[red]Error: git not found. Please install git.[/red]")
