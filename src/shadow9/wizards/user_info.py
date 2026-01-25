@@ -4,15 +4,12 @@ Interactive user info wizard for Shadow9.
 Provides an interactive menu for viewing user details.
 """
 
-from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from ..auth import AuthManager
-from ..config import Config
 
 console = Console()
 

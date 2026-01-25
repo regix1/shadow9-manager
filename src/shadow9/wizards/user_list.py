@@ -4,15 +4,11 @@ Interactive user list wizard for Shadow9.
 Provides an interactive menu for browsing and managing users.
 """
 
-from pathlib import Path
-from typing import Optional, List
 
 import typer
 from rich.console import Console
-from rich.table import Table
 
 from ..auth import AuthManager
-from ..config import Config
 from .user_info import display_user_info
 
 console = Console()

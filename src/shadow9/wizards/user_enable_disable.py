@@ -4,14 +4,12 @@ Interactive user enable/disable wizards for Shadow9.
 Provides interactive menus for enabling and disabling users.
 """
 
-from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
 import typer
 from rich.console import Console
 
 from ..auth import AuthManager
-from ..config import Config
 
 console = Console()
 
@@ -36,7 +34,7 @@ def run_user_enable_wizard(
         return False
 
     # Get disabled users only
-    disabled_users = [u for u in users if auth_manager.get_user_enabled(u) == False]
+    disabled_users = [u for u in users if not auth_manager.get_user_enabled(u)]
 
     # Interactive mode if no username provided
     if username is None:
@@ -52,8 +50,8 @@ def run_user_enable_wizard(
             routing = "Tor" if use_tor else "Direct"
             console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
 
-        console.print(f"  [cyan]A.[/cyan] [green]Enable ALL disabled users[/green]")
-        console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+        console.print("  [cyan]A.[/cyan] [green]Enable ALL disabled users[/green]")
+        console.print("  [cyan]Q.[/cyan] Cancel\n")
 
         choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
 
@@ -108,7 +106,7 @@ def run_user_disable_wizard(
         return False
 
     # Get enabled users only
-    enabled_users = [u for u in users if auth_manager.get_user_enabled(u) == True]
+    enabled_users = [u for u in users if auth_manager.get_user_enabled(u)]
 
     # Interactive mode if no username provided
     if username is None:
@@ -124,8 +122,8 @@ def run_user_disable_wizard(
             routing = "Tor" if use_tor else "Direct"
             console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
 
-        console.print(f"  [cyan]A.[/cyan] [red]Disable ALL enabled users[/red]")
-        console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+        console.print("  [cyan]A.[/cyan] [red]Disable ALL enabled users[/red]")
+        console.print("  [cyan]Q.[/cyan] Cancel\n")
 
         choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
 

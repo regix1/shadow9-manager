@@ -11,11 +11,8 @@ import subprocess
 import shutil
 import platform
 import os
-import sys
-import tempfile
-import urllib.request
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Tuple
 from dataclasses import dataclass
 from enum import Enum
 

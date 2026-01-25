@@ -5,7 +5,7 @@ Provides a step-by-step guided process for creating new proxy users.
 """
 
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, List
 
 import typer
 from rich.console import Console

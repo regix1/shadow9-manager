@@ -237,7 +237,7 @@ class Shadow9Paths:
         """
         from datetime import datetime
         
-        user_dir = self.ensure_user_dir(username)
+        self.ensure_user_dir(username)
         cred_file = self.get_user_credentials_file(username)
         
         content = f"""Shadow9 User Credentials

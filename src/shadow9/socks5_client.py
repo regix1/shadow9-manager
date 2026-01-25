@@ -8,9 +8,8 @@ with username/password authentication support.
 import asyncio
 import socket
 import struct
-from typing import Optional, Union
+from typing import Optional
 from dataclasses import dataclass
-from enum import IntEnum
 
 import structlog
 
@@ -104,7 +103,7 @@ class Socks5Client:
 
         except asyncio.TimeoutError:
             raise Socks5ConnectionError("Connection timeout")
-        except Exception as e:
+        except Exception:
             await self.close()
             raise
 

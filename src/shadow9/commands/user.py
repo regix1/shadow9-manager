@@ -187,7 +187,7 @@ def register_user_commands(app: typer.Typer):
 
             # Build info string
             info_lines = [
-                f"[bold green]New user created:[/bold green]\n",
+                "[bold green]New user created:[/bold green]\n",
                 f"Username: [cyan]{final_username}[/cyan]",
                 f"Password: [cyan]{final_password}[/cyan]",
                 f"Routing: [cyan]{routing}[/cyan]",
@@ -231,6 +231,9 @@ def register_user_commands(app: typer.Typer):
                 console.print(f"[dim]User folder: {paths.get_user_dir(final_username)}[/dim]")
                 console.print("[dim]Keep this folder secure![/dim]")
 
+            # Service restart hint
+            console.print("\n[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
@@ -272,6 +275,7 @@ def register_user_commands(app: typer.Typer):
                 paths.delete_user_dir(user)
                 console.print(f"[dim]Removed: {user}[/dim]")
             console.print(f"[green]All {len(users)} users removed[/green]")
+            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
             return
 
         # Interactive mode if no username provided
@@ -284,8 +288,8 @@ def register_user_commands(app: typer.Typer):
                 routing = "Tor" if use_tor else "Direct"
                 console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
             
-            console.print(f"  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
-            console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+            console.print("  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
+            console.print("  [cyan]Q.[/cyan] Cancel\n")
             
             choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
             
@@ -306,6 +310,7 @@ def register_user_commands(app: typer.Typer):
                     paths.delete_user_dir(user)
                     console.print(f"[dim]Removed: {user}[/dim]")
                 console.print(f"[green]All {len(users)} users removed[/green]")
+                console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
                 return
             
             # Handle number selection
@@ -332,6 +337,7 @@ def register_user_commands(app: typer.Typer):
             if paths.delete_user_dir(username):
                 console.print(f"[dim]Deleted user folder: {paths.get_user_dir(username)}[/dim]")
             console.print(f"[green]User '{username}' removed[/green]")
+            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
         else:
             console.print(f"[red]User '{username}' not found[/red]")
 
@@ -531,6 +537,7 @@ def register_user_commands(app: typer.Typer):
             console.print(f"[green]User '{username}' updated:[/green]")
             for change in changes:
                 console.print(f"  - {change}")
+            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
         else:
             console.print("[yellow]No changes specified.[/yellow]")
             console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit, --bind-port[/dim]")
@@ -556,7 +563,7 @@ def register_user_commands(app: typer.Typer):
             return
 
         # Get disabled users only
-        disabled_users = [u for u in users if auth_manager.get_user_enabled(u) == False]
+        disabled_users = [u for u in users if not auth_manager.get_user_enabled(u)]
 
         # Interactive mode if no username provided
         if username is None:
@@ -572,8 +579,8 @@ def register_user_commands(app: typer.Typer):
                 routing = "Tor" if use_tor else "Direct"
                 console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
 
-            console.print(f"  [cyan]A.[/cyan] [green]Enable ALL disabled users[/green]")
-            console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+            console.print("  [cyan]A.[/cyan] [green]Enable ALL disabled users[/green]")
+            console.print("  [cyan]Q.[/cyan] Cancel\n")
 
             choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
 
@@ -586,6 +593,7 @@ def register_user_commands(app: typer.Typer):
                     auth_manager.set_user_enabled(user, True)
                     console.print(f"[dim]Enabled: {user}[/dim]")
                 console.print(f"[green]All {len(disabled_users)} users enabled[/green]")
+                console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
                 return
 
             # Handle number selection
@@ -602,6 +610,7 @@ def register_user_commands(app: typer.Typer):
 
         if auth_manager.set_user_enabled(username, True):
             console.print(f"[green]User '{username}' enabled[/green]")
+            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
         else:
             console.print(f"[red]User '{username}' not found[/red]")
 
@@ -626,7 +635,7 @@ def register_user_commands(app: typer.Typer):
             return
 
         # Get enabled users only
-        enabled_users = [u for u in users if auth_manager.get_user_enabled(u) == True]
+        enabled_users = [u for u in users if auth_manager.get_user_enabled(u)]
 
         # Interactive mode if no username provided
         if username is None:
@@ -642,8 +651,8 @@ def register_user_commands(app: typer.Typer):
                 routing = "Tor" if use_tor else "Direct"
                 console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
 
-            console.print(f"  [cyan]A.[/cyan] [red]Disable ALL enabled users[/red]")
-            console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+            console.print("  [cyan]A.[/cyan] [red]Disable ALL enabled users[/red]")
+            console.print("  [cyan]Q.[/cyan] Cancel\n")
 
             choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
 
@@ -656,6 +665,7 @@ def register_user_commands(app: typer.Typer):
                     auth_manager.set_user_enabled(user, False)
                     console.print(f"[dim]Disabled: {user}[/dim]")
                 console.print(f"[yellow]All {len(enabled_users)} users disabled[/yellow]")
+                console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
                 return
 
             # Handle number selection
@@ -672,6 +682,7 @@ def register_user_commands(app: typer.Typer):
 
         if auth_manager.set_user_enabled(username, False):
             console.print(f"[yellow]User '{username}' disabled[/yellow]")
+            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
         else:
             console.print(f"[red]User '{username}' not found[/red]")
 

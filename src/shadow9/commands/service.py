@@ -15,7 +15,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from ..paths import get_paths, get_root
+from ..paths import get_paths
 
 console = Console()
 
@@ -134,7 +134,7 @@ WantedBy=multi-user.target
             if global_cmd:
                 symlink_path.symlink_to(shadow9_script)
                 console.print(f"[green]Installed global command: {symlink_path}[/green]")
-                global_note = f"\n\nGlobal command: [cyan]shadow9[/cyan] (available system-wide)"
+                global_note = "\n\nGlobal command: [cyan]shadow9[/cyan] (available system-wide)"
 
         console.print(Panel(
             f"[bold green]Service installed![/bold green]\n\n"
@@ -192,7 +192,7 @@ WantedBy=multi-user.target
         if result.returncode == 0:
             console.print("[green]Service started[/green]")
         else:
-            console.print(f"[red]Failed to start service[/red]")
+            console.print("[red]Failed to start service[/red]")
             console.print(f"[dim]{result.stderr}[/dim]")
             raise typer.Exit(1)
 
@@ -207,7 +207,7 @@ WantedBy=multi-user.target
         if result.returncode == 0:
             console.print("[green]Service stopped[/green]")
         else:
-            console.print(f"[red]Failed to stop service[/red]")
+            console.print("[red]Failed to stop service[/red]")
             raise typer.Exit(1)
 
     @service_app.command("restart")
@@ -221,7 +221,7 @@ WantedBy=multi-user.target
         if result.returncode == 0:
             console.print("[green]Service restarted[/green]")
         else:
-            console.print(f"[red]Failed to restart service[/red]")
+            console.print("[red]Failed to restart service[/red]")
             raise typer.Exit(1)
 
     @service_app.command("enable")
@@ -235,7 +235,7 @@ WantedBy=multi-user.target
         if result.returncode == 0:
             console.print("[green]Service enabled (will start on boot)[/green]")
         else:
-            console.print(f"[red]Failed to enable service[/red]")
+            console.print("[red]Failed to enable service[/red]")
             raise typer.Exit(1)
 
     @service_app.command("disable")
@@ -249,7 +249,7 @@ WantedBy=multi-user.target
         if result.returncode == 0:
             console.print("[green]Service disabled (won't start on boot)[/green]")
         else:
-            console.print(f"[red]Failed to disable service[/red]")
+            console.print("[red]Failed to disable service[/red]")
             raise typer.Exit(1)
 
     @service_app.command("status")

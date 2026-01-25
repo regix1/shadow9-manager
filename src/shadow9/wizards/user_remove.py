@@ -4,14 +4,12 @@ Interactive user removal wizard for Shadow9.
 Provides an interactive menu for selecting and removing users.
 """
 
-from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
 
 from ..auth import AuthManager
-from ..config import Config
 from ..paths import get_paths
 
 console = Console()
@@ -67,8 +65,8 @@ def run_user_remove_wizard(
             routing = "Tor" if use_tor else "Direct"
             console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
         
-        console.print(f"  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
-        console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+        console.print("  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
+        console.print("  [cyan]Q.[/cyan] Cancel\n")
         
         choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
         

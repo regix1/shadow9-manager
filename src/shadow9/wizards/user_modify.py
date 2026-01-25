@@ -110,6 +110,7 @@ def run_user_modify_wizard(config_path: str = "config/config.yaml", preselected_
             title="Summary",
             border_style="green"
         ))
+        console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
     else:
         console.print("[yellow]No changes were made.[/yellow]")
 

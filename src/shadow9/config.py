@@ -7,7 +7,7 @@ Provides secure configuration loading, validation, and storage.
 import os
 import secrets
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional
 from dataclasses import dataclass, field, asdict
 
 import yaml

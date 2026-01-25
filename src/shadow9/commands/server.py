@@ -193,7 +193,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
                     tor_connectors.append(tor_connector)
                     console.print(f"  [green]✓[/green] System Tor: {proxy[0]}:{proxy[1]}")
                 else:
-                    console.print(f"  [red]✗[/red] Failed to connect to system Tor")
+                    console.print("  [red]✗[/red] Failed to connect to system Tor")
                     console.print(f"    [dim]{TorConnector.get_tor_install_instructions()}[/dim]")
             else:
                 # Use bridge connector (starts separate Tor process)
@@ -223,25 +223,30 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
         
         if upstream_proxies:
             console.print(Panel(
-                f"[bold green]Tor Instances Running[/bold green]\n\n" +
+                "[bold green]Tor Instances Running[/bold green]\n\n" +
                 "\n".join([
                     f"[cyan]{bt}[/cyan]: {h}:{p}" 
                     for bt, (h, p) in upstream_proxies.items()
                 ]) +
-                f"\n\n[dim]Each user routes through their configured bridge type[/dim]",
+                "\n\n[dim]Each user routes through their configured bridge type[/dim]",
                 title="Tor Status",
                 border_style="green"
             ))
         else:
             console.print("\n[yellow]Warning: No Tor instances available - Tor users will fail![/yellow]")
 
-    # Create SOCKS5 server with per-bridge proxies
+    # Calculate base port for dynamic bridge creation (after static bridges)
+    # Static bridges start at 9051, so dynamic ones start after them
+    dynamic_bridge_base_port = 9051 + len(bridge_connectors) + 10  # +10 buffer
+    
+    # Create SOCKS5 server with per-bridge proxies and dynamic creation support
     server = Socks5Server(
         host=cfg.server.host,
         port=cfg.server.port,
         auth_manager=auth_manager,
         upstream_proxy=default_proxy,
         upstream_proxies=upstream_proxies,
+        bridge_base_port=dynamic_bridge_base_port,
     )
 
     # Connection monitoring callback
@@ -315,7 +320,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
         
         # User-specific ports section
         if user_listener_lines:
-            port_section = f"\n\n[bold]Per-User Ports:[/bold]\n" + "\n".join(user_listener_lines)
+            port_section = "\n\n[bold]Per-User Ports:[/bold]\n" + "\n".join(user_listener_lines)
         else:
             port_section = ""
         

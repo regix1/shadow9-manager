@@ -15,12 +15,9 @@ Techniques:
 
 import asyncio
 import ssl
-import struct
 import secrets
-import socket
-import platform
 from pathlib import Path
-from typing import Optional, Callable, Awaitable
+from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
@@ -447,9 +444,9 @@ class SecureTransport:
             return reader, writer
 
         if server_side:
-            ssl_context = self.tls_wrapper.create_server_context()
+            self.tls_wrapper.create_server_context()
         else:
-            ssl_context = self.tls_wrapper.create_client_context()
+            self.tls_wrapper.create_client_context()
 
         # This requires upgrading the transport to TLS
         # For server-side, this is done at accept time

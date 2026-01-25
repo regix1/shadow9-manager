@@ -4,8 +4,6 @@ Interactive initialization wizard for Shadow9.
 Provides an interactive configuration builder for initial setup.
 """
 
-from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console

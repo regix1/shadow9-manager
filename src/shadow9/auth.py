@@ -6,8 +6,6 @@ and secure token generation.
 """
 
 import secrets
-import hashlib
-import hmac
 import json
 import os
 import threading
@@ -98,7 +96,14 @@ class AuthManager:
         self._pending_save = False
         self._save_thread: Optional[threading.Thread] = None
 
+        # Track file modification time for hot-reload
+        self._last_mtime: float = 0.0
+
         self._load_credentials()
+        
+        # Record initial mtime after loading
+        if self.credentials_file.exists():
+            self._last_mtime = self.credentials_file.stat().st_mtime
 
     def _derive_fernet_key(self, master_key: str) -> Fernet:
         """Derive a Fernet key from the master key using PBKDF2."""
@@ -149,6 +154,33 @@ class AuthManager:
         except Exception as e:
             logger.error("Failed to load credentials", error=str(e))
             raise
+
+    def reload_credentials(self) -> bool:
+        """
+        Reload credentials from file if it has been modified.
+        
+        This enables hot-reload of credentials when new users are added
+        via CLI while the service is running.
+        
+        Returns:
+            True if credentials were reloaded, False if no changes detected
+        """
+        if not self.credentials_file.exists():
+            return False
+        
+        try:
+            current_mtime = self.credentials_file.stat().st_mtime
+            if current_mtime > self._last_mtime:
+                logger.info("Credentials file changed, reloading", 
+                           old_mtime=self._last_mtime, new_mtime=current_mtime)
+                self._credentials.clear()
+                self._load_credentials()
+                self._last_mtime = current_mtime
+                return True
+        except Exception as e:
+            logger.error("Failed to check/reload credentials", error=str(e))
+        
+        return False
 
     def _save_credentials(self) -> None:
         """Save credentials to encrypted file (blocking)."""
@@ -284,6 +316,8 @@ class AuthManager:
         Verify username and password combination.
 
         Uses constant-time comparison to prevent timing attacks.
+        Automatically reloads credentials if the file has been modified
+        (enables hot-reload when users are added via CLI).
 
         Args:
             username: The username to verify
@@ -292,6 +326,9 @@ class AuthManager:
         Returns:
             True if credentials are valid, False otherwise
         """
+        # Check for credential file updates (hot-reload for new users)
+        self.reload_credentials()
+        
         if username not in self._credentials:
             # Perform dummy hash to prevent timing attacks
             self._hasher.hash("dummy_password_for_timing")

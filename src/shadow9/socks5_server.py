@@ -11,12 +11,13 @@ import struct
 from enum import IntEnum
 from dataclasses import dataclass
 from typing import Optional, Callable, Awaitable
-from ipaddress import ip_address, IPv4Address, IPv6Address
+from ipaddress import ip_address
 
 import structlog
 
 from .auth import AuthManager
 from .security import SecurityLevel, get_security_preset, DPIBypass
+from .bridges import TorBridgeConnector, BridgeConfig, BridgeType
 
 logger = structlog.get_logger(__name__)
 
@@ -97,6 +98,7 @@ class Socks5Server:
         upstream_proxy: Optional[tuple[str, int]] = None,
         upstream_proxies: Optional[dict[str, tuple[str, int]]] = None,
         allowed_commands: Optional[set[Socks5Command]] = None,
+        bridge_base_port: int = 9100,
     ):
         """
         Initialize the SOCKS5 server.
@@ -108,6 +110,7 @@ class Socks5Server:
             upstream_proxy: Optional default upstream SOCKS5 proxy (host, port)
             upstream_proxies: Optional dict of bridge_type -> (host, port) for per-bridge proxies
             allowed_commands: Set of allowed SOCKS5 commands (default: CONNECT only)
+            bridge_base_port: Base port for dynamically created Tor bridge instances
         """
         self.host = host
         self.port = port
@@ -115,6 +118,7 @@ class Socks5Server:
         self.upstream_proxy = upstream_proxy
         self.upstream_proxies = upstream_proxies or {}
         self.allowed_commands = allowed_commands or {Socks5Command.CONNECT}
+        self._bridge_base_port = bridge_base_port
 
         self._server: Optional[asyncio.Server] = None
         self._connections: dict[str, ConnectionInfo] = {}
@@ -125,6 +129,11 @@ class Socks5Server:
 
         # User-specific listeners: port -> (server, username)
         self._user_listeners: dict[int, tuple[asyncio.Server, str]] = {}
+        
+        # Dynamic bridge creation support
+        self._bridge_lock = asyncio.Lock()
+        self._dynamic_connectors: list[TorBridgeConnector] = []
+        self._next_bridge_port = bridge_base_port
 
     def _make_user_handler(self, allowed_user: str):
         """Create a client handler that only allows a specific user."""
@@ -214,6 +223,15 @@ class Socks5Server:
             await server.wait_closed()
             logger.info("User listener stopped", username=username, port=port)
         self._user_listeners.clear()
+
+        # Stop all dynamically created Tor bridge connectors
+        for connector in self._dynamic_connectors:
+            try:
+                await connector.stop()
+                logger.info("Dynamic Tor connector stopped")
+            except Exception as e:
+                logger.warning("Error stopping dynamic connector", error=str(e))
+        self._dynamic_connectors.clear()
 
         # Flush any pending credential saves
         if self.auth_manager:
@@ -318,12 +336,14 @@ class Socks5Server:
             use_tor = conn_info.use_tor
 
             # Select the appropriate upstream proxy based on bridge type
-            # Priority: bridge-specific proxy > default proxy > direct
+            # Priority: bridge-specific proxy (or create dynamically) > default proxy > direct
             upstream_proxy = None
             if use_tor:
-                if bridge_type in self.upstream_proxies:
-                    upstream_proxy = self.upstream_proxies[bridge_type]
-                elif self.upstream_proxy:
+                # Try to get existing proxy or create a new Tor instance dynamically
+                upstream_proxy = await self._get_or_create_bridge_proxy(bridge_type)
+                
+                # If dynamic creation failed, fall back to default proxy
+                if upstream_proxy is None and self.upstream_proxy:
                     upstream_proxy = self.upstream_proxy
 
             # Connect to target (directly or via upstream proxy based on user preference)
@@ -707,6 +727,96 @@ class Socks5Server:
             await reader.readexactly(16 + 2)
 
         return reader, writer
+
+    async def _get_or_create_bridge_proxy(
+        self, 
+        bridge_type: str
+    ) -> Optional[tuple[str, int]]:
+        """
+        Get existing proxy for bridge_type or create a new Tor instance on demand.
+        
+        This method enables dynamic Tor instance creation when a user connects with
+        a bridge_type that wasn't configured at server startup.
+        
+        Args:
+            bridge_type: The bridge type string (e.g., "snowflake", "obfs4", "none")
+            
+        Returns:
+            Tuple of (socks_host, socks_port) for the upstream proxy, or None if creation failed
+        """
+        # Check if we already have a proxy for this bridge type
+        if bridge_type in self.upstream_proxies:
+            return self.upstream_proxies[bridge_type]
+        
+        # Acquire lock to prevent multiple concurrent creations of the same bridge type
+        async with self._bridge_lock:
+            # Double-check after acquiring lock (another task may have created it)
+            if bridge_type in self.upstream_proxies:
+                return self.upstream_proxies[bridge_type]
+            
+            # Don't try to create "none" bridge type dynamically - requires system Tor
+            if bridge_type == "none":
+                logger.warning(
+                    "Cannot create 'none' bridge type dynamically - requires system Tor",
+                    bridge_type=bridge_type
+                )
+                return self.upstream_proxy  # Fall back to default if available
+            
+            # Try to parse the bridge type
+            try:
+                bridge_enum = BridgeType(bridge_type)
+            except ValueError:
+                logger.error(
+                    "Unknown bridge type, cannot create dynamically",
+                    bridge_type=bridge_type
+                )
+                return None
+            
+            # Allocate a new port for this bridge
+            bridge_port = self._next_bridge_port
+            self._next_bridge_port += 1
+            
+            logger.info(
+                "Creating dynamic Tor instance for new bridge type",
+                bridge_type=bridge_type,
+                port=bridge_port
+            )
+            
+            # Create and start the bridge connector
+            bridge_config = BridgeConfig(
+                enabled=True,
+                bridge_type=bridge_enum,
+                use_builtin_bridges=True,
+            )
+            connector = TorBridgeConnector(bridge_config, socks_port=bridge_port)
+            
+            try:
+                socks_host, socks_port = await connector.start_tor_with_bridges()
+                
+                # Store the connector for cleanup and cache the proxy
+                self._dynamic_connectors.append(connector)
+                self.upstream_proxies[bridge_type] = (socks_host, socks_port)
+                
+                logger.info(
+                    "Dynamic Tor instance created successfully",
+                    bridge_type=bridge_type,
+                    proxy=f"{socks_host}:{socks_port}"
+                )
+                
+                return (socks_host, socks_port)
+                
+            except Exception as e:
+                logger.error(
+                    "Failed to create dynamic Tor instance",
+                    bridge_type=bridge_type,
+                    error=str(e)
+                )
+                # Cleanup on failure
+                try:
+                    await connector.stop()
+                except Exception:
+                    pass
+                return None
 
     async def _relay(
         self,

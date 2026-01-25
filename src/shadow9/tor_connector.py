@@ -8,16 +8,14 @@ Supports .onion address resolution and circuit management.
 import asyncio
 import socket
 import struct
-import subprocess
 import platform
 import shutil
-from pathlib import Path
 from typing import Optional, Callable, Awaitable
 from dataclasses import dataclass
 from enum import Enum
 
 import structlog
-from aiohttp_socks import ProxyConnector, ProxyType
+from aiohttp_socks import ProxyConnector
 import aiohttp
 
 logger = structlog.get_logger(__name__)

@@ -3,61 +3,34 @@ Tor Bridge and Pluggable Transport Support for Shadow9.
 
 Provides stealth Tor connectivity using:
 - obfs4 bridges (most effective against DPI)
-
 - snowflake bridges (uses WebRTC)
 - webtunnel bridges (looks like HTTPS)
 
 This hides the fact that you're using Tor from network observers.
+
+Bridge configurations are in bridge_list.py
 """
 
 import asyncio
 import subprocess
 import shutil
 import tempfile
-import os
 import platform
 from pathlib import Path
 from typing import Optional, List
 from dataclasses import dataclass, field
-from enum import Enum
 
 import structlog
 
+# Import bridge types and configurations from separate file
+from .bridge_list import (
+    BridgeType,
+    Bridge,
+    BUILTIN_OBFS4_BRIDGES,
+    SNOWFLAKE_BRIDGES,
+)
+
 logger = structlog.get_logger(__name__)
-
-
-class BridgeType(Enum):
-    """Supported bridge/pluggable transport types."""
-    NONE = "none"           # Direct Tor connection (detectable)
-    OBFS4 = "obfs4"         # Obfuscated traffic (recommended)
-    SNOWFLAKE = "snowflake" # Uses WebRTC peers
-    WEBTUNNEL = "webtunnel" # Looks like HTTPS to allowed domains
-
-
-@dataclass
-class Bridge:
-    """Represents a Tor bridge configuration."""
-    type: BridgeType
-    address: str           # IP:Port or domain
-    fingerprint: str       # Bridge fingerprint
-    params: dict = field(default_factory=dict)  # Transport-specific params (cert, iat-mode, etc.)
-
-    def to_bridge_line(self) -> str:
-        """Convert to torrc bridge line format."""
-        if self.type == BridgeType.NONE:
-            return ""
-
-        # Format: Bridge <transport> <address> <fingerprint> <params>
-        parts = [self.type.value, self.address]
-
-        if self.fingerprint:
-            parts.append(self.fingerprint)
-
-        # Add transport-specific parameters
-        for key, value in self.params.items():
-            parts.append(f"{key}={value}")
-
-        return "Bridge " + " ".join(parts)
 
 
 @dataclass
@@ -75,148 +48,6 @@ class BridgeConfig:
     # Use built-in bridges (requires no configuration)
     use_builtin_bridges: bool = True
 
-
-# Built-in obfs4 bridges (public bridges from Tor Project)
-# These are updated periodically - for production, get fresh bridges from https://bridges.torproject.org
-BUILTIN_OBFS4_BRIDGES = [
-    Bridge(
-        type=BridgeType.OBFS4,
-        address="193.11.166.194:27025",
-        fingerprint="1AE039EE0B11DB79E4B4B29ABA3C647B40B7B280",
-        params={
-            "cert": "4JeU2x3EsSphNCqGEMLhOGCQBsLvRPOdDmOGudvPL2qKSn+DCDJuFilndkvF0XhFOQ0qHA",
-            "iat-mode": "0"
-        }
-    ),
-    Bridge(
-        type=BridgeType.OBFS4,
-        address="38.229.33.83:80",
-        fingerprint="0BAC39417268B96B9F514E7F63FA6FBA1A788955",
-        params={
-            "cert": "VwEFpk9F/UN9JED7XpG1XOjm/O8ZCXK80oPecgWnNDZDv5pdkhq1OpbAH0wNqOT6H6BmRQ",
-            "iat-mode": "1"
-        }
-    ),
-    Bridge(
-        type=BridgeType.OBFS4,
-        address="193.11.166.194:27020",
-        fingerprint="86AC7B8D430DAC4117E9F42C9EAED18133863AAF",
-        params={
-            "cert": "0aKPMOYUDaYRIVddHfxRHG9q2jJsxEWLqnqCs2wMpfNSwLcJB4lGydBRL7wABs7zGcFk0Q",
-            "iat-mode": "0"
-        }
-    ),
-]
-
-# Built-in snowflake configurations (multiple options for reliability)
-# Updated January 2025 - fixes bootstrap issues from March 2024
-# See: https://forum.torproject.org/t/fix-problems-with-snowflake-since-2024-03-01-broker-failure-unexpected-error-no-answer/11755
-# See: https://github.com/net4people/bbs/issues/338
-
-# Common STUN servers (from official Tor Browser build)
-_STUN_SERVERS = ",".join([
-    "stun:stun.l.google.com:19302",
-    "stun:stun.antisip.com:3478",
-    "stun:stun.bluesip.net:3478",
-    "stun:stun.dus.net:3478",
-    "stun:stun.epygi.com:3478",
-    "stun:stun.sonetel.com:3478",
-    "stun:stun.uls.co.za:3478",
-    "stun:stun.voipgate.com:3478",
-    "stun:stun.voys.nl:3478"
-])
-
-# Primary: CDN77 (official Tor Project choice as of 2025)
-SNOWFLAKE_BRIDGE_CDN77 = Bridge(
-    type=BridgeType.SNOWFLAKE,
-    address="192.0.2.3:80",  # Dummy address, snowflake uses STUN/TURN
-    fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
-    params={
-        "url": "https://1098762253.rsc.cdn77.org/",
-        "front": "www.phpmyadmin.net",
-        "ice": _STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
-)
-
-# CDN77 with alternative front domain
-SNOWFLAKE_BRIDGE_CDN77_ALT = Bridge(
-    type=BridgeType.SNOWFLAKE,
-    address="192.0.2.4:80",
-    fingerprint="8838024498816A039FCBBAB14E6F40A0843051FA",
-    params={
-        "url": "https://1098762253.rsc.cdn77.org/",
-        "front": "docs.plesk.com",
-        "ice": _STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
-)
-
-# AMP Cache with Google fronting (good alternative)
-SNOWFLAKE_BRIDGE_AMP = Bridge(
-    type=BridgeType.SNOWFLAKE,
-    address="192.0.2.5:80",
-    fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
-    params={
-        "url": "https://snowflake-broker.torproject.net/",
-        "ampcache": "https://cdn.ampproject.org/",
-        "front": "www.google.com",
-        "ice": _STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
-)
-
-# Fastly with Shazam fronting
-SNOWFLAKE_BRIDGE_FASTLY_SHAZAM = Bridge(
-    type=BridgeType.SNOWFLAKE,
-    address="192.0.2.6:80",
-    fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
-    params={
-        "url": "https://snowflake-broker.torproject.net.global.prod.fastly.net/",
-        "front": "www.shazam.com",
-        "ice": _STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
-)
-
-# Fastly with Foursquare fronting
-SNOWFLAKE_BRIDGE_FASTLY_FOURSQUARE = Bridge(
-    type=BridgeType.SNOWFLAKE,
-    address="192.0.2.7:80",
-    fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
-    params={
-        "url": "https://snowflake-broker.torproject.net.global.prod.fastly.net/",
-        "front": "foursquare.com",
-        "ice": _STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
-)
-
-# Bunny CDN (Triplebit private broker - independent infrastructure)
-SNOWFLAKE_BRIDGE_BUNNY = Bridge(
-    type=BridgeType.SNOWFLAKE,
-    address="10.0.3.1:80",
-    fingerprint="53B65F538F5E9A5FA6DFE5D75C78CB66C5515EF7",
-    params={
-        "url": "https://triplebit-snowflake-broker.b-cdn.net/",
-        "front": "www.bunny.net",
-        "ice": _STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
-)
-
-# All snowflake bridges for fallback (ordered by reliability)
-SNOWFLAKE_BRIDGES = [
-    SNOWFLAKE_BRIDGE_CDN77,           # Primary - official Tor choice
-    SNOWFLAKE_BRIDGE_CDN77_ALT,       # CDN77 alt front
-    SNOWFLAKE_BRIDGE_AMP,             # Google AMP cache
-    SNOWFLAKE_BRIDGE_FASTLY_SHAZAM,   # Fastly + Shazam
-    SNOWFLAKE_BRIDGE_FASTLY_FOURSQUARE,  # Fastly + Foursquare
-    SNOWFLAKE_BRIDGE_BUNNY,           # Bunny CDN (independent)
-]
-
-# Backwards compatibility alias (now points to CDN77)
-SNOWFLAKE_BRIDGE = SNOWFLAKE_BRIDGE_CDN77
 
 class PluggableTransportManager:
     """
@@ -464,7 +295,7 @@ class TorBridgeConnector:
         if not working_bridges:
             raise RuntimeError("All bridges failed speed test - none could reach 15% bootstrap")
         
-        print(f"\n  Connecting using fastest bridge...")
+        print("\n  Connecting using fastest bridge...")
         
         # Phase 2: Try to fully connect using sorted bridges (fastest first)
         last_error = None
@@ -500,7 +331,6 @@ class TorBridgeConnector:
         Returns:
             List of (bridge, time_to_15_percent) tuples. time is None if failed.
         """
-        import time as time_module
         
         results = []
         test_timeout = 30  # 30 seconds max per bridge for speed test
@@ -510,7 +340,6 @@ class TorBridgeConnector:
             bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
             print(f"    Testing {bridge_name}...", end=" ", flush=True)
             
-            start_time = time_module.time()
             speed = await self._quick_bridge_test(bridge, test_timeout, target_progress)
             
             if speed is not None:

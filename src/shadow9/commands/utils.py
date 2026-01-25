@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-from ..config import Config, generate_default_config
+from ..config import generate_default_config
 from ..tor_connector import TorConnector, TorConfig
 from ..wizards import run_init_wizard, show_config_summary, show_master_key
 
@@ -476,7 +476,7 @@ async def _fetch(url: str, tor_port: int):
     tor = TorConnector(config)
 
     try:
-        console.print(f"[cyan]Connecting to Tor...[/cyan]")
+        console.print("[cyan]Connecting to Tor...[/cyan]")
         if not await tor.connect():
             console.print("[red]Failed to connect to Tor[/red]")
             return
