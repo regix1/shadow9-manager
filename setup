@@ -44,7 +44,7 @@ run_privileged() {
 
 # Function to detect OS and install system dependencies
 install_system_deps() {
-    echo -e "${CYAN}[1/7]${NC} Installing system dependencies..."
+    echo -e "${CYAN}[1/6]${NC} Installing system dependencies..."
     
     # Detect OS
     if [ -f /etc/os-release ]; then
@@ -119,7 +119,7 @@ install_system_deps() {
 install_system_deps
 
 # Check Python version
-echo -e "\n${CYAN}[2/7]${NC} Checking Python version..."
+echo -e "\n${CYAN}[2/6]${NC} Checking Python version..."
 if ! command -v python3 &> /dev/null; then
     if ! command -v python &> /dev/null; then
         echo -e "${RED}[ERROR] Python 3.10+ is required but not found.${NC}"
@@ -142,7 +142,7 @@ fi
 echo -e "${GREEN}[OK] Python $PYTHON_VERSION found${NC}"
 
 # Create virtual environment
-echo -e "\n${CYAN}[3/7]${NC} Setting up virtual environment..."
+echo -e "\n${CYAN}[3/6]${NC} Setting up virtual environment..."
 if [ ! -d "venv" ]; then
     $PYTHON_CMD -m venv venv
     echo -e "${GREEN}[OK] Virtual environment created${NC}"
@@ -154,7 +154,7 @@ fi
 source venv/bin/activate
 
 # Install dependencies
-echo -e "\n${CYAN}[4/7]${NC} Installing dependencies..."
+echo -e "\n${CYAN}[4/6]${NC} Installing dependencies..."
 pip install --upgrade pip -q
 pip install -e . -q
 echo -e "${GREEN}[OK] Dependencies installed${NC}"
@@ -163,7 +163,7 @@ echo -e "${GREEN}[OK] Dependencies installed${NC}"
 mkdir -p config
 
 # Generate master key (only if not exists)
-echo -e "\n${CYAN}[5/7]${NC} Checking encryption key..."
+echo -e "\n${CYAN}[5/6]${NC} Checking encryption key..."
 
 if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
     # Load existing key
@@ -183,11 +183,10 @@ EOF
     chmod 600 .env
 
     echo -e "${GREEN}[OK] Master key generated and saved to .env${NC}"
-    echo -e "${YELLOW}[INFO] IMPORTANT: Keep this key safe!${NC}"
 fi
 
 # Install shadow9 globally
-echo -e "\n${CYAN}[6/7]${NC} Installing shadow9 command..."
+echo -e "\n${CYAN}[6/6]${NC} Installing shadow9 command..."
 
 # Determine install location
 if [ -d "$HOME/.local/bin" ]; then
@@ -235,90 +234,19 @@ else
     echo -e "${YELLOW}[INFO] Run 'shadow9 --install-completion' after restarting terminal${NC}"
 fi
 
-# Create first user (only if no users exist)
-echo -e "\n${CYAN}[7/7]${NC} Checking users..."
-echo ""
-
-# Export the master key for the Python process
-export SHADOW9_MASTER_KEY="$MASTER_KEY"
-
-# Run user creation
-python -c "
-import os
-import sys
-sys.path.insert(0, 'src')
-
-from pathlib import Path
-from shadow9.auth import AuthManager
-
-creds_file = Path('config/credentials.enc')
-
-try:
-    auth = AuthManager(
-        credentials_file=creds_file,
-        master_key=os.environ.get('SHADOW9_MASTER_KEY')
-    )
-
-    existing_users = auth.list_users()
-    if existing_users:
-        print(f'[INFO] Found {len(existing_users)} existing user(s): {\", \".join(existing_users)}')
-        print('[INFO] Skipping user creation. Use: shadow9 user add <username>')
-    else:
-        username, password = auth.generate_credentials()
-        auth.add_user(username, password, use_tor=True)
-        print('''
-============================================================
-                    Your Credentials
-------------------------------------------------------------
-  Username: ''' + username + '''
-  Password: ''' + password + '''
-------------------------------------------------------------
-  [!] SAVE THESE NOW! They will not be shown again.
-============================================================
-''')
-
-except Exception as e:
-    if 'InvalidToken' in str(type(e).__name__) or 'InvalidToken' in str(e) or creds_file.exists():
-        print('[WARN] Credentials file corrupted. Creating fresh...')
-        if creds_file.exists():
-            creds_file.unlink()
-
-        auth = AuthManager(
-            credentials_file=creds_file,
-            master_key=os.environ.get('SHADOW9_MASTER_KEY')
-        )
-        username, password = auth.generate_credentials()
-        auth.add_user(username, password, use_tor=True)
-        print('''
-============================================================
-                    Your Credentials
-------------------------------------------------------------
-  Username: ''' + username + '''
-  Password: ''' + password + '''
-------------------------------------------------------------
-  [!] SAVE THESE NOW! They will not be shown again.
-============================================================
-''')
-    else:
-        raise
-"
-
 echo -e "${GREEN}"
 echo "============================================================"
 echo "                    Setup Complete!                         "
 echo "------------------------------------------------------------"
-echo "  Start the server (from anywhere):                         "
+echo "  1. Create a user:                                         "
+echo "     shadow9 user generate                                  "
+echo "                                                            "
+echo "  2. Start the server:                                      "
 echo "     shadow9 serve                                          "
 echo "                                                            "
-echo "  Configure your app to use SOCKS5 proxy:                   "
-echo "     Host: 127.0.0.1                                        "
-echo "     Port: 1080                                             "
-echo "     Auth: Use the credentials above                        "
+echo "  3. Connect your app (SOCKS5 proxy):                       "
+echo "     Host: 0.0.0.0    Port: 1080                            "
 echo "                                                            "
-echo "  Tab completion: restart your terminal, then try:          "
-echo "     shadow9 [TAB][TAB]                                     "
-echo "                                                            "
-echo "  For more options:                                         "
-echo "     shadow9 --help                                         "
+echo "  For more options: shadow9 --help                          "
 echo "============================================================"
 echo -e "${NC}"
