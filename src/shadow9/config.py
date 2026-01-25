@@ -98,7 +98,6 @@ class Config:
 
                 if data:
                     config = cls._from_dict(data)
-                    logger.info("Loaded configuration", file=str(config_file))
 
             except Exception as e:
                 logger.error("Failed to load config", file=str(config_file), error=str(e))
@@ -240,7 +239,7 @@ def setup_logging(config: LogConfig) -> None:
     if config.format == "json":
         processors.append(structlog.processors.JSONRenderer())
     else:
-        processors.append(structlog.dev.ConsoleRenderer(colors=True, pad_event=0))
+        processors.append(structlog.dev.ConsoleRenderer(colors=True, pad_event=0, pad_level=False))
 
     structlog.configure(
         processors=processors,

@@ -94,12 +94,50 @@ def serve(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     host: Annotated[Optional[str], typer.Option("--host", "-h", help="Host to bind to")] = None,
     port: Annotated[Optional[int], typer.Option("--port", "-p", help="Port to listen on")] = None,
+    background: Annotated[bool, typer.Option("--background", "-b", help="Run server in background")] = False,
     interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Run interactive configuration")] = False,
 ):
     """Start the SOCKS5 proxy server.
     
     User settings control Tor routing, bridges, and security levels.
     """
+    # Handle background mode
+    if background:
+        import subprocess
+        import sys
+        
+        # Build command without --background flag
+        cmd = [sys.executable, "-m", "shadow9", "serve"]
+        if config != "config/config.yaml":
+            cmd.extend(["--config", config])
+        if host:
+            cmd.extend(["--host", host])
+        if port:
+            cmd.extend(["--port", str(port)])
+        
+        # Start detached process
+        if sys.platform == "win32":
+            # Windows: use CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(
+                cmd,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            # Unix: use nohup-style daemonization
+            subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        
+        console.print(f"[green]Server started in background[/green]")
+        console.print(f"[dim]Host: {host or '127.0.0.1'}:{port or 1080}[/dim]")
+        console.print(f"[dim]To stop: shadow9 stop (or kill the process)[/dim]")
+        return
+    
     # Run interactive mode if requested or no host/port provided
     if interactive or (host is None and port is None):
         if not interactive:
@@ -115,6 +153,54 @@ def serve(
                 raise typer.Abort()
     
     asyncio.run(_serve(config, host, port))
+
+
+@app.command()
+def stop(
+    port: Annotated[int, typer.Option("--port", "-p", help="Port the server is running on")] = 1080,
+):
+    """Stop a running Shadow9 server."""
+    import subprocess
+    
+    if sys.platform == "win32":
+        # Windows: find and kill process by port
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True
+            )
+            for line in result.stdout.splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = parts[-1]
+                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                    console.print(f"[green]Stopped server on port {port} (PID {pid})[/green]")
+                    return
+            console.print(f"[yellow]No server found on port {port}[/yellow]")
+        except Exception as e:
+            console.print(f"[red]Error stopping server: {e}[/red]")
+    else:
+        # Unix: use lsof/fuser to find and kill
+        try:
+            result = subprocess.run(
+                ["lsof", "-t", f"-i:{port}"],
+                capture_output=True,
+                text=True
+            )
+            if result.stdout.strip():
+                pid = result.stdout.strip().split()[0]
+                subprocess.run(["kill", pid])
+                console.print(f"[green]Stopped server on port {port} (PID {pid})[/green]")
+            else:
+                console.print(f"[yellow]No server found on port {port}[/yellow]")
+        except FileNotFoundError:
+            # lsof not available, try fuser
+            try:
+                subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
+                console.print(f"[green]Stopped server on port {port}[/green]")
+            except Exception as e:
+                console.print(f"[red]Error stopping server: {e}[/red]")
 
 
 async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
@@ -240,12 +326,11 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
 
         tor_status = "Available" if upstream_proxy else "Not connected"
         console.print(Panel(
-            f"[bold green]SOCKS5 Server Running[/bold green]\n\n"
+            f"[bold green]SOCKS5 Server Running[/bold green]\n"
             f"Listen: [cyan]{cfg.server.host}:{cfg.server.port}[/cyan]\n"
-            f"Tor: [cyan]{tor_status}[/cyan]\n"
-            f"Auth: [cyan]Username/Password Required[/cyan]\n\n"
-            f"[dim]Routing and security controlled by user settings.[/dim]\n"
-            f"[dim]Press Ctrl+C to stop[/dim]",
+            f"Tor:    [cyan]{tor_status}[/cyan]\n"
+            f"Auth:   [cyan]Username/Password[/cyan]\n\n"
+            f"[dim]Routing controlled by user settings. Press Ctrl+C to stop.[/dim]",
             title="Shadow9 Manager",
             border_style="green"
         ))
