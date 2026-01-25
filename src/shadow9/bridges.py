@@ -303,7 +303,7 @@ class TorBridgeConnector:
                 else:
                     print(f"    {bridge_name}: failed/timeout")
         else:
-            # Run speedtests and cache the results
+            # Run speedtests
             print(f"\n  Testing {len(fallback_bridges)} bridges for speed...")
             bridge_speeds = await self._test_bridge_speeds(fallback_bridges)
             
@@ -313,10 +313,6 @@ class TorBridgeConnector:
                 key=lambda x: x[1] if x[1] is not None else float('inf')
             )
             
-            # Cache the sorted results
-            _bridge_speedtest_cache[cache_key] = sorted_bridges
-            logger.info(f"Cached speedtest results for bridge type: {cache_key}")
-            
             # Show speed test results
             print("\n  Speed test results:")
             for bridge, speed in sorted_bridges:
@@ -325,6 +321,14 @@ class TorBridgeConnector:
                     print(f"    {bridge_name}: {speed:.1f}s to 15%")
                 else:
                     print(f"    {bridge_name}: failed/timeout")
+            
+            # Only cache if at least one bridge succeeded
+            working_count = sum(1 for _, s in sorted_bridges if s is not None)
+            if working_count > 0:
+                _bridge_speedtest_cache[cache_key] = sorted_bridges
+                logger.info(f"Cached speedtest results for bridge type: {cache_key}")
+            else:
+                logger.warning(f"Not caching speedtest results - all {len(sorted_bridges)} bridges failed")
         
         # Filter to only working bridges
         working_bridges = [(b, s) for b, s in sorted_bridges if s is not None]
@@ -400,6 +404,7 @@ class TorBridgeConnector:
         
         temp_dir = None
         tor_process = None
+        bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
         
         try:
             # Create temp directory
@@ -426,6 +431,7 @@ class TorBridgeConnector:
             # Find tor binary
             tor_path = shutil.which("tor")
             if not tor_path:
+                logger.debug(f"Bridge test failed for {bridge_name}: tor binary not found")
                 return None
             
             # Start Tor process
@@ -441,9 +447,19 @@ class TorBridgeConnector:
             while True:
                 elapsed = time_module.time() - start_time
                 if elapsed > timeout:
+                    logger.debug(f"Bridge test timeout for {bridge_name} after {elapsed:.1f}s")
                     return None  # Timeout
                 
-                if tor_process.poll() is not None:
+                poll_result = tor_process.poll()
+                if poll_result is not None:
+                    # Process died - try to get stderr for diagnostics
+                    stderr_output = ""
+                    try:
+                        _, stderr = tor_process.communicate(timeout=1)
+                        stderr_output = stderr.decode('utf-8', errors='ignore')[:200]
+                    except Exception:
+                        pass
+                    logger.debug(f"Bridge test failed for {bridge_name}: Tor process exited with code {poll_result}. stderr: {stderr_output}")
                     return None  # Process died
                 
                 # Check log file for bootstrap progress
@@ -461,12 +477,13 @@ class TorBridgeConnector:
                                         progress = int(match.group(1))
                                         if progress >= target_progress:
                                             return time_module.time() - start_time
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error reading log file for {bridge_name}: {e}")
                 
                 await asyncio.sleep(0.5)
                 
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Bridge test exception for {bridge_name}: {type(e).__name__}: {e}")
             return None
         finally:
             # Cleanup
