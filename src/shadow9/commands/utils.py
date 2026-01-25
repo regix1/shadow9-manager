@@ -261,6 +261,21 @@ def register_util_commands(app: typer.Typer):
                 console.print(f"[red]Error fetching: {result.stderr}[/red]")
                 return
 
+            # Check if setup script will change (before reset)
+            setup_changed = False
+            try:
+                result = subprocess.run(
+                    ["git", "diff", "HEAD", "origin/main", "--name-only"],
+                    cwd=script_dir,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    changed_files = result.stdout.strip().split('\n')
+                    setup_changed = 'setup' in changed_files
+            except Exception:
+                pass
+
             # Force reset to origin/main
             console.print("[>] Applying updates...")
             result = subprocess.run(
@@ -321,6 +336,23 @@ def register_util_commands(app: typer.Typer):
                 console.print("[green][OK] Server restarted![/green]")
             else:
                 console.print("[dim]Server was not running. Start with: shadow9 serve[/dim]")
+
+            # Ask if user wants to run setup script
+            console.print("")
+            if setup_changed:
+                prompt_text = "Would you like to run the setup script? [Y/n] [green](recommended - setup changed)[/green]: "
+            else:
+                prompt_text = "Would you like to run the setup script? [y/N]: "
+            
+            run_setup = typer.prompt(prompt_text, default="y" if setup_changed else "n", show_default=False)
+            
+            if run_setup.lower() in ('y', 'yes'):
+                console.print("\n[cyan]Running setup script...[/cyan]\n")
+                setup_script = script_dir / "setup"
+                if setup_script.exists():
+                    subprocess.run([str(setup_script)], cwd=script_dir)
+                else:
+                    console.print("[red]Error: setup script not found[/red]")
 
         except FileNotFoundError:
             console.print("[red]Error: git not found. Please install git.[/red]")
