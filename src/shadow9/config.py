@@ -13,6 +13,41 @@ from dataclasses import dataclass, field, asdict
 import yaml
 import structlog
 
+# Configure structlog early with consistent formatting
+# This ensures all logs have the same format even before setup_logging() is called
+def _configure_default_logging():
+    """Configure structlog with default settings."""
+    import logging
+    
+    def uppercase_log_level(logger, method_name, event_dict):
+        if "level" in event_dict:
+            event_dict["level"] = event_dict["level"].upper()
+        return event_dict
+    
+    processors = [
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        uppercase_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.UnicodeDecoder(),
+        structlog.dev.ConsoleRenderer(colors=True, pad_event=0, pad_level=False),
+    ]
+    
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.stdlib.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=False,  # Allow reconfiguration
+    )
+    
+    logging.basicConfig(format="%(message)s", level=logging.INFO)
+
+_configure_default_logging()
+
 logger = structlog.get_logger(__name__)
 
 
