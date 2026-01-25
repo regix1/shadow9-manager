@@ -101,10 +101,23 @@ def serve(
     
     User settings control Tor routing, bridges, and security levels.
     """
+    # Run interactive mode if requested or no host/port provided
+    if interactive or (host is None and port is None and not background):
+        if not interactive:
+            console.print("\n[dim]No host/port specified. Use -i for interactive or provide --host/--port.[/dim]")
+            if not typer.confirm("Run with defaults (127.0.0.1:1080)?", default=True):
+                interactive = True
+        
+        if interactive:
+            host, port, background = run_serve_wizard()
+            show_serve_preview(host, port, background)
+            if not typer.confirm("\nStart server?", default=True):
+                console.print("[yellow]Cancelled[/yellow]")
+                raise typer.Abort()
+    
     # Handle background mode
     if background:
         import subprocess
-        import sys
         
         # Build command without --background flag
         cmd = [sys.executable, "-m", "shadow9", "serve"]
@@ -135,22 +148,8 @@ def serve(
         
         console.print(f"[green]Server started in background[/green]")
         console.print(f"[dim]Host: {host or '127.0.0.1'}:{port or 1080}[/dim]")
-        console.print(f"[dim]To stop: shadow9 stop (or kill the process)[/dim]")
+        console.print(f"[dim]To stop: shadow9 stop[/dim]")
         return
-    
-    # Run interactive mode if requested or no host/port provided
-    if interactive or (host is None and port is None):
-        if not interactive:
-            console.print("\n[dim]No host/port specified. Use -i for interactive or provide --host/--port.[/dim]")
-            if not typer.confirm("Run with defaults (127.0.0.1:1080)?", default=True):
-                interactive = True
-        
-        if interactive:
-            host, port = run_serve_wizard()
-            show_serve_preview(host, port)
-            if not typer.confirm("\nStart server?", default=True):
-                console.print("[yellow]Cancelled[/yellow]")
-                raise typer.Abort()
     
     asyncio.run(_serve(config, host, port))
 

@@ -4,7 +4,7 @@ Interactive serve configuration wizard for Shadow9.
 Provides an interactive menu for configuring server host/port options.
 """
 
-from typing import Tuple, Optional
+from typing import Tuple
 
 import typer
 from rich.console import Console
@@ -13,7 +13,7 @@ from rich.panel import Panel
 console = Console()
 
 
-def run_serve_wizard(default_host: str = "127.0.0.1", default_port: int = 1080) -> Tuple[str, int]:
+def run_serve_wizard(default_host: str = "127.0.0.1", default_port: int = 1080) -> Tuple[str, int, bool]:
     """
     Interactive mode for serve command.
     
@@ -22,11 +22,11 @@ def run_serve_wizard(default_host: str = "127.0.0.1", default_port: int = 1080) 
         default_port: Default port to listen on
     
     Returns:
-        Tuple of (host, port)
+        Tuple of (host, port, background)
     """
     console.print(Panel(
         "[bold cyan]Server Configuration[/bold cyan]\n\n"
-        "Configure the SOCKS5 proxy server binding.",
+        "Configure the SOCKS5 proxy server.",
         border_style="cyan"
     ))
     
@@ -52,20 +52,31 @@ def run_serve_wizard(default_host: str = "127.0.0.1", default_port: int = 1080) 
         console.print("  [yellow]Invalid port, using default 1080[/yellow]")
         port = 1080
     
-    return host, port
+    # Background mode
+    console.print("\n[bold]Run Mode[/bold]")
+    console.print("  [dim]Choose how to run the server.[/dim]\n")
+    console.print("  [cyan]Foreground[/cyan] - See logs, stop with Ctrl+C")
+    console.print("  [cyan]Background[/cyan] - Run as daemon, stop with 'shadow9 stop'\n")
+    
+    background = typer.confirm("  Run in background?", default=False)
+    
+    return host, port, background
 
 
-def show_serve_preview(host: str, port: int) -> None:
+def show_serve_preview(host: str, port: int, background: bool = False) -> None:
     """
     Show preview of server configuration before starting.
     
     Args:
         host: The host to bind to
         port: The port to listen on
+        background: Whether to run in background
     """
+    mode = "[cyan]Background (daemon)[/cyan]" if background else "[cyan]Foreground[/cyan]"
     console.print(Panel(
         f"[bold]Server Configuration[/bold]\n\n"
-        f"  Listen Address: [cyan]{host}:{port}[/cyan]\n\n"
+        f"  Listen: [cyan]{host}:{port}[/cyan]\n"
+        f"  Mode:   {mode}\n\n"
         f"[dim]User settings control Tor routing, bridges, and security levels.[/dim]",
         border_style="cyan"
     ))
