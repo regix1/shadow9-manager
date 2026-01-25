@@ -25,6 +25,9 @@ A secure SOCKS5 proxy server with Tor network support, authentication, and DPI b
 git clone https://github.com/regix1/shadow9-manager.git
 cd shadow9-manager
 
+# Make scripts executable (Linux/macOS only)
+chmod +x setup shadow9
+
 # Run the setup script (creates virtual environment and installs Python dependencies)
 ./setup
 ```
