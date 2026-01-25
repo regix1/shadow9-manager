@@ -35,17 +35,20 @@ class Credential:
     created_at: str
     last_used: Optional[str] = None
     enabled: bool = True
-    
+
     # Routing settings
     use_tor: bool = True  # Whether to route this user's traffic through Tor
     bridge_type: str = "none"  # none, obfs4, snowflake, meek
-    
+
     # Security settings
     security_level: str = "basic"  # none, basic, moderate, paranoid
-    
+
     # Restrictions
     allowed_ports: Optional[list[int]] = None  # None = all ports allowed
-    rate_limit: Optional[int] = None  # None = use server default  # None = use server default
+    rate_limit: Optional[int] = None  # None = use server default
+
+    # Per-user bind address (optional)
+    bind_port: Optional[int] = None  # None = use shared server port
 
 
 class AuthManager:
@@ -166,7 +169,8 @@ class AuthManager:
         bridge_type: str = "none",
         security_level: str = "basic",
         allowed_ports: Optional[list[int]] = None,
-        rate_limit: Optional[int] = None
+        rate_limit: Optional[int] = None,
+        bind_port: Optional[int] = None
     ) -> bool:
         """
         Add a new user with the given credentials.
@@ -179,6 +183,7 @@ class AuthManager:
             security_level: Security level (none, basic, moderate, paranoid)
             allowed_ports: List of allowed destination ports (None = all)
             rate_limit: Max requests per minute (None = server default)
+            bind_port: Custom port for this user (None = shared server port)
 
         Returns:
             True if user was added, False if username exists
@@ -195,6 +200,9 @@ class AuthManager:
         if bridge_type not in ("none", "obfs4", "snowflake", "meek"):
             raise ValueError("Invalid bridge type. Must be: none, obfs4, snowflake, meek")
 
+        if bind_port is not None and (bind_port < 1 or bind_port > 65535):
+            raise ValueError("Invalid bind port. Must be 1-65535")
+
         if username in self._credentials:
             logger.warning("User already exists", username=username)
             return False
@@ -210,6 +218,7 @@ class AuthManager:
             security_level=security_level,
             allowed_ports=allowed_ports,
             rate_limit=rate_limit,
+            bind_port=bind_port,
         )
 
         self._save_credentials()
@@ -392,6 +401,7 @@ class AuthManager:
             "security_level": getattr(cred, 'security_level', 'basic'),
             "allowed_ports": getattr(cred, 'allowed_ports', None),
             "rate_limit": getattr(cred, 'rate_limit', None),
+            "bind_port": getattr(cred, 'bind_port', None),
         }
 
     def set_user_enabled(self, username: str, enabled: bool) -> bool:
@@ -564,6 +574,70 @@ class AuthManager:
         self._save_credentials()
         logger.info("Updated bridge type", username=username, bridge_type=bridge_type)
         return True
+
+    def get_user_bind_port(self, username: str) -> Optional[int]:
+        """
+        Get a user's custom bind port.
+
+        Args:
+            username: The username to check
+
+        Returns:
+            Bind port, or None if using shared port or user not found
+        """
+        if username not in self._credentials:
+            return None
+        return getattr(self._credentials[username], 'bind_port', None)
+
+    def set_user_bind_port(self, username: str, bind_port: Optional[int]) -> bool:
+        """
+        Set a user's custom bind port.
+
+        Args:
+            username: The username to update
+            bind_port: Custom port (1-65535), or None for shared server port
+
+        Returns:
+            True if updated, False if user not found
+        """
+        if bind_port is not None and (bind_port < 1 or bind_port > 65535):
+            raise ValueError("Invalid bind port. Must be 1-65535")
+
+        if username not in self._credentials:
+            return False
+
+        self._credentials[username].bind_port = bind_port
+        self._save_credentials()
+        logger.info("Updated bind port", username=username, bind_port=bind_port)
+        return True
+
+    def get_users_with_custom_ports(self) -> dict[str, int]:
+        """
+        Get all users that have custom bind ports configured.
+
+        Returns:
+            Dictionary mapping username to bind port
+        """
+        return {
+            username: cred.bind_port
+            for username, cred in self._credentials.items()
+            if getattr(cred, 'bind_port', None) is not None
+        }
+
+    def get_user_for_port(self, port: int) -> Optional[str]:
+        """
+        Get the username that has a specific custom bind port.
+
+        Args:
+            port: The port to look up
+
+        Returns:
+            Username if found, None otherwise
+        """
+        for username, cred in self._credentials.items():
+            if getattr(cred, 'bind_port', None) == port:
+                return username
+        return None
 
     @staticmethod
     def _validate_username(username: str) -> bool:

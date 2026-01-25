@@ -56,6 +56,7 @@ def register_user_commands(app: typer.Typer):
         security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
         ports: Annotated[Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")] = None,
         rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
+        bind_port: Annotated[Optional[int], typer.Option("--bind-port", help="Custom port for this user (dedicated listener)")] = None,
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
         """Generate a user with optional custom username/password.
@@ -188,7 +189,8 @@ def register_user_commands(app: typer.Typer):
                 bridge_type=bridge.value,
                 security_level=security.value,
                 allowed_ports=allowed_ports,
-                rate_limit=rate_limit
+                rate_limit=rate_limit,
+                bind_port=bind_port
             )
 
             # Build info string
@@ -199,6 +201,8 @@ def register_user_commands(app: typer.Typer):
                 f"Routing: [cyan]{routing}[/cyan]",
                 f"Security: [cyan]{security.value}[/cyan]",
             ]
+            if bind_port:
+                info_lines.append(f"Bind Port: [cyan]{bind_port}[/cyan] (dedicated listener)")
             if allowed_ports:
                 info_lines.append(f"Ports: [cyan]{', '.join(map(str, allowed_ports))}[/cyan]")
             if rate_limit:
@@ -408,15 +412,17 @@ def register_user_commands(app: typer.Typer):
         security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
         ports: Annotated[Optional[str], typer.Option("--ports", help="Allowed ports (comma-separated or 'all')")] = None,
         rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute (0 for default)")] = None,
+        bind_port: Annotated[Optional[int], typer.Option("--bind-port", help="Custom port (0 to use shared port)")] = None,
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
         """Modify settings for an existing user.
-        
+
         Run without arguments for interactive mode, or specify username and flags for direct modification.
         """
         # Check if any modification flags were provided
-        has_flags = any([use_tor is not None, bridge is not None, enabled is not None, 
-                         security is not None, ports is not None, rate_limit is not None])
+        has_flags = any([use_tor is not None, bridge is not None, enabled is not None,
+                         security is not None, ports is not None, rate_limit is not None,
+                         bind_port is not None])
         
         # Launch interactive wizard if no username or no flags
         if username is None or (username is not None and not has_flags):
@@ -491,13 +497,22 @@ def register_user_commands(app: typer.Typer):
                 auth_manager.set_user_rate_limit(username, rate_limit)
                 changes.append(f"Rate Limit: {rate_limit} req/min")
 
+        # Update bind port
+        if bind_port is not None:
+            if bind_port == 0:
+                auth_manager.set_user_bind_port(username, None)
+                changes.append("Bind Port: Shared (server default)")
+            else:
+                auth_manager.set_user_bind_port(username, bind_port)
+                changes.append(f"Bind Port: {bind_port} (dedicated listener)")
+
         if changes:
             console.print(f"[green]User '{username}' updated:[/green]")
             for change in changes:
                 console.print(f"  - {change}")
         else:
             console.print("[yellow]No changes specified.[/yellow]")
-            console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit[/dim]")
+            console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit, --bind-port[/dim]")
 
     @user_app.command("enable")
     def user_enable(

@@ -6,6 +6,7 @@ Contains serve and stop commands for managing the SOCKS5 proxy server.
 
 import asyncio
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Annotated
@@ -18,6 +19,7 @@ from ..config import Config, setup_logging
 from ..auth import AuthManager
 from ..socks5_server import Socks5Server, ConnectionInfo
 from ..tor_connector import TorConnector, TorConfig
+from ..bridges import TorBridgeConnector, BridgeConfig, BridgeType
 from ..wizards import run_serve_wizard, show_serve_preview
 
 console = Console()
@@ -25,79 +27,42 @@ console = Console()
 
 def register_server_commands(app: typer.Typer):
     """Register server commands with the main app."""
-    
+
     @app.command()
     def serve(
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
         host: Annotated[Optional[str], typer.Option("--host", "-h", help="Host to bind to")] = None,
         port: Annotated[Optional[int], typer.Option("--port", "-p", help="Port to listen on")] = None,
-        background: Annotated[Optional[bool], typer.Option("--background/--foreground", "-d/-f", help="Run in background or foreground")] = None,
         interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Run interactive configuration")] = False,
     ):
         """Start the SOCKS5 proxy server.
-        
+
         User settings control Tor routing, bridges, and security levels.
+        For background operation, use: shadow9 service install && shadow9 service start
         """
         # Load config to get defaults
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
-        
-        # Use config daemon setting if not specified on command line
-        run_background = background if background is not None else cfg.server.daemon
-        
+
         # Run interactive mode if requested or no host/port provided
-        if interactive or (host is None and port is None and background is None):
+        if interactive or (host is None and port is None):
             if not interactive:
                 console.print("\n[dim]No options specified. Use -i for interactive or provide --host/--port.[/dim]")
                 if not typer.confirm("Run with defaults?", default=True):
                     interactive = True
-            
+
             if interactive:
-                host, port, run_background = run_serve_wizard()
-                show_serve_preview(host, port, run_background)
+                host, port = run_serve_wizard()
+                show_serve_preview(host, port)
                 if not typer.confirm("\nStart server?", default=True):
                     console.print("[yellow]Cancelled[/yellow]")
                     raise typer.Abort()
-        
+
         # Apply defaults from config if not set
         if host is None:
             host = cfg.server.host
         if port is None:
             port = cfg.server.port
-        
-        # Handle background mode
-        if run_background:
-            import subprocess
-            
-            # Build command without --background flag
-            cmd = [sys.executable, "-m", "shadow9", "serve", "--foreground"]
-            if config != "config/config.yaml":
-                cmd.extend(["--config", config])
-            cmd.extend(["--host", host])
-            cmd.extend(["--port", str(port)])
-            
-            # Start detached process
-            if sys.platform == "win32":
-                # Windows: use CREATE_NEW_PROCESS_GROUP
-                subprocess.Popen(
-                    cmd,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            else:
-                # Unix: use nohup-style daemonization
-                subprocess.Popen(
-                    cmd,
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            
-            console.print(f"[green]Server started in background[/green]")
-            console.print(f"[dim]Listen: {host}:{port}[/dim]")
-            console.print(f"[dim]To stop: shadow9 stop[/dim]")
-            return
-        
+
         asyncio.run(_serve(config, host, port))
 
     @app.command()
@@ -105,8 +70,6 @@ def register_server_commands(app: typer.Typer):
         port: Annotated[int, typer.Option("--port", "-p", help="Port the server is running on")] = 1080,
     ):
         """Stop a running Shadow9 server."""
-        import subprocess
-        
         if sys.platform == "win32":
             # Windows: find and kill process by port
             try:
@@ -197,53 +160,110 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
             console.print(f"[red]Failed to create default user: {e}[/red]")
             return
 
-    # Initialize Tor connector if any users need Tor routing
-    tor_connector = None
-    users_need_tor = any(
-        auth_manager.get_user_tor_preference(u) 
-        for u in auth_manager.list_users()
-    )
+    # Group users by bridge type (only those needing Tor)
+    users = auth_manager.list_users()
+    bridge_type_users: dict[str, list[str]] = {}
+    direct_users: list[str] = []
+    
+    for username in users:
+        if auth_manager.get_user_tor_preference(username):
+            bridge_type = auth_manager.get_user_bridge_type(username) or "none"
+            if bridge_type not in bridge_type_users:
+                bridge_type_users[bridge_type] = []
+            bridge_type_users[bridge_type].append(username)
+        else:
+            direct_users.append(username)
 
-    if users_need_tor:
-        console.print("[cyan]Users with Tor enabled detected. Connecting to Tor...[/cyan]")
-        tor_config = TorConfig(
-            socks_host=cfg.tor.socks_host,
-            socks_port=cfg.tor.socks_port,
-            control_port=cfg.tor.control_port,
-            control_password=cfg.tor.control_password,
-        )
-        tor_connector = TorConnector(tor_config)
+    # Track all Tor connectors for cleanup
+    tor_connectors: list[TorConnector] = []
+    bridge_connectors: list[TorBridgeConnector] = []
+    
+    # Mapping of bridge_type -> (socks_host, socks_port)
+    upstream_proxies: dict[str, tuple[str, int]] = {}
+    default_proxy: Optional[tuple[str, int]] = None
 
-        if await tor_connector.connect():
-            circuit_info = tor_connector.circuit_info
+    # Start Tor instances for each bridge type in use
+    if bridge_type_users:
+        console.print("[cyan]Starting Tor instances for configured bridge types...[/cyan]")
+        
+        for bridge_type, usernames in bridge_type_users.items():
+            console.print(f"\n[dim]Bridge type '{bridge_type}': {', '.join(usernames)}[/dim]")
+            
+            if bridge_type == "none":
+                # Use system Tor (TorConnector)
+                tor_config = TorConfig(
+                    socks_host=cfg.tor.socks_host,
+                    socks_port=cfg.tor.socks_port,
+                    control_port=cfg.tor.control_port,
+                    control_password=cfg.tor.control_password,
+                )
+                tor_connector = TorConnector(tor_config)
+                
+                if await tor_connector.connect():
+                    proxy = tor_connector.get_socks_proxy()
+                    upstream_proxies["none"] = proxy
+                    default_proxy = proxy  # Use as default for backward compatibility
+                    tor_connectors.append(tor_connector)
+                    console.print(f"  [green]✓[/green] System Tor: {proxy[0]}:{proxy[1]}")
+                else:
+                    console.print(f"  [red]✗[/red] Failed to connect to system Tor")
+                    console.print(f"    [dim]{TorConnector.get_tor_install_instructions()}[/dim]")
+            else:
+                # Use bridge connector (starts separate Tor process)
+                try:
+                    bridge_enum = BridgeType(bridge_type)
+                except ValueError:
+                    console.print(f"  [red]✗[/red] Unknown bridge type: {bridge_type}")
+                    continue
+                
+                # Allocate unique port for each bridge type (starting from 9051)
+                bridge_socks_port = 9051 + len(bridge_connectors)
+                
+                bridge_config = BridgeConfig(
+                    enabled=True,
+                    bridge_type=bridge_enum,
+                    use_builtin_bridges=True,
+                )
+                bridge_connector = TorBridgeConnector(bridge_config, socks_port=bridge_socks_port)
+                
+                try:
+                    socks_host, socks_port = await bridge_connector.start_tor_with_bridges()
+                    upstream_proxies[bridge_type] = (socks_host, socks_port)
+                    bridge_connectors.append(bridge_connector)
+                    console.print(f"  [green]✓[/green] {bridge_type}: {socks_host}:{socks_port}")
+                except Exception as e:
+                    console.print(f"  [red]✗[/red] Failed to start {bridge_type}: {e}")
+        
+        if upstream_proxies:
             console.print(Panel(
-                f"[bold green]Connected to Tor Network[/bold green]\n\n"
-                f"Tor SOCKS: [cyan]{cfg.tor.socks_host}:{cfg.tor.socks_port}[/cyan]\n"
-                f"Isolation: [cyan]Per-user circuits (IsolateSOCKSAuth)[/cyan]",
+                f"[bold green]Tor Instances Running[/bold green]\n\n" +
+                "\n".join([
+                    f"[cyan]{bt}[/cyan]: {h}:{p}" 
+                    for bt, (h, p) in upstream_proxies.items()
+                ]) +
+                f"\n\n[dim]Each user routes through their configured bridge type[/dim]",
                 title="Tor Status",
                 border_style="green"
             ))
         else:
-            console.print("[yellow]Warning: Could not connect to Tor network[/yellow]")
-            console.print(f"[dim]{TorConnector.get_tor_install_instructions()}[/dim]")
-            console.print("\n[yellow]Users with Tor routing enabled will fall back to direct.[/yellow]")
-            tor_connector = None
+            console.print("\n[yellow]Warning: No Tor instances available - Tor users will fail![/yellow]")
 
-    # Create SOCKS5 server
-    upstream_proxy = None
-    if tor_connector and tor_connector.is_connected:
-        upstream_proxy = tor_connector.get_socks_proxy()
-
+    # Create SOCKS5 server with per-bridge proxies
     server = Socks5Server(
         host=cfg.server.host,
         port=cfg.server.port,
         auth_manager=auth_manager,
-        upstream_proxy=upstream_proxy,
+        upstream_proxy=default_proxy,
+        upstream_proxies=upstream_proxies,
     )
 
     # Connection monitoring callback
     async def on_connection(info: ConnectionInfo):
-        route = "[green]Tor[/green]" if info.use_tor else "[yellow]Direct[/yellow]"
+        if info.use_tor:
+            bridge = info.bridge_type or "none"
+            route = f"[green]Tor/{bridge}[/green]"
+        else:
+            route = "[yellow]Direct[/yellow]"
         console.print(
             f"[dim]{info.username}[/dim] ({route}) -> "
             f"[cyan]{info.target_addr}:{info.target_port}[/cyan]"
@@ -270,32 +290,53 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     try:
         await server.start()
 
-        # Build user routing summary
-        users = auth_manager.list_users()
-        tor_users = [u for u in users if auth_manager.get_user_tor_preference(u)]
-        direct_users = [u for u in users if not auth_manager.get_user_tor_preference(u)]
+        # Start user-specific listeners for users with custom bind ports
+        custom_port_users = auth_manager.get_users_with_custom_ports()
+        user_listener_lines = []
         
+        for username, bind_port in custom_port_users.items():
+            if bind_port == cfg.server.port:
+                console.print(f"[yellow]Warning: {username}'s bind port {bind_port} conflicts with main port, skipping[/yellow]")
+                continue
+            
+            success = await server.start_user_listener(username, bind_port)
+            if success:
+                user_listener_lines.append(f"  [cyan]:{bind_port}[/cyan] -> [dim]{username}[/dim]")
+            else:
+                console.print(f"[yellow]Warning: Failed to start listener for {username} on port {bind_port}[/yellow]")
+
+        # Build user routing summary with bridge types
         routing_lines = []
-        if tor_users:
-            routing_lines.append(f"[green]Tor[/green]: {', '.join(tor_users)}")
+        for bridge_type, usernames in bridge_type_users.items():
+            bridge_label = f"Tor/{bridge_type}" if bridge_type != "none" else "Tor"
+            available = bridge_type in upstream_proxies
+            color = "green" if available else "red"
+            status = "" if available else " (unavailable)"
+            routing_lines.append(f"[{color}]{bridge_label}[/{color}]: {', '.join(usernames)}{status}")
+        
         if direct_users:
             routing_lines.append(f"[yellow]Direct[/yellow]: {', '.join(direct_users)}")
         
         routing_summary = "\n".join(routing_lines) if routing_lines else "[dim]No users configured[/dim]"
         
-        # Tor availability note
-        if tor_users and not upstream_proxy:
-            tor_note = "\n[red]Warning: Tor not available - Tor users will fail![/red]"
-        elif tor_users:
-            tor_note = "\n[dim]Each Tor user gets isolated circuit (IsolateSOCKSAuth)[/dim]"
+        # DPI protection note
+        bridge_types_active = [bt for bt in bridge_type_users.keys() if bt in upstream_proxies and bt != "none"]
+        if bridge_types_active:
+            dpi_note = f"\n[dim]DPI protection active: {', '.join(bridge_types_active)}[/dim]"
         else:
-            tor_note = ""
+            dpi_note = ""
+        
+        # User-specific ports section
+        if user_listener_lines:
+            port_section = f"\n\n[bold]Per-User Ports:[/bold]\n" + "\n".join(user_listener_lines)
+        else:
+            port_section = ""
         
         console.print(Panel(
             f"[bold green]SOCKS5 Server Running[/bold green]\n"
-            f"Listen: [cyan]{cfg.server.host}:{cfg.server.port}[/cyan]\n"
+            f"Listen: [cyan]{cfg.server.host}:{cfg.server.port}[/cyan] (shared)\n"
             f"Auth:   [cyan]Username/Password[/cyan]\n\n"
-            f"[bold]User Routing:[/bold]\n{routing_summary}{tor_note}\n\n"
+            f"[bold]User Routing:[/bold]\n{routing_summary}{dpi_note}{port_section}\n\n"
             f"[dim]Press Ctrl+C to stop.[/dim]",
             title="Shadow9 Manager",
             border_style="green"
@@ -306,7 +347,13 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
 
     finally:
         await server.stop()
-        if tor_connector:
-            await tor_connector.disconnect()
+        
+        # Stop all Tor connectors
+        for connector in tor_connectors:
+            await connector.disconnect()
+        
+        # Stop all bridge connectors
+        for connector in bridge_connectors:
+            await connector.stop()
 
         console.print("[green]Server stopped[/green]")

@@ -176,19 +176,20 @@ class PluggableTransportManager:
 
         return transports
 
-    def generate_torrc(self, data_dir: Path) -> str:
+    def generate_torrc(self, data_dir: Path, socks_port: int = 9050) -> str:
         """
         Generate torrc configuration for bridges.
 
         Args:
             data_dir: Tor data directory
+            socks_port: SOCKS port for this Tor instance
 
         Returns:
             torrc content string
         """
         lines = [
             f"DataDirectory {data_dir}",
-            "SocksPort 9050",
+            f"SocksPort {socks_port}",
             "UseBridges 1",
         ]
 
@@ -272,8 +273,9 @@ class TorBridgeConnector:
     - Using snowflake to use WebRTC peer connections
     """
 
-    def __init__(self, bridge_config: BridgeConfig):
+    def __init__(self, bridge_config: BridgeConfig, socks_port: int = 9050):
         self.config = bridge_config
+        self.socks_port = socks_port
         self.pt_manager = PluggableTransportManager(bridge_config)
         self._tor_process: Optional[subprocess.Popen] = None
         self._temp_dir: Optional[tempfile.TemporaryDirectory] = None
@@ -297,14 +299,15 @@ class TorBridgeConnector:
         self._temp_dir = tempfile.TemporaryDirectory(prefix="shadow9_tor_")
         data_dir = Path(self._temp_dir.name)
 
-        # Generate torrc
-        torrc_content = self.pt_manager.generate_torrc(data_dir)
+        # Generate torrc with specified port
+        torrc_content = self.pt_manager.generate_torrc(data_dir, self.socks_port)
         torrc_path = data_dir / "torrc"
         torrc_path.write_text(torrc_content)
 
         logger.info(
             "Starting Tor with bridges",
             bridge_type=self.config.bridge_type.value,
+            socks_port=self.socks_port,
             torrc=str(torrc_path)
         )
 
@@ -323,11 +326,11 @@ class TorBridgeConnector:
         # Wait for Tor to bootstrap
         await self._wait_for_bootstrap()
 
-        return "127.0.0.1", 9050
+        return "127.0.0.1", self.socks_port
 
     async def _wait_for_bootstrap(self, timeout: int = 120) -> None:
         """Wait for Tor to finish bootstrapping."""
-        logger.info("Waiting for Tor to bootstrap...")
+        logger.info("Waiting for Tor to bootstrap...", socks_port=self.socks_port)
 
         start_time = asyncio.get_event_loop().time()
 
@@ -342,12 +345,12 @@ class TorBridgeConnector:
             # Check if Tor is ready by trying to connect to SOCKS port
             try:
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", 9050),
+                    asyncio.open_connection("127.0.0.1", self.socks_port),
                     timeout=2.0
                 )
                 writer.close()
                 await writer.wait_closed()
-                logger.info("Tor bootstrap complete")
+                logger.info("Tor bootstrap complete", socks_port=self.socks_port)
                 return
             except (ConnectionRefusedError, asyncio.TimeoutError):
                 await asyncio.sleep(2)

@@ -94,6 +94,7 @@ class Socks5Server:
         port: int = 1080,
         auth_manager: Optional[AuthManager] = None,
         upstream_proxy: Optional[tuple[str, int]] = None,
+        upstream_proxies: Optional[dict[str, tuple[str, int]]] = None,
         allowed_commands: Optional[set[Socks5Command]] = None,
     ):
         """
@@ -103,13 +104,15 @@ class Socks5Server:
             host: Host address to bind to
             port: Port to listen on
             auth_manager: Authentication manager for credentials
-            upstream_proxy: Optional upstream SOCKS5 proxy (host, port)
+            upstream_proxy: Optional default upstream SOCKS5 proxy (host, port)
+            upstream_proxies: Optional dict of bridge_type -> (host, port) for per-bridge proxies
             allowed_commands: Set of allowed SOCKS5 commands (default: CONNECT only)
         """
         self.host = host
         self.port = port
         self.auth_manager = auth_manager
         self.upstream_proxy = upstream_proxy
+        self.upstream_proxies = upstream_proxies or {}
         self.allowed_commands = allowed_commands or {Socks5Command.CONNECT}
 
         self._server: Optional[asyncio.Server] = None
@@ -118,6 +121,69 @@ class Socks5Server:
 
         # Connection callback for monitoring
         self._on_connection: Optional[Callable[[ConnectionInfo], Awaitable[None]]] = None
+
+        # User-specific listeners: port -> (server, username)
+        self._user_listeners: dict[int, tuple[asyncio.Server, str]] = {}
+
+    def _make_user_handler(self, allowed_user: str):
+        """Create a client handler that only allows a specific user."""
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            await self._handle_client(reader, writer, allowed_user=allowed_user)
+        return handler
+
+    async def start_user_listener(self, username: str, port: int) -> bool:
+        """
+        Start a dedicated listener for a specific user.
+
+        Args:
+            username: The username that is allowed to connect on this port
+            port: The port to listen on
+
+        Returns:
+            True if listener started successfully, False otherwise
+        """
+        if port in self._user_listeners:
+            logger.warning("Port already has a listener", port=port)
+            return False
+
+        try:
+            server = await asyncio.start_server(
+                self._make_user_handler(username),
+                self.host,
+                port,
+                reuse_address=True,
+            )
+
+            self._user_listeners[port] = (server, username)
+            addr = server.sockets[0].getsockname()
+            logger.info("User listener started", username=username, host=addr[0], port=addr[1])
+            return True
+        except OSError as e:
+            logger.error("Failed to start user listener", username=username, port=port, error=str(e))
+            return False
+
+    async def stop_user_listener(self, port: int) -> bool:
+        """
+        Stop a user-specific listener.
+
+        Args:
+            port: The port of the listener to stop
+
+        Returns:
+            True if stopped successfully, False if not found
+        """
+        if port not in self._user_listeners:
+            return False
+
+        server, username = self._user_listeners.pop(port)
+        server.close()
+        await server.wait_closed()
+        logger.info("User listener stopped", username=username, port=port)
+        return True
+
+    def get_user_listeners(self) -> dict[int, str]:
+        """Get all active user-specific listeners (port -> username)."""
+        return {port: username for port, (_, username) in self._user_listeners.items()}
 
     async def start(self) -> None:
         """Start the SOCKS5 server."""
@@ -133,12 +199,20 @@ class Socks5Server:
         logger.info("SOCKS5 server started", host=addr[0], port=addr[1])
 
     async def stop(self) -> None:
-        """Stop the SOCKS5 server."""
+        """Stop the SOCKS5 server and all user-specific listeners."""
         self._running = False
 
+        # Stop main server
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+
+        # Stop all user-specific listeners
+        for port, (server, username) in list(self._user_listeners.items()):
+            server.close()
+            await server.wait_closed()
+            logger.info("User listener stopped", username=username, port=port)
+        self._user_listeners.clear()
 
         logger.info("SOCKS5 server stopped")
 
@@ -153,9 +227,17 @@ class Socks5Server:
     async def _handle_client(
         self,
         reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter
+        writer: asyncio.StreamWriter,
+        allowed_user: Optional[str] = None
     ) -> None:
-        """Handle a new client connection."""
+        """
+        Handle a new client connection.
+        
+        Args:
+            reader: Stream reader for client connection
+            writer: Stream writer for client connection
+            allowed_user: If set, only this username is allowed to authenticate
+        """
         client_addr = writer.get_extra_info('peername')
         conn_id = f"{client_addr[0]}:{client_addr[1]}"
 
@@ -172,6 +254,16 @@ class Socks5Server:
             )
 
             if username is None:
+                return
+
+            # Check if this listener is restricted to a specific user
+            if allowed_user is not None and username != allowed_user:
+                logger.warning(
+                    "User not allowed on this port",
+                    username=username,
+                    allowed_user=allowed_user
+                )
+                # Close connection - user authenticated but not allowed on this port
                 return
 
             # Get user settings from auth manager
@@ -202,6 +294,9 @@ class Socks5Server:
                 await self._send_reply(writer, Socks5Reply.NOT_ALLOWED)
                 return
 
+            # Get user's bridge type
+            bridge_type = user_settings.get("bridge_type", "none")
+
             # Create connection info with user settings
             conn_info = ConnectionInfo(
                 client_addr=client_addr,
@@ -209,7 +304,7 @@ class Socks5Server:
                 target_port=target_port,
                 username=username,
                 use_tor=user_settings.get("use_tor", True),
-                bridge_type=user_settings.get("bridge_type", "none"),
+                bridge_type=bridge_type,
                 security_level=user_settings.get("security_level", "basic"),
             )
             self._connections[conn_id] = conn_info
@@ -217,12 +312,22 @@ class Socks5Server:
             # Check if user wants Tor routing
             use_tor = conn_info.use_tor
 
+            # Select the appropriate upstream proxy based on bridge type
+            # Priority: bridge-specific proxy > default proxy > direct
+            upstream_proxy = None
+            if use_tor:
+                if bridge_type in self.upstream_proxies:
+                    upstream_proxy = self.upstream_proxies[bridge_type]
+                elif self.upstream_proxy:
+                    upstream_proxy = self.upstream_proxy
+
             # Connect to target (directly or via upstream proxy based on user preference)
-            if self.upstream_proxy and use_tor:
+            if upstream_proxy and use_tor:
                 # Pass username for Tor circuit isolation (IsolateSOCKSAuth)
                 # Each unique username gets a separate Tor circuit/exit IP
                 target_reader, target_writer = await self._connect_via_proxy(
                     target_host, target_port,
+                    proxy=upstream_proxy,
                     socks_username=username,
                     socks_password=username  # Password can match username for isolation
                 )
@@ -237,6 +342,12 @@ class Socks5Server:
                     asyncio.open_connection(target_host, target_port),
                     timeout=self.CONNECTION_TIMEOUT
                 )
+                if use_tor:
+                    logger.warning(
+                        "Tor requested but no proxy available for bridge type",
+                        username=username,
+                        bridge=bridge_type
+                    )
                 logger.debug(
                     "Direct connection",
                     username=username,
@@ -474,6 +585,7 @@ class Socks5Server:
         self,
         target_host: str,
         target_port: int,
+        proxy: Optional[tuple[str, int]] = None,
         socks_username: Optional[str] = None,
         socks_password: Optional[str] = None
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
@@ -482,6 +594,7 @@ class Socks5Server:
         Args:
             target_host: Target hostname to connect to
             target_port: Target port to connect to
+            proxy: Upstream proxy (host, port) - uses self.upstream_proxy if not provided
             socks_username: Optional SOCKS auth username (for Tor circuit isolation)
             socks_password: Optional SOCKS auth password (for Tor circuit isolation)
             
@@ -489,7 +602,12 @@ class Socks5Server:
         will assign a separate circuit for each unique username, giving each user
         their own exit IP.
         """
-        proxy_host, proxy_port = self.upstream_proxy
+        # Use provided proxy or fall back to default
+        upstream = proxy or self.upstream_proxy
+        if not upstream:
+            raise ConnectionError("No upstream proxy configured")
+        
+        proxy_host, proxy_port = upstream
 
         # Connect to upstream proxy
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)

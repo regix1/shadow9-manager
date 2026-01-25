@@ -101,6 +101,13 @@ def display_user_info(auth_manager: AuthManager, username: str) -> None:
     else:
         table.add_row("Rate Limit", "Server default")
 
+    # Display bind port
+    bind_port = info.get("bind_port")
+    if bind_port:
+        table.add_row("Bind Port", f"{bind_port} (dedicated listener)")
+    else:
+        table.add_row("Bind Port", "Shared (server default)")
+
     table.add_row("Created", info["created_at"] or "Unknown")
     table.add_row("Last Used", info["last_used"] or "Never")
 

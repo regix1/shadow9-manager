@@ -60,7 +60,6 @@ class ServerConfig:
     connection_timeout: int = 30
     relay_timeout: int = 300
     buffer_size: int = 65536
-    daemon: bool = False  # Run in background by default
 
 
 @dataclass
