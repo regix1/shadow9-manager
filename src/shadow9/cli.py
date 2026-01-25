@@ -983,6 +983,13 @@ def update():
             console.print(f"[red]Error updating: {result.stderr}[/red]")
             return
 
+        # Make scripts executable
+        console.print("[>] Setting permissions...")
+        for script in ["setup", "shadow9"]:
+            script_path = script_dir / script
+            if script_path.exists():
+                script_path.chmod(0o755)
+
         # Reinstall package
         console.print("[>] Reinstalling package...")
         result = subprocess.run(

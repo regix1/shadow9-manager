@@ -216,26 +216,25 @@ sys.path.insert(0, 'src')
 from pathlib import Path
 from shadow9.auth import AuthManager
 
-# Initialize auth manager with master key
-auth = AuthManager(
-    credentials_file=Path('config/credentials.enc'),
-    master_key=os.environ.get('SHADOW9_MASTER_KEY')
-)
+creds_file = Path('config/credentials.enc')
 
-# Check if users already exist
-existing_users = auth.list_users()
-if existing_users:
-    print(f\"[INFO] Found {len(existing_users)} existing user(s): {', '.join(existing_users)}\")
-    print('[INFO] Skipping user creation. Use ./shadow9 user add <username> to add more.')
-else:
-    # Generate secure credentials
-    username, password = auth.generate_credentials()
+try:
+    # Initialize auth manager with master key
+    auth = AuthManager(
+        credentials_file=creds_file,
+        master_key=os.environ.get('SHADOW9_MASTER_KEY')
+    )
 
-    # Add the user
-    auth.add_user(username, password, use_tor=True)
-
-    # Print credentials
-    print(f'''
+    # Check if users already exist
+    existing_users = auth.list_users()
+    if existing_users:
+        print(f\"[INFO] Found {len(existing_users)} existing user(s): {', '.join(existing_users)}\")
+        print('[INFO] Skipping user creation. Use ./shadow9 user add <username> to add more.')
+    else:
+        # Generate secure credentials
+        username, password = auth.generate_credentials()
+        auth.add_user(username, password, use_tor=True)
+        print(f'''
 ============================================================
                     Your Credentials
 ------------------------------------------------------------
@@ -245,6 +244,33 @@ else:
   [!] SAVE THESE NOW! They will not be shown again.
 ============================================================
 ''')
+
+except Exception as e:
+    if 'InvalidToken' in str(type(e).__name__) or 'InvalidToken' in str(e) or creds_file.exists():
+        print('[WARN] Credentials file is corrupted or key mismatch.')
+        print('[>] Removing corrupted credentials and creating fresh...')
+        if creds_file.exists():
+            creds_file.unlink()
+
+        # Reinitialize and create user
+        auth = AuthManager(
+            credentials_file=creds_file,
+            master_key=os.environ.get('SHADOW9_MASTER_KEY')
+        )
+        username, password = auth.generate_credentials()
+        auth.add_user(username, password, use_tor=True)
+        print(f'''
+============================================================
+                    Your Credentials
+------------------------------------------------------------
+  Username: {username}
+  Password: {password}
+------------------------------------------------------------
+  [!] SAVE THESE NOW! They will not be shown again.
+============================================================
+''')
+    else:
+        raise
 "
 
 # Reload shell config to enable completion immediately
