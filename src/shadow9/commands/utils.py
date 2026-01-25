@@ -425,6 +425,13 @@ def register_util_commands(app: typer.Typer):
                     os.system(str(setup_script))
                 else:
                     console.print("[red]Error: setup script not found[/red]")
+            else:
+                console.print("")
+                run_again = typer.confirm("Would you like to run shadow9 setup?", default=False)
+                if run_again:
+                    console.print("\n[cyan]Running setup...[/cyan]\n")
+                    import subprocess
+                    subprocess.run(["shadow9", "setup"])
 
         except FileNotFoundError:
             console.print("[red]Error: git not found. Please install git.[/red]")
