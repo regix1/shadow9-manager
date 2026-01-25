@@ -39,12 +39,25 @@ cd shadow9-manager
 python -m shadow9 serve
 ```
 
-### 3. Connect
+### 3. Create a User
+
+```bash
+# Add a user with your own credentials
+./shadow9 user add myuser --password "MySecureP@ss123"
+
+# Or generate random secure credentials
+./shadow9 user generate
+```
+
+### 4. Connect
 
 Configure your application to use SOCKS5 proxy:
 - **Host:** 127.0.0.1
 - **Port:** 1080
-- **Authentication:** Username/Password (created during setup)
+- **Username:** Your username (e.g., `myuser`)
+- **Password:** Your password
+
+Each user has their own credentials and routing settings (Tor/direct, security level, etc.).
 
 ## Installation
 
