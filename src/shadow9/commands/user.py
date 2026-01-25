@@ -15,6 +15,7 @@ from rich.panel import Panel
 
 from ..config import Config
 from ..auth import AuthManager
+from ..paths import get_paths
 from ..wizards import (
     run_user_modify_wizard,
     run_user_list_wizard, display_user_info
@@ -220,43 +221,24 @@ def register_user_commands(app: typer.Typer):
             console.print("  [dim]This will save username/password to a text file for easy reference.[/dim]")
             console.print("  [red]Warning: This is a security risk - only use on trusted systems.[/red]\n")
             
-            save_creds = typer.confirm("Save credentials to users/ folder?", default=False)
+            save_creds = typer.confirm("Save credentials to user folder?", default=False)
             
             if save_creds:
-                # Get project root directory
-                project_root = Path(__file__).parent.parent.parent.parent
-                users_dir = project_root / "users"
-                users_dir.mkdir(exist_ok=True)
-                
-                # Create credential file
-                cred_file = users_dir / f"{final_username}.txt"
-                cred_content = f"""Shadow9 User Credentials
-========================
-Username: {final_username}
-Password: {final_password}
-
-Settings:
-- Routing: {routing}
-- Security: {security.value}
-"""
-                if bind_port:
-                    cred_content += f"- Bind Port: {bind_port}\n"
-                if allowed_ports:
-                    cred_content += f"- Allowed Ports: {', '.join(map(str, allowed_ports))}\n"
-                if rate_limit:
-                    cred_content += f"- Rate Limit: {rate_limit} req/min\n"
-                
-                cred_content += f"\nGenerated: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                
-                cred_file.write_text(cred_content)
-                # Set file permissions to owner-only (on Unix)
-                try:
-                    cred_file.chmod(0o600)
-                except Exception:
-                    pass
+                # Use centralized paths module
+                paths = get_paths()
+                cred_file = paths.save_user_credentials(
+                    username=final_username,
+                    password=final_password,
+                    routing=routing,
+                    security=security.value,
+                    bind_port=bind_port,
+                    allowed_ports=allowed_ports,
+                    rate_limit=rate_limit
+                )
                 
                 console.print(f"\n[green][OK] Credentials saved to: {cred_file}[/green]")
-                console.print("[dim]Keep this file secure![/dim]")
+                console.print(f"[dim]User folder: {paths.get_user_dir(final_username)}[/dim]")
+                console.print("[dim]Keep this folder secure![/dim]")
 
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
@@ -294,8 +276,10 @@ Settings:
                 if not confirm:
                     raise typer.Abort()
             
+            paths = get_paths()
             for user in users:
                 auth_manager.remove_user(user)
+                paths.delete_user_dir(user)
                 console.print(f"[dim]Removed: {user}[/dim]")
             console.print(f"[green]All {len(users)} users removed[/green]")
             return
@@ -326,8 +310,10 @@ Settings:
                     if not confirm:
                         raise typer.Abort()
                 
+                paths = get_paths()
                 for user in users:
                     auth_manager.remove_user(user)
+                    paths.delete_user_dir(user)
                     console.print(f"[dim]Removed: {user}[/dim]")
                 console.print(f"[green]All {len(users)} users removed[/green]")
                 return
@@ -351,6 +337,10 @@ Settings:
                 raise typer.Abort()
 
         if auth_manager.remove_user(username):
+            # Also delete user's folder if it exists
+            paths = get_paths()
+            if paths.delete_user_dir(username):
+                console.print(f"[dim]Deleted user folder: {paths.get_user_dir(username)}[/dim]")
             console.print(f"[green]User '{username}' removed[/green]")
         else:
             console.print(f"[red]User '{username}' not found[/red]")

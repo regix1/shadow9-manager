@@ -77,7 +77,7 @@ class TorConfig:
 class AuthConfig:
     """Authentication configuration."""
     require_auth: bool = True
-    credentials_file: str = "config/credentials.enc"
+    credentials_file: Optional[str] = None  # None = use paths module default
     master_key_env: str = "SHADOW9_MASTER_KEY"
     session_timeout_hours: int = 24
     max_failed_attempts: int = 5
@@ -108,25 +108,10 @@ def get_project_root() -> Path:
     """
     Get the project root directory.
     
-    Searches for .env file or uses the package location as fallback.
-    This ensures consistent path resolution regardless of current working directory.
+    Uses the centralized paths module for consistent path resolution.
     """
-    # Search locations in priority order
-    search_locations = [
-        Path.cwd(),                                          # Current directory
-        Path(__file__).parent.parent.parent,                 # Package location (src/shadow9/config.py -> project root)
-        Path.home() / "shadow9-manager",                     # Common install location
-        Path("/opt/shadow9-manager"),                        # System install location
-        Path("/root/shadow9-manager"),                       # Root user location
-    ]
-    
-    # Find the first location that has .env or config directory
-    for loc in search_locations:
-        if (loc / ".env").exists() or (loc / "config").exists():
-            return loc.resolve()
-    
-    # Fallback to package location
-    return Path(__file__).parent.parent.parent.resolve()
+    from .paths import get_root
+    return get_root()
 
 
 @dataclass
@@ -147,6 +132,10 @@ class Config:
     
     def get_credentials_file(self) -> Path:
         """Get the absolute path to the credentials file."""
+        if self.auth.credentials_file is None:
+            # Use centralized paths module for consistent location
+            from .paths import get_credentials_file
+            return get_credentials_file()
         return self.resolve_path(self.auth.credentials_file)
 
     @classmethod

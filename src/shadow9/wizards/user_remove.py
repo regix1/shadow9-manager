@@ -12,6 +12,7 @@ from rich.console import Console
 
 from ..auth import AuthManager
 from ..config import Config
+from ..paths import get_paths
 
 console = Console()
 
@@ -48,8 +49,10 @@ def run_user_remove_wizard(
             if not confirm:
                 return False
         
+        paths = get_paths()
         for user in users:
             auth_manager.remove_user(user)
+            paths.delete_user_dir(user)
             console.print(f"[dim]Removed: {user}[/dim]")
         console.print(f"[green]All {len(users)} users removed[/green]")
         return True
@@ -80,8 +83,10 @@ def run_user_remove_wizard(
                 if not confirm:
                     return False
             
+            paths = get_paths()
             for user in users:
                 auth_manager.remove_user(user)
+                paths.delete_user_dir(user)
                 console.print(f"[dim]Removed: {user}[/dim]")
             console.print(f"[green]All {len(users)} users removed[/green]")
             return True
@@ -105,6 +110,9 @@ def run_user_remove_wizard(
             return False
 
     if auth_manager.remove_user(username):
+        # Also delete user's folder if it exists
+        paths = get_paths()
+        paths.delete_user_dir(username)
         console.print(f"[green]User '{username}' removed[/green]")
         return True
     else:

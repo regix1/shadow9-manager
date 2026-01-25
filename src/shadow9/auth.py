@@ -73,7 +73,11 @@ class AuthManager:
             credentials_file: Path to encrypted credentials file
             master_key: Master key for encrypting credentials at rest
         """
-        self.credentials_file = credentials_file or Path("config/credentials.enc")
+        if credentials_file is None:
+            from .paths import get_credentials_file
+            self.credentials_file = get_credentials_file()
+        else:
+            self.credentials_file = credentials_file
         self._credentials: dict[str, Credential] = {}
 
         # Initialize password hasher with secure parameters
@@ -98,8 +102,9 @@ class AuthManager:
 
     def _derive_fernet_key(self, master_key: str) -> Fernet:
         """Derive a Fernet key from the master key using PBKDF2."""
-        # Use a fixed salt for key derivation (stored with credentials)
-        salt_file = self.credentials_file.parent / ".salt"
+        # Use a fixed salt for key derivation (stored with config)
+        from .paths import get_paths
+        salt_file = get_paths().salt_file
 
         if salt_file.exists():
             salt = salt_file.read_bytes()

@@ -15,9 +15,10 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from ..paths import get_paths, get_root
+
 console = Console()
 
-INSTALL_DIR = "/opt/shadow9-manager"
 SERVICE_NAME = "shadow9"
 SERVICE_FILE = f"/etc/systemd/system/{SERVICE_NAME}.service"
 
@@ -42,11 +43,9 @@ def register_service_commands(app: typer.Typer):
         _check_linux()
         _check_root()
 
-        # Get current directory or use install dir
-        if Path(INSTALL_DIR).exists():
-            install_path = INSTALL_DIR
-        else:
-            install_path = Path(__file__).parent.parent.parent.parent.resolve()
+        # Use the paths module to get consistent install path
+        paths = get_paths()
+        install_path = str(paths.root)
 
         # Find Python executable - prefer venv if it exists, otherwise use system Python
         venv_python = Path(install_path) / "venv" / "bin" / "python"
@@ -104,6 +103,7 @@ def register_service_commands(app: typer.Typer):
                 console.print(f"[dim]Copied master key to: {target_env}[/dim]")
 
         # Create systemd service file
+        # Set SHADOW9_HOME to ensure consistent path resolution
         service_content = f"""[Unit]
 Description=Shadow9 SOCKS5 Proxy Server
 Documentation=https://github.com/regix1/shadow9-manager
@@ -116,6 +116,7 @@ User=root
 WorkingDirectory={install_path}
 Environment="PATH={python_path}"
 Environment="PYTHONPATH={install_path}/src"
+Environment="SHADOW9_HOME={install_path}"
 Environment="SHADOW9_MASTER_KEY={master_key}"
 ExecStart={python_exec} -m shadow9.cli serve --host {host} --port {port}
 Restart=on-failure
@@ -127,7 +128,7 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths={install_path}/config
+ReadWritePaths={install_path}/config {install_path}/users
 PrivateTmp=true
 
 [Install]
