@@ -90,7 +90,7 @@ class Socks5Server:
 
     def __init__(
         self,
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int = 1080,
         auth_manager: Optional[AuthManager] = None,
         upstream_proxy: Optional[tuple[str, int]] = None,

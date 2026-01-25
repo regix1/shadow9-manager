@@ -54,7 +54,7 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class ServerConfig:
     """SOCKS5 server configuration."""
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 1080
     max_connections: int = 100
     connection_timeout: int = 30

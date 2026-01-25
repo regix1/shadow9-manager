@@ -175,11 +175,11 @@ Then use Tab to auto-complete commands:
 The server is minimal - users control their own settings.
 
 ```bash
-# Basic server (localhost only)
+# Start server (listens on all interfaces by default)
 ./shadow9 serve
 
-# Listen on all interfaces
-./shadow9 serve --host 0.0.0.0
+# Restrict to localhost only
+./shadow9 serve --host 127.0.0.1
 
 # Custom port
 ./shadow9 serve --port 8080
@@ -394,7 +394,7 @@ Configuration file is located at `config/config.yaml`:
 
 ```yaml
 server:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 1080
   max_connections: 100
 

@@ -29,7 +29,7 @@ def run_init_wizard() -> Config:
     console.print("\n[bold]Step 1:[/bold] Server Settings")
     console.print("  [dim]Configure the SOCKS5 proxy server.[/dim]\n")
     
-    host = typer.prompt("  Server host", default="127.0.0.1")
+    host = typer.prompt("  Server host", default="0.0.0.0")
     port = typer.prompt("  Server port", default="1080")
     try:
         port = int(port)

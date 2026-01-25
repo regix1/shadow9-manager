@@ -13,7 +13,7 @@ from rich.panel import Panel
 console = Console()
 
 
-def run_serve_wizard(default_host: str = "127.0.0.1", default_port: int = 1080) -> Tuple[str, int, bool]:
+def run_serve_wizard(default_host: str = "0.0.0.0", default_port: int = 1080) -> Tuple[str, int, bool]:
     """
     Interactive mode for serve command.
     
