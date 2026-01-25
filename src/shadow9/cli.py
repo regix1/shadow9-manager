@@ -920,7 +920,7 @@ def update():
     """
     Update Shadow9 to the latest version from GitHub.
 
-    This will force pull the latest changes from the repository.
+    This will force pull the latest changes and restart the server if running.
     """
     import subprocess
     import os
@@ -936,6 +936,27 @@ def update():
         console.print("[red]Error: Not a git repository.[/red]")
         console.print("[dim]Clone from: https://github.com/regix1/shadow9-manager[/dim]")
         return
+
+    # Check if server is running (look for shadow9 serve process)
+    server_was_running = False
+    server_pid = None
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "shadow9.*serve"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            server_was_running = True
+            server_pid = result.stdout.strip().split('\n')[0]
+            console.print(f"[>] Stopping running server (PID: {server_pid})...")
+            subprocess.run(["kill", server_pid], capture_output=True)
+            # Wait for process to stop
+            import time
+            time.sleep(2)
+    except FileNotFoundError:
+        # pgrep not available (Windows), skip server detection
+        pass
 
     try:
         # Fetch latest
@@ -974,7 +995,22 @@ def update():
             console.print(f"[yellow]Warning: pip install failed: {result.stderr}[/yellow]")
 
         console.print("\n[green][OK] Shadow9 updated successfully![/green]")
-        console.print("[dim]Restart the server to apply changes.[/dim]")
+
+        # Restart server if it was running
+        if server_was_running:
+            console.print("[>] Restarting server...")
+            # Start server in background
+            shadow9_script = script_dir / "shadow9"
+            subprocess.Popen(
+                [str(shadow9_script), "serve"],
+                cwd=script_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            console.print("[green][OK] Server restarted![/green]")
+        else:
+            console.print("[dim]Server was not running. Start with: ./shadow9 serve[/dim]")
 
     except FileNotFoundError:
         console.print("[red]Error: git not found. Please install git.[/red]")

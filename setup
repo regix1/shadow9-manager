@@ -72,20 +72,29 @@ echo -e "${GREEN}[OK] Dependencies installed${NC}"
 # Create config directory if needed
 mkdir -p config
 
-# Generate master key
-echo -e "\n${CYAN}[4/6]${NC} Generating encryption key..."
-MASTER_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+# Generate master key (only if not exists)
+echo -e "\n${CYAN}[4/6]${NC} Checking encryption key..."
 
-# Save to .env file
-cat > .env << EOF
+if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
+    # Load existing key
+    source .env
+    MASTER_KEY="$SHADOW9_MASTER_KEY"
+    echo -e "${YELLOW}[INFO] Using existing master key from .env${NC}"
+else
+    # Generate new key
+    MASTER_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+    # Save to .env file
+    cat > .env << EOF
 # Shadow9 Master Key - Keep this secret!
 # This key encrypts your credentials file
 SHADOW9_MASTER_KEY=$MASTER_KEY
 EOF
-chmod 600 .env
+    chmod 600 .env
 
-echo -e "${GREEN}[OK] Master key generated and saved to .env${NC}"
-echo -e "${YELLOW}[INFO] IMPORTANT: Keep this key safe! You'll need it to access your credentials.${NC}"
+    echo -e "${GREEN}[OK] Master key generated and saved to .env${NC}"
+    echo -e "${YELLOW}[INFO] IMPORTANT: Keep this key safe! You'll need it to access your credentials.${NC}"
+fi
 
 # Setup shell completion
 echo -e "\n${CYAN}[5/6]${NC} Setting up tab completion..."
@@ -191,8 +200,8 @@ if [ "$COMPLETION_INSTALLED" = false ]; then
     echo -e "  Add to your shell config: source \"$COMPLETION_SCRIPT\""
 fi
 
-# Create first user
-echo -e "\n${CYAN}[6/6]${NC} Creating your first user..."
+# Create first user (only if no users exist)
+echo -e "\n${CYAN}[6/6]${NC} Checking users..."
 echo ""
 
 # Export the master key for the Python process
@@ -213,14 +222,20 @@ auth = AuthManager(
     master_key=os.environ.get('SHADOW9_MASTER_KEY')
 )
 
-# Generate secure credentials
-username, password = auth.generate_credentials()
+# Check if users already exist
+existing_users = auth.list_users()
+if existing_users:
+    print(f'[INFO] Found {len(existing_users)} existing user(s): {', '.join(existing_users)}')
+    print('[INFO] Skipping user creation. Use ./shadow9 user add <username> to add more.')
+else:
+    # Generate secure credentials
+    username, password = auth.generate_credentials()
 
-# Add the user
-auth.add_user(username, password, use_tor=True)
+    # Add the user
+    auth.add_user(username, password, use_tor=True)
 
-# Print credentials
-print(f'''
+    # Print credentials
+    print(f'''
 ============================================================
                     Your Credentials
 ------------------------------------------------------------
