@@ -150,17 +150,21 @@ if ! pip3 install --help 2>&1 | grep -q "break-system-packages"; then
     PIP_ARGS=""
 fi
 
-# Install from requirements.txt
+# Uninstall any existing shadow9-manager to avoid conflicts
+pip3 uninstall shadow9-manager -y 2>/dev/null || true
+
+# Install shadow9 package in editable mode (this handles both deps and entry points)
+echo -e "${CYAN}Installing shadow9 package...${NC}"
 if is_root; then
-    pip3 install $PIP_ARGS -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || \
-    pip3 install $PIP_ARGS -r "$SCRIPT_DIR/requirements.txt"
+    pip3 install $PIP_ARGS -q -e "$SCRIPT_DIR" 2>/dev/null || \
+    pip3 install $PIP_ARGS -e "$SCRIPT_DIR"
 else
     # Try user install first, fall back to sudo
-    pip3 install $PIP_ARGS --user -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || \
-    sudo pip3 install $PIP_ARGS -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || \
-    sudo pip3 install $PIP_ARGS -r "$SCRIPT_DIR/requirements.txt"
+    pip3 install $PIP_ARGS --user -q -e "$SCRIPT_DIR" 2>/dev/null || \
+    sudo pip3 install $PIP_ARGS -q -e "$SCRIPT_DIR" 2>/dev/null || \
+    sudo pip3 install $PIP_ARGS -e "$SCRIPT_DIR"
 fi
-echo -e "${GREEN}[OK] Python dependencies installed${NC}"
+echo -e "${GREEN}[OK] Shadow9 package installed${NC}"
 
 # Create config directory if needed
 mkdir -p config
@@ -188,58 +192,47 @@ EOF
     echo -e "${GREEN}[OK] Master key generated and saved to .env${NC}"
 fi
 
-# Install shadow9 globally
-echo -e "\n${CYAN}[5/5]${NC} Installing shadow9 command..."
+# Verify shadow9 command is available
+echo -e "\n${CYAN}[5/5]${NC} Verifying shadow9 command..."
 
-# Determine install location
-if is_root; then
-    INSTALL_DIR="/usr/local/bin"
-elif [ -d "$HOME/.local/bin" ]; then
-    INSTALL_DIR="$HOME/.local/bin"
+# Check if shadow9 is in PATH
+if command -v shadow9 &> /dev/null; then
+    SHADOW9_PATH=$(command -v shadow9)
+    echo -e "${GREEN}[OK] shadow9 command available at: $SHADOW9_PATH${NC}"
 else
-    mkdir -p "$HOME/.local/bin"
-    INSTALL_DIR="$HOME/.local/bin"
-fi
-
-# Create symlink or wrapper script
-WRAPPER="$INSTALL_DIR/shadow9"
-
-if is_root; then
-    # Running as root - create symlink directly
-    ln -sf "$SCRIPT_DIR/shadow9" "$WRAPPER"
-    echo -e "${GREEN}[OK] Linked to $WRAPPER${NC}"
-else
-    # Not root - try symlink first, fall back to wrapper
-    if ln -sf "$SCRIPT_DIR/shadow9" "$WRAPPER" 2>/dev/null; then
-        echo -e "${GREEN}[OK] Linked to $WRAPPER${NC}"
-    else
-        # Create wrapper script
-        cat > "$WRAPPER" << EOF
-#!/usr/bin/env bash
-# Shadow9 - installed from $SCRIPT_DIR
-exec "$SCRIPT_DIR/shadow9" "\$@"
-EOF
-        chmod +x "$WRAPPER"
-        echo -e "${GREEN}[OK] Installed to $WRAPPER${NC}"
-    fi
-fi
-
-# Check if install dir is in PATH
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    echo -e "${YELLOW}[INFO] Add this to your shell config:${NC}"
-    echo -e "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    # Pip might have installed to a location not in PATH, create symlink as fallback
+    echo -e "${YELLOW}[INFO] shadow9 not found in PATH, creating symlink...${NC}"
     
-    # Try to add to shell config
-    for RC_FILE in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [ -f "$RC_FILE" ]; then
-            if ! grep -q "$INSTALL_DIR" "$RC_FILE" 2>/dev/null; then
-                echo "" >> "$RC_FILE"
-                echo "# Added by shadow9 setup" >> "$RC_FILE"
-                echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$RC_FILE"
-                echo -e "${GREEN}[OK] Added to $(basename $RC_FILE)${NC}"
+    if is_root; then
+        INSTALL_DIR="/usr/local/bin"
+    elif [ -d "$HOME/.local/bin" ]; then
+        INSTALL_DIR="$HOME/.local/bin"
+    else
+        mkdir -p "$HOME/.local/bin"
+        INSTALL_DIR="$HOME/.local/bin"
+    fi
+    
+    # Create symlink to the project script
+    ln -sf "$SCRIPT_DIR/shadow9" "$INSTALL_DIR/shadow9"
+    echo -e "${GREEN}[OK] Linked to $INSTALL_DIR/shadow9${NC}"
+    
+    # Check if install dir is in PATH
+    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+        echo -e "${YELLOW}[INFO] Add this to your shell config:${NC}"
+        echo -e "  export PATH=\"$INSTALL_DIR:\$PATH\""
+        
+        # Try to add to shell config
+        for RC_FILE in "$HOME/.bashrc" "$HOME/.zshrc"; do
+            if [ -f "$RC_FILE" ]; then
+                if ! grep -q "$INSTALL_DIR" "$RC_FILE" 2>/dev/null; then
+                    echo "" >> "$RC_FILE"
+                    echo "# Added by shadow9 setup" >> "$RC_FILE"
+                    echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$RC_FILE"
+                    echo -e "${GREEN}[OK] Added to $(basename $RC_FILE)${NC}"
+                fi
             fi
-        fi
-    done
+        done
+    fi
 fi
 
 echo -e "${GREEN}"
