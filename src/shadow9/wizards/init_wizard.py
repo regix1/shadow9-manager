@@ -51,30 +51,25 @@ def run_init_wizard() -> Config:
     server = ServerConfig(host=host, port=port, max_connections=max_connections, daemon=daemon)
     
     # Tor settings
-    console.print("\n[bold]Step 2:[/bold] Tor Settings")
-    console.print("  [dim]Configure Tor integration.[/dim]\n")
-    
-    tor_enabled = typer.confirm("  Enable Tor by default?", default=True)
+    console.print("\n[bold]Step 2:[/bold] Tor Connection")
+    console.print("  [dim]Configure where Tor is running (routing is per-user).[/dim]\n")
     
     tor_host = "127.0.0.1"
     tor_port = 9050
     control_port = 9051
     
-    if tor_enabled:
-        if typer.confirm("  Use default Tor ports (9050/9051)?", default=True):
-            pass
-        else:
-            tor_host = typer.prompt("    Tor SOCKS host", default="127.0.0.1")
-            tor_port_str = typer.prompt("    Tor SOCKS port", default="9050")
-            control_port_str = typer.prompt("    Tor control port", default="9051")
-            try:
-                tor_port = int(tor_port_str)
-                control_port = int(control_port_str)
-            except ValueError:
-                tor_port = 9050
-                control_port = 9051
+    if not typer.confirm("  Use default Tor ports (9050/9051)?", default=True):
+        tor_host = typer.prompt("    Tor SOCKS host", default="127.0.0.1")
+        tor_port_str = typer.prompt("    Tor SOCKS port", default="9050")
+        control_port_str = typer.prompt("    Tor control port", default="9051")
+        try:
+            tor_port = int(tor_port_str)
+            control_port = int(control_port_str)
+        except ValueError:
+            tor_port = 9050
+            control_port = 9051
     
-    tor = TorConfig(enabled=tor_enabled, socks_host=tor_host, socks_port=tor_port, control_port=control_port)
+    tor = TorConfig(enabled=True, socks_host=tor_host, socks_port=tor_port, control_port=control_port)
     
     # Security settings
     console.print("\n[bold]Step 3:[/bold] Default Security Level")
@@ -136,10 +131,9 @@ def show_config_summary(config: Config) -> None:
     table.add_row("Max Connections", str(config.server.max_connections))
     table.add_row("Run Mode", "Background (daemon)" if config.server.daemon else "Foreground")
     table.add_row("", "")
-    table.add_row("Tor Enabled", "Yes" if config.tor.enabled else "No")
-    if config.tor.enabled:
-        table.add_row("Tor SOCKS Port", str(config.tor.socks_port))
-        table.add_row("Tor Control Port", str(config.tor.control_port))
+    table.add_row("Tor SOCKS", f"{config.tor.socks_host}:{config.tor.socks_port}")
+    table.add_row("Tor Control Port", str(config.tor.control_port))
+    table.add_row("Tor Routing", "Per-user (IsolateSOCKSAuth)")
     table.add_row("", "")
     table.add_row("Allowed Ports", ", ".join(map(str, config.security.allowed_ports)))
     table.add_row("Rate Limit", f"{config.security.rate_limit_per_minute}/min")
