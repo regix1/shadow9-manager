@@ -31,6 +31,13 @@ from .bridges import (
     BridgeType, BridgeConfig, TorBridgeConnector,
     get_bridge_preset, print_bridge_info, PluggableTransportManager
 )
+from .wizards import (
+    run_user_wizard, run_user_modify_wizard, run_user_remove_wizard,
+    run_user_list_wizard, run_user_info_wizard, display_user_info,
+    run_user_enable_wizard, run_user_disable_wizard,
+    run_serve_wizard, show_serve_preview,
+    run_init_wizard, show_config_summary, show_master_key
+)
 
 console = Console()
 
@@ -81,18 +88,52 @@ def main(
     pass
 
 
+
+
 @app.command()
 def serve(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     host: Annotated[Optional[str], typer.Option("--host", "-h", help="Host to bind to")] = None,
     port: Annotated[Optional[int], typer.Option("--port", "-p", help="Port to listen on")] = None,
-    tor: Annotated[bool, typer.Option("--tor/--no-tor", help="Enable/disable Tor routing")] = True,
+    tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Enable/disable Tor routing")] = None,
     tor_port: Annotated[Optional[int], typer.Option("--tor-port", help="Tor SOCKS port (default: 9050)")] = None,
-    security: Annotated[SecurityChoice, typer.Option("--security", "-s", help="Security/evasion level")] = SecurityChoice.none,
-    bridge: Annotated[BridgeChoice, typer.Option("--bridge", "-b", help="Tor bridge type for stealth")] = BridgeChoice.none,
+    security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
+    bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type for stealth")] = None,
+    interactive: Annotated[Optional[bool], typer.Option("--interactive/--no-interactive", "-i", help="Run interactive configuration wizard")] = None,
 ):
     """Start the SOCKS5 proxy server."""
-    asyncio.run(_serve(config, host, port, tor, tor_port, security.value, bridge.value))
+    # Detect if we should run interactive mode
+    config_flags_provided = any([
+        tor is not None,
+        security is not None,
+        bridge is not None,
+    ])
+    
+    # Determine if interactive mode should run
+    run_interactive = False
+    if interactive is True:
+        run_interactive = True
+    elif interactive is False:
+        run_interactive = False
+    elif not config_flags_provided:
+        # No config flags provided, ask user
+        console.print("\n[dim]No configuration flags provided.[/dim]")
+        run_interactive = typer.confirm("Run interactive configuration wizard?", default=True)
+    
+    # Run interactive mode or use defaults
+    if run_interactive:
+        use_tor, security_val, bridge_val = run_serve_wizard()
+        show_serve_preview(use_tor, security_val, bridge_val)
+        if not typer.confirm("\nStart server with these settings?", default=True):
+            console.print("[yellow]Cancelled[/yellow]")
+            raise typer.Abort()
+    else:
+        # Use provided values or defaults
+        use_tor = tor if tor is not None else True
+        security_val = security.value if security is not None else "none"
+        bridge_val = bridge.value if bridge is not None else "none"
+    
+    asyncio.run(_serve(config, host, port, use_tor, tor_port, security_val, bridge_val))
 
 
 async def _serve(config_path: str, host: Optional[str], port: Optional[int],
@@ -319,8 +360,8 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
 
 @user_app.command("add")
 def user_add(
-    username: Annotated[str, typer.Argument(help="Username for the new user")],
-    password: Annotated[str, typer.Option("--password", "-p", prompt=True, hide_input=True, confirmation_prompt=True, help="User password")],
+    username: Annotated[Optional[str], typer.Argument(help="Username for the new user")] = None,
+    password: Annotated[Optional[str], typer.Option("--password", "-p", help="User password")] = None,
     use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")] = None,
     bridge: Annotated[BridgeChoice, typer.Option("--bridge", "-b", help="Tor bridge type")] = BridgeChoice.none,
     security: Annotated[SecurityChoice, typer.Option("--security", "-s", help="Security/evasion level")] = SecurityChoice.basic,
@@ -329,6 +370,23 @@ def user_add(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
 ):
     """Add a new user with customizable settings."""
+    # If no username provided, offer to run interactive wizard
+    if username is None:
+        console.print("[yellow]No username provided.[/yellow]")
+        run_wizard = typer.confirm("Run interactive wizard?", default=True)
+        if run_wizard:
+            from .user_wizard import run_user_wizard
+            run_user_wizard(config)
+            return
+        else:
+            console.print("[dim]Usage: shadow9 user add <username> [OPTIONS][/dim]")
+            console.print("[dim]Or run: shadow9 user new[/dim]")
+            raise typer.Exit(0)
+
+    # Prompt for password if not provided
+    if password is None:
+        password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
+
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
     # Prompt for Tor preference if not specified
@@ -388,16 +446,12 @@ def user_add(
 
 @user_app.command("remove")
 def user_remove(
-    username: Annotated[str, typer.Argument(help="Username to remove")],
+    username: Annotated[Optional[str], typer.Argument(help="Username to remove (interactive if omitted)")] = None,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+    all_users: Annotated[bool, typer.Option("--all", help="Remove all users")] = False,
 ):
-    """Remove a user."""
-    if not yes:
-        confirm = typer.confirm(f"Are you sure you want to remove user '{username}'?")
-        if not confirm:
-            raise typer.Abort()
-
+    """Remove a user (interactive menu if no username provided)."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
     import os
@@ -408,17 +462,90 @@ def user_remove(
         master_key=master_key
     )
 
+    users = auth_manager.list_users()
+    
+    if not users:
+        console.print("[yellow]No users configured[/yellow]")
+        return
+
+    # Handle --all flag
+    if all_users:
+        if not yes:
+            console.print(f"[bold red]This will remove ALL {len(users)} users![/bold red]")
+            confirm = typer.confirm("Are you sure?", default=False)
+            if not confirm:
+                raise typer.Abort()
+        
+        for user in users:
+            auth_manager.remove_user(user)
+            console.print(f"[dim]Removed: {user}[/dim]")
+        console.print(f"[green]All {len(users)} users removed[/green]")
+        return
+
+    # Interactive mode if no username provided
+    if username is None:
+        console.print("\n[bold]Select user(s) to remove:[/bold]\n")
+        
+        # Show numbered list
+        for i, user in enumerate(users, 1):
+            use_tor = auth_manager.get_user_tor_preference(user)
+            routing = "Tor" if use_tor else "Direct"
+            console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
+        
+        console.print(f"  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
+        console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+        
+        choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
+        
+        if choice.upper() == "Q":
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+        
+        if choice.upper() == "A":
+            if not yes:
+                console.print(f"\n[bold red]This will remove ALL {len(users)} users![/bold red]")
+                confirm = typer.confirm("Are you sure?", default=False)
+                if not confirm:
+                    raise typer.Abort()
+            
+            for user in users:
+                auth_manager.remove_user(user)
+                console.print(f"[dim]Removed: {user}[/dim]")
+            console.print(f"[green]All {len(users)} users removed[/green]")
+            return
+        
+        # Handle number selection
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(users):
+                username = users[idx]
+            else:
+                console.print("[red]Invalid selection[/red]")
+                return
+        except ValueError:
+            console.print("[red]Invalid selection[/red]")
+            return
+
+    # Confirm and remove single user
+    if not yes:
+        confirm = typer.confirm(f"Remove user '{username}'?")
+        if not confirm:
+            raise typer.Abort()
+
     if auth_manager.remove_user(username):
         console.print(f"[green]User '{username}' removed[/green]")
     else:
         console.print(f"[red]User '{username}' not found[/red]")
 
 
+
+
 @user_app.command("list")
 def user_list(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+    interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Interactive mode with actions")] = False,
 ):
-    """List all users."""
+    """List all users (use -i for interactive mode with actions)."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
     import os
@@ -435,16 +562,23 @@ def user_list(
         console.print("[yellow]No users configured[/yellow]")
         return
 
-    table = Table(title="Configured Users")
-    table.add_column("Username", style="cyan")
-    table.add_column("Routing", style="green")
+    if not interactive:
+        # Standard table view
+        table = Table(title="Configured Users")
+        table.add_column("Username", style="cyan")
+        table.add_column("Routing", style="green")
 
-    for username in users:
-        use_tor = auth_manager.get_user_tor_preference(username)
-        routing = "Tor" if use_tor else "Direct"
-        table.add_row(username, routing)
+        for username in users:
+            use_tor = auth_manager.get_user_tor_preference(username)
+            routing = "Tor" if use_tor else "Direct"
+            table.add_row(username, routing)
 
-    console.print(table)
+        console.print(table)
+        console.print("\n[dim]Tip: Use 'shadow9 user list -i' for interactive mode with actions[/dim]")
+        return
+
+    # Interactive mode
+    run_user_list_wizard(auth_manager, config)
 
 
 @user_app.command("generate")
@@ -592,7 +726,7 @@ def user_generate(
 
 @user_app.command("info")
 def user_info(
-    username: Annotated[str, typer.Argument(help="Username to show info for")],
+    username: Annotated[Optional[str], typer.Argument(help="Username to show info for (interactive if omitted)")] = None,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
 ):
     """Show detailed information about a user."""
@@ -606,51 +740,46 @@ def user_info(
         master_key=master_key
     )
 
-    info = auth_manager.get_user_info(username)
-
-    if not info:
-        console.print(f"[red]User '{username}' not found[/red]")
-        raise typer.Exit(1)
-
-    table = Table(title=f"User: {username}")
-    table.add_column("Property", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("Username", info["username"])
-    table.add_row("Status", "[green]Enabled[/green]" if info["enabled"] else "[red]Disabled[/red]")
-
-    # Display routing with bridge info
-    routing = "Tor" if info["use_tor"] else "Direct"
-    bridge = info.get("bridge_type", "none")
-    if bridge != "none":
-        routing += f" + {bridge} bridge"
-    table.add_row("Routing", routing)
-
-    table.add_row("Security", info.get("security_level", "basic").upper())
-
-    # Display allowed ports
-    allowed_ports = info.get("allowed_ports")
-    if allowed_ports:
-        table.add_row("Allowed Ports", ", ".join(map(str, allowed_ports)))
+    # Interactive mode if no username provided
+    if username is None:
+        users = auth_manager.list_users()
+        
+        if not users:
+            console.print("[yellow]No users configured[/yellow]")
+            raise typer.Exit(0)
+        
+        while True:
+            console.print("\n[bold cyan]Select a user to view:[/bold cyan]\n")
+            for i, user in enumerate(users, 1):
+                use_tor = auth_manager.get_user_tor_preference(user)
+                routing = "[green]Tor[/green]" if use_tor else "[yellow]Direct[/yellow]"
+                console.print(f"  [cyan]{i}[/cyan]. {user} ({routing})")
+            
+            console.print(f"\n  [dim]Enter number 1-{len(users)}, or 'q' to quit[/dim]")
+            
+            choice = typer.prompt("  Select user", default="q")
+            
+            if choice.lower() == 'q':
+                return
+            
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(users):
+                    display_user_info(auth_manager, users[idx])
+                    
+                    if not typer.confirm("\nView another user?", default=False):
+                        return
+                else:
+                    console.print(f"  [red]Please enter a number between 1 and {len(users)}[/red]")
+            except ValueError:
+                console.print("  [red]Please enter a valid number[/red]")
     else:
-        table.add_row("Allowed Ports", "All (no restrictions)")
-
-    # Display rate limit
-    rate_limit = info.get("rate_limit")
-    if rate_limit:
-        table.add_row("Rate Limit", f"{rate_limit} req/min")
-    else:
-        table.add_row("Rate Limit", "Server default")
-
-    table.add_row("Created", info["created_at"] or "Unknown")
-    table.add_row("Last Used", info["last_used"] or "Never")
-
-    console.print(table)
+        display_user_info(auth_manager, username)
 
 
 @user_app.command("modify")
 def user_modify(
-    username: Annotated[str, typer.Argument(help="Username to modify")],
+    username: Annotated[Optional[str], typer.Argument(help="Username to modify (omit for interactive selection)")] = None,
     use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Enable or disable Tor routing")] = None,
     bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")] = None,
     enabled: Annotated[Optional[bool], typer.Option("--enable/--disable", help="Enable or disable account")] = None,
@@ -659,7 +788,19 @@ def user_modify(
     rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute (0 for default)")] = None,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
 ):
-    """Modify settings for an existing user."""
+    """Modify settings for an existing user.
+    
+    Run without arguments for interactive mode, or specify username and flags for direct modification.
+    """
+    # Check if any modification flags were provided
+    has_flags = any([use_tor is not None, bridge is not None, enabled is not None, 
+                     security is not None, ports is not None, rate_limit is not None])
+    
+    # Launch interactive wizard if no username or no flags
+    if username is None or (username is not None and not has_flags):
+        run_user_modify_wizard(config, preselected_username=username)
+        return
+    
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
     import os
@@ -739,7 +880,7 @@ def user_modify(
 
 @user_app.command("enable")
 def user_enable(
-    username: Annotated[str, typer.Argument(help="Username to enable")],
+    username: Annotated[Optional[str], typer.Argument(help="Username to enable")] = None,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
 ):
     """Enable a user account."""
@@ -753,6 +894,56 @@ def user_enable(
         master_key=master_key
     )
 
+    users = auth_manager.list_users()
+    if not users:
+        console.print("[yellow]No users found[/yellow]")
+        return
+
+    # Get disabled users only
+    disabled_users = [u for u in users if auth_manager.get_user_enabled(u) == False]
+
+    # Interactive mode if no username provided
+    if username is None:
+        if not disabled_users:
+            console.print("[green]All users are already enabled[/green]")
+            return
+
+        console.print("\n[bold]Select user(s) to enable:[/bold]\n")
+
+        # Show numbered list of disabled users
+        for i, user in enumerate(disabled_users, 1):
+            use_tor = auth_manager.get_user_tor_preference(user)
+            routing = "Tor" if use_tor else "Direct"
+            console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
+
+        console.print(f"  [cyan]A.[/cyan] [green]Enable ALL disabled users[/green]")
+        console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+
+        choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
+
+        if choice.upper() == "Q":
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+
+        if choice.upper() == "A":
+            for user in disabled_users:
+                auth_manager.set_user_enabled(user, True)
+                console.print(f"[dim]Enabled: {user}[/dim]")
+            console.print(f"[green]All {len(disabled_users)} users enabled[/green]")
+            return
+
+        # Handle number selection
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(disabled_users):
+                username = disabled_users[idx]
+            else:
+                console.print("[red]Invalid selection[/red]")
+                return
+        except ValueError:
+            console.print("[red]Invalid selection[/red]")
+            return
+
     if auth_manager.set_user_enabled(username, True):
         console.print(f"[green]User '{username}' enabled[/green]")
     else:
@@ -761,7 +952,7 @@ def user_enable(
 
 @user_app.command("disable")
 def user_disable(
-    username: Annotated[str, typer.Argument(help="Username to disable")],
+    username: Annotated[Optional[str], typer.Argument(help="Username to disable")] = None,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
 ):
     """Disable a user account (prevents login)."""
@@ -775,6 +966,56 @@ def user_disable(
         master_key=master_key
     )
 
+    users = auth_manager.list_users()
+    if not users:
+        console.print("[yellow]No users found[/yellow]")
+        return
+
+    # Get enabled users only
+    enabled_users = [u for u in users if auth_manager.get_user_enabled(u) == True]
+
+    # Interactive mode if no username provided
+    if username is None:
+        if not enabled_users:
+            console.print("[yellow]All users are already disabled[/yellow]")
+            return
+
+        console.print("\n[bold]Select user(s) to disable:[/bold]\n")
+
+        # Show numbered list of enabled users
+        for i, user in enumerate(enabled_users, 1):
+            use_tor = auth_manager.get_user_tor_preference(user)
+            routing = "Tor" if use_tor else "Direct"
+            console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
+
+        console.print(f"  [cyan]A.[/cyan] [red]Disable ALL enabled users[/red]")
+        console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+
+        choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
+
+        if choice.upper() == "Q":
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+
+        if choice.upper() == "A":
+            for user in enabled_users:
+                auth_manager.set_user_enabled(user, False)
+                console.print(f"[dim]Disabled: {user}[/dim]")
+            console.print(f"[yellow]All {len(enabled_users)} users disabled[/yellow]")
+            return
+
+        # Handle number selection
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(enabled_users):
+                username = enabled_users[idx]
+            else:
+                console.print("[red]Invalid selection[/red]")
+                return
+        except ValueError:
+            console.print("[red]Invalid selection[/red]")
+            return
+
     if auth_manager.set_user_enabled(username, False):
         console.print(f"[yellow]User '{username}' disabled[/yellow]")
     else:
@@ -786,36 +1027,68 @@ def user_new(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
 ):
     """Interactive wizard to create a new user."""
-    from .user_wizard import run_user_wizard
     run_user_wizard(config)
 
 
 # ============== Utility Commands ==============
 
+
 @app.command()
 def init(
     output: Annotated[str, typer.Option("--output", "-o", help="Output path for configuration file")] = "config/config.yaml",
+    quick: Annotated[bool, typer.Option("--quick", "-q", help="Use defaults without prompts")] = False,
 ):
-    """Initialize a new configuration file."""
+    """Initialize a new configuration file (interactive wizard if no flags provided)."""
     output_path = Path(output)
 
     if output_path.exists():
         if not typer.confirm(f"Configuration file {output} already exists. Overwrite?"):
             raise typer.Abort()
 
-    generate_default_config(output_path)
-    console.print(f"[green]Configuration file created: {output}[/green]")
+    # Quick mode: just generate defaults
+    if quick:
+        generate_default_config(output_path)
+        console.print(f"[green]Configuration file created: {output}[/green]")
+        show_master_key()
+        return
 
-    # Also generate a master key
-    key = generate_master_key()
+    # Interactive wizard
     console.print(Panel(
-        f"[bold yellow]Master Key (save this securely!):[/bold yellow]\n\n"
-        f"[cyan]{key}[/cyan]\n\n"
-        f"Set as environment variable:\n"
-        f"[dim]export SHADOW9_MASTER_KEY=\"{key}\"[/dim]",
-        title="Encryption Key",
-        border_style="yellow"
+        "[bold cyan]Configuration Setup[/bold cyan]\n\n"
+        "This wizard will help you configure Shadow9 Manager.",
+        border_style="cyan"
     ))
+
+    console.print("\n[bold]Setup Mode:[/bold]\n")
+    console.print("  [cyan]1.[/cyan] Quick start [green](recommended)[/green]")
+    console.print("     Use sensible defaults for all settings.")
+    console.print("     [dim]Best for: Getting started quickly[/dim]\n")
+    console.print("  [cyan]2.[/cyan] Custom configuration")
+    console.print("     Configure each setting manually.")
+    console.print("     [dim]Best for: Fine-tuning for specific needs[/dim]\n")
+
+    mode = typer.prompt("Select mode [1-2]", default="1")
+
+    if mode == "1":
+        # Quick start - just use defaults
+        generate_default_config(output_path)
+        console.print(f"\n[green]Configuration file created: {output}[/green]")
+        show_master_key()
+        return
+
+    # Custom configuration
+    config = run_init_wizard()
+    
+    # Show summary
+    show_config_summary(config)
+    
+    if not typer.confirm("\nSave this configuration?", default=True):
+        console.print("[yellow]Cancelled[/yellow]")
+        raise typer.Abort()
+
+    config.save(output_path)
+    console.print(f"\n[green]Configuration file created: {output}[/green]")
+    show_master_key()
 
 
 @app.command("check-tor")

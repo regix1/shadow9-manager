@@ -11,8 +11,8 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from .auth import AuthManager
-from .config import Config
+from ..auth import AuthManager
+from ..config import Config
 
 console = Console()
 

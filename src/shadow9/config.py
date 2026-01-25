@@ -219,13 +219,20 @@ def setup_logging(config: LogConfig) -> None:
     """
     import logging
 
+    def uppercase_log_level(logger, method_name, event_dict):
+        """Uppercase the log level."""
+        if "level" in event_dict:
+            event_dict["level"] = event_dict["level"].upper()
+        return event_dict
+
     # Configure structlog
     processors = [
         structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
+        uppercase_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
     ]
@@ -233,7 +240,7 @@ def setup_logging(config: LogConfig) -> None:
     if config.format == "json":
         processors.append(structlog.processors.JSONRenderer())
     else:
-        processors.append(structlog.dev.ConsoleRenderer(colors=True))
+        processors.append(structlog.dev.ConsoleRenderer(colors=True, pad_event=0))
 
     structlog.configure(
         processors=processors,
