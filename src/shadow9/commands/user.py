@@ -1,7 +1,7 @@
 """
 User management commands for Shadow9 CLI.
 
-Contains all user subcommands: add, remove, list, generate, info, modify, enable, disable, new.
+Contains all user subcommands: generate, remove, list, info, modify, enable, disable.
 """
 
 from pathlib import Path
@@ -16,7 +16,7 @@ from rich.panel import Panel
 from ..config import Config
 from ..auth import AuthManager
 from ..wizards import (
-    run_user_wizard, run_user_modify_wizard,
+    run_user_modify_wizard,
     run_user_list_wizard, display_user_info
 )
 
@@ -46,223 +46,6 @@ def register_user_commands(app: typer.Typer):
         no_args_is_help=True,
     )
     app.add_typer(user_app, name="user")
-
-    @user_app.command("add")
-    def user_add(
-        username: Annotated[Optional[str], typer.Argument(help="Username for the new user")] = None,
-        password: Annotated[Optional[str], typer.Option("--password", "-p", help="User password")] = None,
-        use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")] = None,
-        bridge: Annotated[BridgeChoice, typer.Option("--bridge", "-b", help="Tor bridge type")] = BridgeChoice.none,
-        security: Annotated[SecurityChoice, typer.Option("--security", "-s", help="Security/evasion level")] = SecurityChoice.basic,
-        ports: Annotated[Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")] = None,
-        rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
-    ):
-        """Add a new user with customizable settings."""
-        # If no username provided, offer to run interactive wizard
-        if username is None:
-            console.print("[yellow]No username provided.[/yellow]")
-            run_wizard = typer.confirm("Run interactive wizard?", default=True)
-            if run_wizard:
-                run_user_wizard(config)
-                return
-            else:
-                console.print("[dim]Usage: shadow9 user add <username> [OPTIONS][/dim]")
-                console.print("[dim]Or run: shadow9 user new[/dim]")
-                raise typer.Exit(0)
-
-        # Prompt for password if not provided
-        if password is None:
-            password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
-
-        cfg = Config.load(Path(config)) if Path(config).exists() else Config()
-
-        # Prompt for Tor preference if not specified
-        if use_tor is None:
-            use_tor = typer.confirm(
-                "Route this user's traffic through Tor? (No = direct proxy)",
-                default=True
-            )
-
-        # If using bridges, Tor must be enabled
-        if bridge != BridgeChoice.none and not use_tor:
-            console.print("[yellow]Note: Bridges require Tor. Enabling Tor routing.[/yellow]")
-            use_tor = True
-
-        # Parse ports
-        allowed_ports = None
-        if ports:
-            try:
-                allowed_ports = [int(p.strip()) for p in ports.split(',')]
-            except ValueError:
-                console.print("[red]Error: Invalid port format. Use comma-separated numbers.[/red]")
-                raise typer.Exit(1)
-
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
-
-        auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
-            master_key=master_key
-        )
-
-        try:
-            if auth_manager.add_user(
-                username, password,
-                use_tor=use_tor,
-                bridge_type=bridge.value,
-                security_level=security.value,
-                allowed_ports=allowed_ports,
-                rate_limit=rate_limit
-            ):
-                routing = "Tor" if use_tor else "Direct"
-                if bridge != BridgeChoice.none:
-                    routing += f" + {bridge.value} bridge"
-                console.print(f"[green]User '{username}' added successfully[/green]")
-                console.print(f"[dim]Routing: {routing}[/dim]")
-                console.print(f"[dim]Security: {security.value}[/dim]")
-                if allowed_ports:
-                    console.print(f"[dim]Allowed ports: {', '.join(map(str, allowed_ports))}[/dim]")
-                if rate_limit:
-                    console.print(f"[dim]Rate limit: {rate_limit} req/min[/dim]")
-            else:
-                console.print(f"[red]User '{username}' already exists[/red]")
-        except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
-
-    @user_app.command("remove")
-    def user_remove(
-        username: Annotated[Optional[str], typer.Argument(help="Username to remove (interactive if omitted)")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
-        yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
-        all_users: Annotated[bool, typer.Option("--all", help="Remove all users")] = False,
-    ):
-        """Remove a user (interactive menu if no username provided)."""
-        cfg = Config.load(Path(config)) if Path(config).exists() else Config()
-
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
-
-        auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
-            master_key=master_key
-        )
-
-        users = auth_manager.list_users()
-        
-        if not users:
-            console.print("[yellow]No users configured[/yellow]")
-            return
-
-        # Handle --all flag
-        if all_users:
-            if not yes:
-                console.print(f"[bold red]This will remove ALL {len(users)} users![/bold red]")
-                confirm = typer.confirm("Are you sure?", default=False)
-                if not confirm:
-                    raise typer.Abort()
-            
-            for user in users:
-                auth_manager.remove_user(user)
-                console.print(f"[dim]Removed: {user}[/dim]")
-            console.print(f"[green]All {len(users)} users removed[/green]")
-            return
-
-        # Interactive mode if no username provided
-        if username is None:
-            console.print("\n[bold]Select user(s) to remove:[/bold]\n")
-            
-            # Show numbered list
-            for i, user in enumerate(users, 1):
-                use_tor = auth_manager.get_user_tor_preference(user)
-                routing = "Tor" if use_tor else "Direct"
-                console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
-            
-            console.print(f"  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
-            console.print(f"  [cyan]Q.[/cyan] Cancel\n")
-            
-            choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
-            
-            if choice.upper() == "Q":
-                console.print("[yellow]Cancelled[/yellow]")
-                return
-            
-            if choice.upper() == "A":
-                if not yes:
-                    console.print(f"\n[bold red]This will remove ALL {len(users)} users![/bold red]")
-                    confirm = typer.confirm("Are you sure?", default=False)
-                    if not confirm:
-                        raise typer.Abort()
-                
-                for user in users:
-                    auth_manager.remove_user(user)
-                    console.print(f"[dim]Removed: {user}[/dim]")
-                console.print(f"[green]All {len(users)} users removed[/green]")
-                return
-            
-            # Handle number selection
-            try:
-                idx = int(choice) - 1
-                if 0 <= idx < len(users):
-                    username = users[idx]
-                else:
-                    console.print("[red]Invalid selection[/red]")
-                    return
-            except ValueError:
-                console.print("[red]Invalid selection[/red]")
-                return
-
-        # Confirm and remove single user
-        if not yes:
-            confirm = typer.confirm(f"Remove user '{username}'?")
-            if not confirm:
-                raise typer.Abort()
-
-        if auth_manager.remove_user(username):
-            console.print(f"[green]User '{username}' removed[/green]")
-        else:
-            console.print(f"[red]User '{username}' not found[/red]")
-
-    @user_app.command("list")
-    def user_list(
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
-        interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Interactive mode with actions")] = False,
-    ):
-        """List all users (use -i for interactive mode with actions)."""
-        cfg = Config.load(Path(config)) if Path(config).exists() else Config()
-
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
-
-        auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
-            master_key=master_key
-        )
-
-        users = auth_manager.list_users()
-
-        if not users:
-            console.print("[yellow]No users configured[/yellow]")
-            return
-
-        if not interactive:
-            # Standard table view
-            table = Table(title="Configured Users")
-            table.add_column("Username", style="cyan")
-            table.add_column("Routing", style="green")
-
-            for username in users:
-                use_tor = auth_manager.get_user_tor_preference(username)
-                routing = "Tor" if use_tor else "Direct"
-                table.add_row(username, routing)
-
-            console.print(table)
-            console.print("\n[dim]Tip: Use 'shadow9 user list -i' for interactive mode with actions[/dim]")
-            return
-
-        # Interactive mode
-        run_user_list_wizard(auth_manager, config)
 
     @user_app.command("generate")
     def user_generate(
@@ -430,6 +213,139 @@ def register_user_commands(app: typer.Typer):
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
+
+    @user_app.command("remove")
+    def user_remove(
+        username: Annotated[Optional[str], typer.Argument(help="Username to remove (interactive if omitted)")] = None,
+        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+        yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+        all_users: Annotated[bool, typer.Option("--all", help="Remove all users")] = False,
+    ):
+        """Remove a user (interactive menu if no username provided)."""
+        cfg = Config.load(Path(config)) if Path(config).exists() else Config()
+
+        import os
+        master_key = os.getenv(cfg.auth.master_key_env)
+
+        auth_manager = AuthManager(
+            credentials_file=Path(cfg.auth.credentials_file),
+            master_key=master_key
+        )
+
+        users = auth_manager.list_users()
+        
+        if not users:
+            console.print("[yellow]No users configured[/yellow]")
+            return
+
+        # Handle --all flag
+        if all_users:
+            if not yes:
+                console.print(f"[bold red]This will remove ALL {len(users)} users![/bold red]")
+                confirm = typer.confirm("Are you sure?", default=False)
+                if not confirm:
+                    raise typer.Abort()
+            
+            for user in users:
+                auth_manager.remove_user(user)
+                console.print(f"[dim]Removed: {user}[/dim]")
+            console.print(f"[green]All {len(users)} users removed[/green]")
+            return
+
+        # Interactive mode if no username provided
+        if username is None:
+            console.print("\n[bold]Select user(s) to remove:[/bold]\n")
+            
+            # Show numbered list
+            for i, user in enumerate(users, 1):
+                use_tor = auth_manager.get_user_tor_preference(user)
+                routing = "Tor" if use_tor else "Direct"
+                console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
+            
+            console.print(f"  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
+            console.print(f"  [cyan]Q.[/cyan] Cancel\n")
+            
+            choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
+            
+            if choice.upper() == "Q":
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+            
+            if choice.upper() == "A":
+                if not yes:
+                    console.print(f"\n[bold red]This will remove ALL {len(users)} users![/bold red]")
+                    confirm = typer.confirm("Are you sure?", default=False)
+                    if not confirm:
+                        raise typer.Abort()
+                
+                for user in users:
+                    auth_manager.remove_user(user)
+                    console.print(f"[dim]Removed: {user}[/dim]")
+                console.print(f"[green]All {len(users)} users removed[/green]")
+                return
+            
+            # Handle number selection
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(users):
+                    username = users[idx]
+                else:
+                    console.print("[red]Invalid selection[/red]")
+                    return
+            except ValueError:
+                console.print("[red]Invalid selection[/red]")
+                return
+
+        # Confirm and remove single user
+        if not yes:
+            confirm = typer.confirm(f"Remove user '{username}'?")
+            if not confirm:
+                raise typer.Abort()
+
+        if auth_manager.remove_user(username):
+            console.print(f"[green]User '{username}' removed[/green]")
+        else:
+            console.print(f"[red]User '{username}' not found[/red]")
+
+    @user_app.command("list")
+    def user_list(
+        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+        interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Interactive mode with actions")] = False,
+    ):
+        """List all users (use -i for interactive mode with actions)."""
+        cfg = Config.load(Path(config)) if Path(config).exists() else Config()
+
+        import os
+        master_key = os.getenv(cfg.auth.master_key_env)
+
+        auth_manager = AuthManager(
+            credentials_file=Path(cfg.auth.credentials_file),
+            master_key=master_key
+        )
+
+        users = auth_manager.list_users()
+
+        if not users:
+            console.print("[yellow]No users configured[/yellow]")
+            return
+
+        if not interactive:
+            # Standard table view
+            table = Table(title="Configured Users")
+            table.add_column("Username", style="cyan")
+            table.add_column("Routing", style="green")
+
+            for username in users:
+                use_tor = auth_manager.get_user_tor_preference(username)
+                routing = "Tor" if use_tor else "Direct"
+                table.add_row(username, routing)
+
+            console.print(table)
+            console.print("\n[dim]Tip: Use 'shadow9 user list -i' for interactive mode with actions[/dim]")
+            return
+
+        # Interactive mode
+        run_user_list_wizard(auth_manager, config)
 
     @user_app.command("info")
     def user_info(
@@ -725,9 +641,4 @@ def register_user_commands(app: typer.Typer):
         else:
             console.print(f"[red]User '{username}' not found[/red]")
 
-    @user_app.command("new")
-    def user_new(
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
-    ):
-        """Interactive wizard to create a new user."""
-        run_user_wizard(config)
+
