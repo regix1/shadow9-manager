@@ -119,26 +119,38 @@ def _prompt_password(auth_manager: AuthManager) -> str:
 def _prompt_routing() -> bool:
     """Prompt for Tor routing preference."""
     console.print("\n[bold]Step 3:[/bold] Traffic routing")
-    console.print("  [dim]Tor provides anonymity but is slower[/dim]")
+    console.print("  [dim]Choose how traffic is routed through the proxy.[/dim]\n")
+    console.print("  [cyan]Tor[/cyan] - Routes through multiple relays for anonymity.")
+    console.print("     Your real IP is hidden. Slower but anonymous.")
+    console.print("     [dim]Best for: Privacy-sensitive browsing, .onion sites[/dim]\n")
+    console.print("  [cyan]Direct[/cyan] - Traffic goes directly to destination.")
+    console.print("     Faster but uses your server's IP address.")
+    console.print("     [dim]Best for: Speed priority, trusted networks[/dim]\n")
     return typer.confirm("  Route traffic through Tor?", default=True)
 
 
 def _prompt_bridge() -> str:
     """Prompt for Tor bridge selection."""
     console.print("\n[bold]Step 4:[/bold] Tor bridge selection")
-    console.print("  [dim]Bridges disguise Tor traffic to bypass blocking:[/dim]\n")
+    console.print("  [dim]Bridges help bypass Tor blocking in restricted networks.[/dim]\n")
+    
     console.print("  [cyan]1. none[/cyan] [green](default)[/green]")
     console.print("     Direct connection to Tor network.")
-    console.print("     [dim]Use when: Tor is not blocked in your region[/dim]\n")
+    console.print("     [dim]Best for: Unrestricted networks, fastest option[/dim]\n")
+    
     console.print("  [cyan]2. obfs4[/cyan]")
-    console.print("     Obfuscates traffic to look like random noise.")
-    console.print("     [dim]Use when: ISP blocks Tor, moderate censorship[/dim]\n")
+    console.print("     Obfuscates traffic to look like random data.")
+    console.print("     [dim]Best for: ISPs that block Tor, moderate censorship[/dim]\n")
+    
     console.print("  [cyan]3. snowflake[/cyan]")
-    console.print("     Routes through WebRTC peers (volunteer browsers).")
-    console.print("     [dim]Use when: obfs4 is blocked, need dynamic endpoints[/dim]\n")
-    console.print("  [cyan]4. meek[/cyan]")
-    console.print("     Tunnels through cloud services (Azure/Amazon).")
-    console.print("     [dim]Use when: Heavy censorship, appears as cloud traffic[/dim]\n")
+    console.print("     Routes through volunteer browser proxies via WebRTC.")
+    console.print("     [dim]Best for: When obfs4 is blocked, dynamic endpoints[/dim]\n")
+    
+    console.print("  [cyan]4. meek-azure[/cyan]")
+    console.print("     Tunnels through Microsoft Azure cloud (ajax.aspnetcdn.com).")
+    console.print("     Traffic appears as normal HTTPS to Microsoft CDN.")
+    console.print("     [dim]Best for: Heavily censored networks (China, Iran)[/dim]")
+    console.print("     [dim]Note: Slowest option due to cloud routing overhead[/dim]\n")
     
     bridge_choice = typer.prompt("  Select bridge [1-4]", default="1")
     bridge_map = {"1": "none", "2": "obfs4", "3": "snowflake", "4": "meek"}
@@ -148,20 +160,26 @@ def _prompt_bridge() -> str:
 def _prompt_security() -> str:
     """Prompt for security level selection."""
     console.print("\n[bold]Step 5:[/bold] Security level")
-    console.print("  [dim]Choose how aggressively to evade traffic analysis:[/dim]\n")
+    console.print("  [dim]Controls traffic analysis evasion techniques.[/dim]\n")
+    
     console.print("  [cyan]1. none[/cyan]")
-    console.print("     No evasion techniques. Fastest performance.")
-    console.print("     [dim]Use when: Privacy isn't a concern, maximum speed needed[/dim]\n")
+    console.print("     No evasion techniques applied.")
+    console.print("     [dim]Best for: Maximum speed, privacy not a concern[/dim]\n")
+    
     console.print("  [cyan]2. basic[/cyan] [green](recommended)[/green]")
     console.print("     Standard headers, basic fingerprint protection.")
-    console.print("     [dim]Use when: General privacy with good performance[/dim]\n")
+    console.print("     [dim]Best for: General privacy with good performance[/dim]\n")
+    
     console.print("  [cyan]3. moderate[/cyan]")
     console.print("     Randomized headers, timing jitter, traffic padding.")
-    console.print("     [dim]Use when: Avoiding DPI or corporate firewalls[/dim]\n")
+    console.print("     Adds random delays to mask traffic patterns.")
+    console.print("     [dim]Best for: Evading DPI, corporate firewalls[/dim]\n")
+    
     console.print("  [cyan]4. paranoid[/cyan]")
     console.print("     Maximum evasion: packet fragmentation, random delays,")
-    console.print("     decoy traffic, full header randomization.")
-    console.print("     [dim]Use when: High-risk environments, state-level adversaries[/dim]\n")
+    console.print("     decoy traffic generation, full header randomization.")
+    console.print("     [dim]Best for: High-risk environments, nation-state adversaries[/dim]")
+    console.print("     [dim]Note: Significant performance impact[/dim]\n")
     
     security_choice = typer.prompt("  Select level [1-4]", default="2")
     security_map = {"1": "none", "2": "basic", "3": "moderate", "4": "paranoid"}
@@ -205,7 +223,8 @@ def _show_summary(username: str, password: str, use_tor: bool, bridge_type: str,
     console.print(f"  Password:  [cyan]{'*' * len(password)}[/cyan]")
     console.print(f"  Routing:   [cyan]{'Tor' if use_tor else 'Direct'}[/cyan]")
     if use_tor and bridge_type != "none":
-        console.print(f"  Bridge:    [cyan]{bridge_type}[/cyan]")
+        bridge_display = "meek-azure" if bridge_type == "meek" else bridge_type
+        console.print(f"  Bridge:    [cyan]{bridge_display}[/cyan]")
     console.print(f"  Security:  [cyan]{security_level}[/cyan]")
     if allowed_ports:
         console.print(f"  Ports:     [cyan]{', '.join(map(str, allowed_ports))}[/cyan]")

@@ -450,8 +450,8 @@ def user_list(
 @user_app.command("generate")
 def user_generate(
     use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")] = None,
-    bridge: Annotated[BridgeChoice, typer.Option("--bridge", "-b", help="Tor bridge type")] = BridgeChoice.none,
-    security: Annotated[SecurityChoice, typer.Option("--security", "-s", help="Security/evasion level")] = SecurityChoice.basic,
+    bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")] = None,
+    security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
     ports: Annotated[Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")] = None,
     rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
@@ -461,15 +461,77 @@ def user_generate(
 
     # Prompt for Tor preference if not specified
     if use_tor is None:
+        console.print("\n[bold]Traffic Routing:[/bold]")
+        console.print("  [dim]Tor provides anonymity by routing through multiple relays.[/dim]")
+        console.print("  [dim]Direct mode is faster but uses your real IP.[/dim]\n")
         use_tor = typer.confirm(
-            "Route this user's traffic through Tor? (No = direct proxy)",
+            "Route traffic through Tor?",
             default=True
         )
+
+    # Prompt for bridge if using Tor and not specified
+    if use_tor and bridge is None:
+        console.print("\n[bold]Tor Bridge Selection:[/bold]")
+        console.print("  [dim]Bridges help bypass Tor blocking in restricted networks.[/dim]\n")
+        
+        console.print("  [cyan]1. none[/cyan] [green](default)[/green]")
+        console.print("     Direct connection to Tor network.")
+        console.print("     [dim]Best for: Unrestricted networks, fastest option[/dim]\n")
+        
+        console.print("  [cyan]2. obfs4[/cyan]")
+        console.print("     Obfuscates traffic to look like random data.")
+        console.print("     [dim]Best for: ISPs that block Tor, moderate censorship[/dim]\n")
+        
+        console.print("  [cyan]3. snowflake[/cyan]")
+        console.print("     Routes through volunteer browser proxies via WebRTC.")
+        console.print("     [dim]Best for: When obfs4 is blocked, dynamic endpoints[/dim]\n")
+        
+        console.print("  [cyan]4. meek-azure[/cyan]")
+        console.print("     Tunnels through Microsoft Azure cloud (ajax.aspnetcdn.com).")
+        console.print("     Traffic appears as normal HTTPS to Microsoft CDN.")
+        console.print("     [dim]Best for: Heavily censored networks (China, Iran)[/dim]")
+        console.print("     [dim]Note: Slowest option due to cloud routing overhead[/dim]\n")
+        
+        bridge_choice = typer.prompt("Select bridge [1-4]", default="1")
+        bridge_map = {"1": BridgeChoice.none, "2": BridgeChoice.obfs4, 
+                      "3": BridgeChoice.snowflake, "4": BridgeChoice.meek}
+        bridge = bridge_map.get(bridge_choice, BridgeChoice.none)
+    elif bridge is None:
+        bridge = BridgeChoice.none
 
     # If using bridges, Tor must be enabled
     if bridge != BridgeChoice.none and not use_tor:
         console.print("[yellow]Note: Bridges require Tor. Enabling Tor routing.[/yellow]")
         use_tor = True
+
+    # Prompt for security level if not specified
+    if security is None:
+        console.print("\n[bold]Security Level:[/bold]")
+        console.print("  [dim]Controls traffic analysis evasion techniques.[/dim]\n")
+        
+        console.print("  [cyan]1. none[/cyan]")
+        console.print("     No evasion techniques applied.")
+        console.print("     [dim]Best for: Maximum speed, privacy not a concern[/dim]\n")
+        
+        console.print("  [cyan]2. basic[/cyan] [green](recommended)[/green]")
+        console.print("     Standard headers, basic fingerprint protection.")
+        console.print("     [dim]Best for: General privacy with good performance[/dim]\n")
+        
+        console.print("  [cyan]3. moderate[/cyan]")
+        console.print("     Randomized headers, timing jitter, traffic padding.")
+        console.print("     Adds random delays to mask traffic patterns.")
+        console.print("     [dim]Best for: Evading DPI, corporate firewalls[/dim]\n")
+        
+        console.print("  [cyan]4. paranoid[/cyan]")
+        console.print("     Maximum evasion: packet fragmentation, random delays,")
+        console.print("     decoy traffic generation, full header randomization.")
+        console.print("     [dim]Best for: High-risk environments, nation-state adversaries[/dim]")
+        console.print("     [dim]Note: Significant performance impact[/dim]\n")
+        
+        security_choice = typer.prompt("Select level [1-4]", default="2")
+        security_map = {"1": SecurityChoice.none, "2": SecurityChoice.basic,
+                        "3": SecurityChoice.moderate, "4": SecurityChoice.paranoid}
+        security = security_map.get(security_choice, SecurityChoice.basic)
 
     # Parse ports
     allowed_ports = None
@@ -491,7 +553,8 @@ def user_generate(
     username, password = auth_manager.generate_credentials()
     routing = "Tor" if use_tor else "Direct"
     if bridge != BridgeChoice.none:
-        routing += f" + {bridge.value}"
+        bridge_display = "meek-azure" if bridge == BridgeChoice.meek else bridge.value
+        routing += f" + {bridge_display}"
 
     try:
         auth_manager.add_user(
