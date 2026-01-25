@@ -3,21 +3,21 @@ Command Line Interface for Shadow9 Manager.
 
 Provides commands for running the SOCKS5 server, managing users,
 and connecting to the Tor network.
+
+Built with Typer for automatic tab completion.
 """
 
 import asyncio
 import signal
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Annotated
+from enum import Enum
 
-import click
+import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.live import Live
-from rich.layout import Layout
-from rich.text import Text
 
 from .config import Config, setup_logging, generate_master_key, generate_default_config
 from .auth import AuthManager
@@ -34,17 +34,44 @@ from .bridges import (
 
 console = Console()
 
+# Create the main app
+app = typer.Typer(
+    name="shadow9",
+    help="Shadow9 Manager - Secure SOCKS5 Proxy with Tor Support",
+    add_completion=True,
+    rich_markup_mode="rich",
+)
 
-def async_command(f):
-    """Decorator to run async commands."""
-    def wrapper(*args, **kwargs):
-        return asyncio.run(f(*args, **kwargs))
-    return wrapper
+# Create user subcommand group
+user_app = typer.Typer(help="Manage proxy users.")
+app.add_typer(user_app, name="user")
 
 
-@click.group()
-@click.version_option(version="1.0.0", prog_name="shadow9-manager")
-def main():
+# Enums for choices
+class SecurityChoice(str, Enum):
+    none = "none"
+    basic = "basic"
+    moderate = "moderate"
+    paranoid = "paranoid"
+
+
+class BridgeChoice(str, Enum):
+    none = "none"
+    obfs4 = "obfs4"
+    snowflake = "snowflake"
+    meek = "meek"
+
+
+def version_callback(value: bool):
+    if value:
+        console.print("shadow9-manager version 1.0.0")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[bool, typer.Option("--version", callback=version_callback, is_eager=True, help="Show version and exit.")] = False,
+):
     """
     Shadow9 Manager - Secure SOCKS5 Proxy with Tor Support
 
@@ -54,21 +81,18 @@ def main():
     pass
 
 
-@main.command()
-@click.option('--config', '-c', type=click.Path(exists=False), default='config/config.yaml',
-              help='Path to configuration file')
-@click.option('--host', '-h', default=None, help='Host to bind to')
-@click.option('--port', '-p', type=int, default=None, help='Port to listen on')
-@click.option('--tor/--no-tor', default=True, help='Enable/disable Tor routing')
-@click.option('--tor-port', type=int, default=None, help='Tor SOCKS port (default: 9050)')
-@click.option('--security', '-s', type=click.Choice(['none', 'basic', 'moderate', 'paranoid']),
-              default='none', help='Security/evasion level for firewall bypass')
-@click.option('--bridge', '-b', type=click.Choice(['none', 'obfs4', 'snowflake', 'meek']),
-              default='none', help='Tor bridge type for stealth (hides Tor usage from server ISP)')
-def serve(config: str, host: Optional[str], port: Optional[int],
-          tor: bool, tor_port: Optional[int], security: str, bridge: str):
+@app.command()
+def serve(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+    host: Annotated[Optional[str], typer.Option("--host", "-h", help="Host to bind to")] = None,
+    port: Annotated[Optional[int], typer.Option("--port", "-p", help="Port to listen on")] = None,
+    tor: Annotated[bool, typer.Option("--tor/--no-tor", help="Enable/disable Tor routing")] = True,
+    tor_port: Annotated[Optional[int], typer.Option("--tor-port", help="Tor SOCKS port (default: 9050)")] = None,
+    security: Annotated[SecurityChoice, typer.Option("--security", "-s", help="Security/evasion level")] = SecurityChoice.none,
+    bridge: Annotated[BridgeChoice, typer.Option("--bridge", "-b", help="Tor bridge type for stealth")] = BridgeChoice.none,
+):
     """Start the SOCKS5 proxy server."""
-    asyncio.run(_serve(config, host, port, tor, tor_port, security, bridge))
+    asyncio.run(_serve(config, host, port, tor, tor_port, security.value, bridge.value))
 
 
 async def _serve(config_path: str, host: Optional[str], port: Optional[int],
@@ -220,6 +244,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
     security_config = get_security_preset(security_level)
 
     # Wrap with secure server if security is enabled
+    secure_server = None
     if security_level != SecurityLevel.NONE:
         from .security import SecureServer, print_security_info
         secure_server = SecureServer(server, security_config)
@@ -256,7 +281,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
     # Start server
     try:
         # Use secure server if security is enabled
-        if security_level != SecurityLevel.NONE:
+        if secure_server:
             await secure_server.start()
         else:
             await server.start()
@@ -278,7 +303,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
         await shutdown_event.wait()
 
     finally:
-        if security_level != SecurityLevel.NONE:
+        if secure_server:
             await secure_server.stop()
         else:
             await server.stop()
@@ -290,40 +315,31 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
         console.print("[green]Server stopped[/green]")
 
 
-@main.group()
-def user():
-    """Manage proxy users."""
-    pass
+# ============== User Commands ==============
 
-
-@user.command('add')
-@click.argument('username')
-@click.option('--password', '-p', prompt=True, hide_input=True,
-              confirmation_prompt=True, help='User password')
-@click.option('--tor/--no-tor', 'use_tor', default=None,
-              help='Route traffic through Tor (prompts if not specified)')
-@click.option('--bridge', '-b', type=click.Choice(['none', 'obfs4', 'snowflake', 'meek']),
-              default='none', help='Tor bridge type (hides Tor usage from ISP)')
-@click.option('--security', '-s', type=click.Choice(['none', 'basic', 'moderate', 'paranoid']),
-              default='basic', help='Security/evasion level for this user')
-@click.option('--ports', help='Comma-separated list of allowed ports (e.g., "80,443,8080")')
-@click.option('--rate-limit', type=int, help='Max requests per minute for this user')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-def user_add(username: str, password: str, use_tor: Optional[bool], bridge: str,
-             security: str, ports: Optional[str], rate_limit: Optional[int], config: str):
+@user_app.command("add")
+def user_add(
+    username: Annotated[str, typer.Argument(help="Username for the new user")],
+    password: Annotated[str, typer.Option("--password", "-p", prompt=True, hide_input=True, confirmation_prompt=True, help="User password")],
+    use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")] = None,
+    bridge: Annotated[BridgeChoice, typer.Option("--bridge", "-b", help="Tor bridge type")] = BridgeChoice.none,
+    security: Annotated[SecurityChoice, typer.Option("--security", "-s", help="Security/evasion level")] = SecurityChoice.basic,
+    ports: Annotated[Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")] = None,
+    rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
     """Add a new user with customizable settings."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
     # Prompt for Tor preference if not specified
     if use_tor is None:
-        use_tor = click.confirm(
+        use_tor = typer.confirm(
             "Route this user's traffic through Tor? (No = direct proxy)",
             default=True
         )
 
     # If using bridges, Tor must be enabled
-    if bridge != "none" and not use_tor:
+    if bridge != BridgeChoice.none and not use_tor:
         console.print("[yellow]Note: Bridges require Tor. Enabling Tor routing.[/yellow]")
         use_tor = True
 
@@ -334,7 +350,7 @@ def user_add(username: str, password: str, use_tor: Optional[bool], bridge: str,
             allowed_ports = [int(p.strip()) for p in ports.split(',')]
         except ValueError:
             console.print("[red]Error: Invalid port format. Use comma-separated numbers.[/red]")
-            return
+            raise typer.Exit(1)
 
     import os
     master_key = os.getenv(cfg.auth.master_key_env)
@@ -348,17 +364,17 @@ def user_add(username: str, password: str, use_tor: Optional[bool], bridge: str,
         if auth_manager.add_user(
             username, password,
             use_tor=use_tor,
-            bridge_type=bridge,
-            security_level=security,
+            bridge_type=bridge.value,
+            security_level=security.value,
             allowed_ports=allowed_ports,
             rate_limit=rate_limit
         ):
             routing = "Tor" if use_tor else "Direct"
-            if bridge != "none":
-                routing += f" + {bridge} bridge"
+            if bridge != BridgeChoice.none:
+                routing += f" + {bridge.value} bridge"
             console.print(f"[green]User '{username}' added successfully[/green]")
             console.print(f"[dim]Routing: {routing}[/dim]")
-            console.print(f"[dim]Security: {security}[/dim]")
+            console.print(f"[dim]Security: {security.value}[/dim]")
             if allowed_ports:
                 console.print(f"[dim]Allowed ports: {', '.join(map(str, allowed_ports))}[/dim]")
             if rate_limit:
@@ -367,15 +383,21 @@ def user_add(username: str, password: str, use_tor: Optional[bool], bridge: str,
             console.print(f"[red]User '{username}' already exists[/red]")
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
 
-@user.command('remove')
-@click.argument('username')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-@click.confirmation_option(prompt='Are you sure you want to remove this user?')
-def user_remove(username: str, config: str):
+@user_app.command("remove")
+def user_remove(
+    username: Annotated[str, typer.Argument(help="Username to remove")],
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+):
     """Remove a user."""
+    if not yes:
+        confirm = typer.confirm(f"Are you sure you want to remove user '{username}'?")
+        if not confirm:
+            raise typer.Abort()
+
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
     import os
@@ -392,10 +414,10 @@ def user_remove(username: str, config: str):
         console.print(f"[red]User '{username}' not found[/red]")
 
 
-@user.command('list')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-def user_list(config: str):
+@user_app.command("list")
+def user_list(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
     """List all users."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
@@ -425,31 +447,27 @@ def user_list(config: str):
     console.print(table)
 
 
-@user.command('generate')
-@click.option('--tor/--no-tor', 'use_tor', default=None,
-              help='Route traffic through Tor (prompts if not specified)')
-@click.option('--bridge', '-b', type=click.Choice(['none', 'obfs4', 'snowflake', 'meek']),
-              default='none', help='Tor bridge type (hides Tor usage from ISP)')
-@click.option('--security', '-s', type=click.Choice(['none', 'basic', 'moderate', 'paranoid']),
-              default='basic', help='Security/evasion level for this user')
-@click.option('--ports', help='Comma-separated list of allowed ports (e.g., "80,443,8080")')
-@click.option('--rate-limit', type=int, help='Max requests per minute for this user')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-def user_generate(use_tor: Optional[bool], bridge: str, security: str, ports: Optional[str],
-                  rate_limit: Optional[int], config: str):
+@user_app.command("generate")
+def user_generate(
+    use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")] = None,
+    bridge: Annotated[BridgeChoice, typer.Option("--bridge", "-b", help="Tor bridge type")] = BridgeChoice.none,
+    security: Annotated[SecurityChoice, typer.Option("--security", "-s", help="Security/evasion level")] = SecurityChoice.basic,
+    ports: Annotated[Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")] = None,
+    rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
     """Generate a random user with secure credentials."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
     # Prompt for Tor preference if not specified
     if use_tor is None:
-        use_tor = click.confirm(
+        use_tor = typer.confirm(
             "Route this user's traffic through Tor? (No = direct proxy)",
             default=True
         )
 
     # If using bridges, Tor must be enabled
-    if bridge != "none" and not use_tor:
+    if bridge != BridgeChoice.none and not use_tor:
         console.print("[yellow]Note: Bridges require Tor. Enabling Tor routing.[/yellow]")
         use_tor = True
 
@@ -460,7 +478,7 @@ def user_generate(use_tor: Optional[bool], bridge: str, security: str, ports: Op
             allowed_ports = [int(p.strip()) for p in ports.split(',')]
         except ValueError:
             console.print("[red]Error: Invalid port format. Use comma-separated numbers.[/red]")
-            return
+            raise typer.Exit(1)
 
     import os
     master_key = os.getenv(cfg.auth.master_key_env)
@@ -472,33 +490,33 @@ def user_generate(use_tor: Optional[bool], bridge: str, security: str, ports: Op
 
     username, password = auth_manager.generate_credentials()
     routing = "Tor" if use_tor else "Direct"
-    if bridge != "none":
-        routing += f" + {bridge}"
+    if bridge != BridgeChoice.none:
+        routing += f" + {bridge.value}"
 
     try:
         auth_manager.add_user(
             username, password,
             use_tor=use_tor,
-            bridge_type=bridge,
-            security_level=security,
+            bridge_type=bridge.value,
+            security_level=security.value,
             allowed_ports=allowed_ports,
             rate_limit=rate_limit
         )
-        
+
         # Build info string
         info_lines = [
             f"[bold green]New user created:[/bold green]\n",
             f"Username: [cyan]{username}[/cyan]",
             f"Password: [cyan]{password}[/cyan]",
             f"Routing: [cyan]{routing}[/cyan]",
-            f"Security: [cyan]{security}[/cyan]",
+            f"Security: [cyan]{security.value}[/cyan]",
         ]
         if allowed_ports:
             info_lines.append(f"Ports: [cyan]{', '.join(map(str, allowed_ports))}[/cyan]")
         if rate_limit:
             info_lines.append(f"Rate Limit: [cyan]{rate_limit} req/min[/cyan]")
         info_lines.append("\n[yellow]Save these credentials! They won't be shown again.[/yellow]")
-        
+
         console.print(Panel(
             "\n".join(info_lines),
             title="Generated Credentials",
@@ -506,13 +524,14 @@ def user_generate(use_tor: Optional[bool], bridge: str, security: str, ports: Op
         ))
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
 
-@user.command('info')
-@click.argument('username')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-def user_info(username: str, config: str):
+@user_app.command("info")
+def user_info(
+    username: Annotated[str, typer.Argument(help="Username to show info for")],
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
     """Show detailed information about a user."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
@@ -528,7 +547,7 @@ def user_info(username: str, config: str):
 
     if not info:
         console.print(f"[red]User '{username}' not found[/red]")
-        return
+        raise typer.Exit(1)
 
     table = Table(title=f"User: {username}")
     table.add_column("Property", style="cyan")
@@ -536,53 +555,47 @@ def user_info(username: str, config: str):
 
     table.add_row("Username", info["username"])
     table.add_row("Status", "[green]Enabled[/green]" if info["enabled"] else "[red]Disabled[/red]")
-    
+
     # Display routing with bridge info
     routing = "Tor" if info["use_tor"] else "Direct"
     bridge = info.get("bridge_type", "none")
     if bridge != "none":
         routing += f" + {bridge} bridge"
     table.add_row("Routing", routing)
-    
+
     table.add_row("Security", info.get("security_level", "basic").upper())
-    
+
     # Display allowed ports
     allowed_ports = info.get("allowed_ports")
     if allowed_ports:
         table.add_row("Allowed Ports", ", ".join(map(str, allowed_ports)))
     else:
         table.add_row("Allowed Ports", "All (no restrictions)")
-    
+
     # Display rate limit
     rate_limit = info.get("rate_limit")
     if rate_limit:
         table.add_row("Rate Limit", f"{rate_limit} req/min")
     else:
         table.add_row("Rate Limit", "Server default")
-    
+
     table.add_row("Created", info["created_at"] or "Unknown")
     table.add_row("Last Used", info["last_used"] or "Never")
 
     console.print(table)
 
 
-@user.command('modify')
-@click.argument('username')
-@click.option('--tor/--no-tor', 'use_tor', default=None,
-              help='Enable or disable Tor routing for this user')
-@click.option('--bridge', '-b', type=click.Choice(['none', 'obfs4', 'snowflake', 'meek']),
-              default=None, help='Tor bridge type (hides Tor usage from ISP)')
-@click.option('--enable/--disable', 'enabled', default=None,
-              help='Enable or disable this user account')
-@click.option('--security', '-s', type=click.Choice(['none', 'basic', 'moderate', 'paranoid']),
-              default=None, help='Security/evasion level for this user')
-@click.option('--ports', help='Comma-separated list of allowed ports, or "all" for no restrictions')
-@click.option('--rate-limit', type=int, help='Max requests per minute (0 for server default)')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-def user_modify(username: str, use_tor: Optional[bool], bridge: Optional[str],
-                enabled: Optional[bool], security: Optional[str], ports: Optional[str],
-                rate_limit: Optional[int], config: str):
+@user_app.command("modify")
+def user_modify(
+    username: Annotated[str, typer.Argument(help="Username to modify")],
+    use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Enable or disable Tor routing")] = None,
+    bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")] = None,
+    enabled: Annotated[Optional[bool], typer.Option("--enable/--disable", help="Enable or disable account")] = None,
+    security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
+    ports: Annotated[Optional[str], typer.Option("--ports", help="Allowed ports (comma-separated or 'all')")] = None,
+    rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute (0 for default)")] = None,
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
     """Modify settings for an existing user."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
@@ -597,7 +610,7 @@ def user_modify(username: str, use_tor: Optional[bool], bridge: Optional[str],
     # Check user exists
     if username not in auth_manager.list_users():
         console.print(f"[red]User '{username}' not found[/red]")
-        return
+        raise typer.Exit(1)
 
     changes = []
 
@@ -610,13 +623,13 @@ def user_modify(username: str, use_tor: Optional[bool], bridge: Optional[str],
     # Update bridge type
     if bridge is not None:
         # If setting a bridge, ensure Tor is enabled
-        if bridge != "none":
+        if bridge != BridgeChoice.none:
             current_tor = auth_manager.get_user_tor_preference(username)
             if not current_tor:
                 auth_manager.set_user_tor_preference(username, True)
                 changes.append("Routing: Tor (required for bridge)")
-        auth_manager.set_user_bridge_type(username, bridge)
-        changes.append(f"Bridge: {bridge}")
+        auth_manager.set_user_bridge_type(username, bridge.value)
+        changes.append(f"Bridge: {bridge.value}")
 
     # Update enabled status
     if enabled is not None:
@@ -626,8 +639,8 @@ def user_modify(username: str, use_tor: Optional[bool], bridge: Optional[str],
 
     # Update security level
     if security is not None:
-        auth_manager.set_user_security_level(username, security)
-        changes.append(f"Security: {security}")
+        auth_manager.set_user_security_level(username, security.value)
+        changes.append(f"Security: {security.value}")
 
     # Update allowed ports
     if ports is not None:
@@ -641,7 +654,7 @@ def user_modify(username: str, use_tor: Optional[bool], bridge: Optional[str],
                 changes.append(f"Ports: {', '.join(map(str, allowed_ports))}")
             except ValueError:
                 console.print("[red]Error: Invalid port format. Use comma-separated numbers or 'all'.[/red]")
-                return
+                raise typer.Exit(1)
 
     # Update rate limit
     if rate_limit is not None:
@@ -661,11 +674,11 @@ def user_modify(username: str, use_tor: Optional[bool], bridge: Optional[str],
         console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit[/dim]")
 
 
-@user.command('enable')
-@click.argument('username')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-def user_enable(username: str, config: str):
+@user_app.command("enable")
+def user_enable(
+    username: Annotated[str, typer.Argument(help="Username to enable")],
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
     """Enable a user account."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
@@ -683,11 +696,11 @@ def user_enable(username: str, config: str):
         console.print(f"[red]User '{username}' not found[/red]")
 
 
-@user.command('disable')
-@click.argument('username')
-@click.option('--config', '-c', type=click.Path(), default='config/config.yaml',
-              help='Path to configuration file')
-def user_disable(username: str, config: str):
+@user_app.command("disable")
+def user_disable(
+    username: Annotated[str, typer.Argument(help="Username to disable")],
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
     """Disable a user account (prevents login)."""
     cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
@@ -705,16 +718,18 @@ def user_disable(username: str, config: str):
         console.print(f"[red]User '{username}' not found[/red]")
 
 
-@main.command()
-@click.option('--output', '-o', type=click.Path(), default='config/config.yaml',
-              help='Output path for configuration file')
-def init(output: str):
+# ============== Utility Commands ==============
+
+@app.command()
+def init(
+    output: Annotated[str, typer.Option("--output", "-o", help="Output path for configuration file")] = "config/config.yaml",
+):
     """Initialize a new configuration file."""
     output_path = Path(output)
 
     if output_path.exists():
-        if not click.confirm(f"Configuration file {output} already exists. Overwrite?"):
-            return
+        if not typer.confirm(f"Configuration file {output} already exists. Overwrite?"):
+            raise typer.Abort()
 
     generate_default_config(output_path)
     console.print(f"[green]Configuration file created: {output}[/green]")
@@ -731,9 +746,10 @@ def init(output: str):
     ))
 
 
-@main.command()
-@click.option('--tor-port', '-p', type=int, default=9050, help='Tor SOCKS port')
-def check_tor(tor_port: int):
+@app.command("check-tor")
+def check_tor(
+    tor_port: Annotated[int, typer.Option("--tor-port", "-p", help="Tor SOCKS port")] = 9050,
+):
     """Check Tor connectivity status."""
     asyncio.run(_check_tor(tor_port))
 
@@ -766,10 +782,11 @@ async def _check_tor(tor_port: int):
         console.print(f"\n{TorConnector.get_tor_install_instructions()}")
 
 
-@main.command()
-@click.argument('url')
-@click.option('--tor-port', '-p', type=int, default=9050, help='Tor SOCKS port')
-def fetch(url: str, tor_port: int):
+@app.command()
+def fetch(
+    url: Annotated[str, typer.Argument(help="URL to fetch (supports .onion)")],
+    tor_port: Annotated[int, typer.Option("--tor-port", "-p", help="Tor SOCKS port")] = 9050,
+):
     """Fetch a URL through Tor (supports .onion)."""
     asyncio.run(_fetch(url, tor_port))
 
@@ -800,10 +817,11 @@ async def _fetch(url: str, tor_port: int):
         await tor.disconnect()
 
 
-@main.command()
-@click.option('--skip-optional', is_flag=True, help='Skip optional dependencies (bridges)')
-@click.option('--check-only', is_flag=True, help='Only check status, do not install')
-def setup(skip_optional: bool, check_only: bool):
+@app.command()
+def setup(
+    skip_optional: Annotated[bool, typer.Option("--skip-optional", help="Skip optional dependencies (bridges)")] = False,
+    check_only: Annotated[bool, typer.Option("--check-only", help="Only check status, do not install")] = False,
+):
     """
     Automated setup - installs Tor, bridges, and configures the system.
 
@@ -835,15 +853,15 @@ def setup(skip_optional: bool, check_only: bool):
     console.print(Panel(
         "[bold cyan]Shadow9 Automated Setup[/bold cyan]\n\n"
         "This will install and configure:\n"
-        "• Tor daemon\n"
-        "• obfs4proxy (for obfs4 bridges)\n"
-        "• snowflake-client (for snowflake bridges)\n\n"
+        "- Tor daemon\n"
+        "- obfs4proxy (for obfs4 bridges)\n"
+        "- snowflake-client (for snowflake bridges)\n\n"
         "[dim]Some operations require sudo privileges[/dim]",
         title="Setup",
         border_style="cyan"
     ))
 
-    if not click.confirm("\nProceed with installation?", default=True):
+    if not typer.confirm("\nProceed with installation?", default=True):
         console.print("[yellow]Setup cancelled[/yellow]")
         return
 
@@ -869,16 +887,15 @@ def setup(skip_optional: bool, check_only: bool):
         ))
 
 
-@main.command()
+@app.command()
 def status():
     """Show current system status and configuration."""
     from .setup import check_setup
-    import platform
 
     console.print("[cyan]Shadow9 Manager Status[/cyan]\n")
 
     # Check dependencies
-    status = check_setup()
+    dep_status = check_setup()
 
     # Use ASCII characters for compatibility
     check_mark = "[OK]"
@@ -890,7 +907,7 @@ def status():
     table.add_column("Status")
     table.add_column("Description", style="dim")
 
-    for name, info in status.items():
+    for name, info in dep_status.items():
         if info["installed"]:
             status_text = f"[green]{check_mark} Installed[/green]"
         elif info["required"]:
@@ -912,10 +929,7 @@ def status():
         console.print("  [dim]Run 'shadow9 setup' to install and start Tor[/dim]")
 
 
-
-
-
-@main.command()
+@app.command()
 def update():
     """
     Update Shadow9 to the latest version from GitHub.
@@ -924,6 +938,7 @@ def update():
     """
     import subprocess
     import os
+    import time
 
     console.print("[cyan]Updating Shadow9 Manager...[/cyan]\n")
 
@@ -952,7 +967,6 @@ def update():
             console.print(f"[>] Stopping running server (PID: {server_pid})...")
             subprocess.run(["kill", server_pid], capture_output=True)
             # Wait for process to stop
-            import time
             time.sleep(2)
     except FileNotFoundError:
         # pgrep not available (Windows), skip server detection
@@ -1025,5 +1039,11 @@ def update():
         console.print(f"[red]Error: {e}[/red]")
 
 
+# Entry point for the CLI
+def cli():
+    """Main entry point."""
+    app()
+
+
 if __name__ == "__main__":
-    main()
+    cli()

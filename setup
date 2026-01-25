@@ -104,20 +104,37 @@ COMPLETION_INSTALLED=false
 
 # Create completion script that works with both 'shadow9' and './shadow9'
 COMPLETION_SCRIPT="$SCRIPT_DIR/.shadow9-completion.bash"
-cat > "$COMPLETION_SCRIPT" << COMPLETION_EOF
+cat > "$COMPLETION_SCRIPT" << 'COMPLETION_EOF'
 # Shadow9 tab completion
-_shadow9_completion() {
-    local IFS=\$'\\n'
-    local cur="\${COMP_WORDS[COMP_CWORD]}"
-    local shadow9_cmd="$SCRIPT_DIR/venv/bin/shadow9"
+_SHADOW9_COMPLETION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    if [ -x "\$shadow9_cmd" ]; then
-        local response
-        response=\$( env COMP_WORDS="\${COMP_WORDS[*]}" \\
-                        COMP_CWORD=\$COMP_CWORD \\
-                        _SHADOW9_COMPLETE=bash_complete "\$shadow9_cmd" 2>/dev/null )
-        COMPREPLY=( \$response )
+_shadow9_completion() {
+    local IFS=$'\n'
+    local response
+    local shadow9_cmd=""
+    local -a shadow9_args=()
+
+    if [ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9" ]; then
+        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9"
+    elif [ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/python" ]; then
+        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/python"
+        shadow9_args=(-m shadow9)
+    elif command -v shadow9 >/dev/null 2>&1; then
+        shadow9_cmd="$(command -v shadow9)"
+    elif command -v python3 >/dev/null 2>&1; then
+        shadow9_cmd="$(command -v python3)"
+        shadow9_args=(-m shadow9)
+    elif command -v python >/dev/null 2>&1; then
+        shadow9_cmd="$(command -v python)"
+        shadow9_args=(-m shadow9)
+    else
+        return 0
     fi
+
+    response=$( env COMP_WORDS="${COMP_WORDS[*]}" \
+                    COMP_CWORD=$COMP_CWORD \
+                    _SHADOW9_COMPLETE=bash_complete "$shadow9_cmd" "${shadow9_args[@]}" 2>/dev/null )
+    COMPREPLY=( $response )
     return 0
 }
 
@@ -128,15 +145,21 @@ COMPLETION_EOF
 
 COMPLETION_CMD="source \"$SCRIPT_DIR/.shadow9-completion.bash\""
 
-# Try to add to bashrc
-if [ -f "$HOME/.bashrc" ]; then
-    if ! grep -q ".shadow9-completion.bash" "$HOME/.bashrc" 2>/dev/null; then
+# Try to add to bashrc (create if missing)
+BASHRC="$HOME/.bashrc"
+if [ ! -f "$BASHRC" ]; then
+    touch "$BASHRC" 2>/dev/null || true
+    echo -e "${YELLOW}[INFO] Created ~/.bashrc for completion setup${NC}"
+fi
+
+if [ -f "$BASHRC" ]; then
+    if ! grep -q ".shadow9-completion.bash" "$BASHRC" 2>/dev/null; then
         # Remove old completion if present
-        sed -i '/_SHADOW9_COMPLETE/d' "$HOME/.bashrc" 2>/dev/null || true
-        sed -i '/Shadow9 tab completion/d' "$HOME/.bashrc" 2>/dev/null || true
-        echo "" >> "$HOME/.bashrc"
-        echo "# Shadow9 tab completion" >> "$HOME/.bashrc"
-        echo "$COMPLETION_CMD" >> "$HOME/.bashrc"
+        sed -i '/_SHADOW9_COMPLETE/d' "$BASHRC" 2>/dev/null || true
+        sed -i '/Shadow9 tab completion/d' "$BASHRC" 2>/dev/null || true
+        echo "" >> "$BASHRC"
+        echo "# Shadow9 tab completion" >> "$BASHRC"
+        echo "$COMPLETION_CMD" >> "$BASHRC"
         COMPLETION_INSTALLED=true
         echo -e "${GREEN}[OK] Tab completion added to ~/.bashrc${NC}"
     else
@@ -145,35 +168,69 @@ if [ -f "$HOME/.bashrc" ]; then
     fi
 fi
 
+# If .bash_profile exists and doesn't source .bashrc, add completion there too
+if [ -f "$HOME/.bash_profile" ] && ! grep -q "bashrc" "$HOME/.bash_profile" 2>/dev/null; then
+    if ! grep -q ".shadow9-completion.bash" "$HOME/.bash_profile" 2>/dev/null; then
+        sed -i '/_SHADOW9_COMPLETE/d' "$HOME/.bash_profile" 2>/dev/null || true
+        sed -i '/Shadow9 tab completion/d' "$HOME/.bash_profile" 2>/dev/null || true
+        echo "" >> "$HOME/.bash_profile"
+        echo "# Shadow9 tab completion" >> "$HOME/.bash_profile"
+        echo "$COMPLETION_CMD" >> "$HOME/.bash_profile"
+        COMPLETION_INSTALLED=true
+        echo -e "${GREEN}[OK] Tab completion added to ~/.bash_profile${NC}"
+    else
+        echo -e "${YELLOW}[INFO] Tab completion already configured in ~/.bash_profile${NC}"
+        COMPLETION_INSTALLED=true
+    fi
+fi
+
 # Try to add to zshrc if zsh is present
 if [ -f "$HOME/.zshrc" ]; then
     # Create zsh completion script
     ZSH_COMPLETION_SCRIPT="$SCRIPT_DIR/.shadow9-completion.zsh"
-    cat > "$ZSH_COMPLETION_SCRIPT" << ZSH_COMPLETION_EOF
+    cat > "$ZSH_COMPLETION_SCRIPT" << 'ZSH_COMPLETION_EOF'
 # Shadow9 tab completion for zsh
+_SHADOW9_COMPLETION_DIR="${${(%):-%N}:A:h}"
+
 _shadow9_completion() {
     local -a completions
     local -a completions_with_descriptions
     local -a response
-    local shadow9_cmd="$SCRIPT_DIR/venv/bin/shadow9"
+    local shadow9_cmd=""
+    local -a shadow9_args
 
-    [[ ! -x "\$shadow9_cmd" ]] && return 1
+    if [[ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9" ]]; then
+        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9"
+    elif [[ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/python" ]]; then
+        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/python"
+        shadow9_args=(-m shadow9)
+    elif command -v shadow9 >/dev/null 2>&1; then
+        shadow9_cmd="$(command -v shadow9)"
+    elif command -v python3 >/dev/null 2>&1; then
+        shadow9_cmd="$(command -v python3)"
+        shadow9_args=(-m shadow9)
+    elif command -v python >/dev/null 2>&1; then
+        shadow9_cmd="$(command -v python)"
+        shadow9_args=(-m shadow9)
+    else
+        return 1
+    fi
 
-    response=("\${(@f)\$(env COMP_WORDS="\${words[*]}" COMP_CWORD=\$((CURRENT-1)) _SHADOW9_COMPLETE=zsh_complete "\$shadow9_cmd")}")
+    response=("${(@f)$(env COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1)) _SHADOW9_COMPLETE=zsh_complete "$shadow9_cmd" "${shadow9_args[@]}")}")
 
-    for key descr in \${(kv)response}; do
-        if [[ "\$descr" == "_" ]]; then
-            completions+=("\$key")
+    for key descr in ${(kv)response}; do
+        if [[ "$descr" == "_" ]]; then
+            completions+=("$key")
         else
-            completions_with_descriptions+=("\$key":"\$descr")
+            completions_with_descriptions+=("$key":"$descr")
         fi
     done
 
-    if [ -n "\$completions_with_descriptions" ]; then
+    if [ -n "$completions_with_descriptions" ]; then
         _describe -V unsorted completions_with_descriptions -U
     fi
 
-    if [ -n "\$completions" ]; then
+    if [ -n "$completions" ]; then
         compadd -U -V unsorted -a completions
     fi
 }
