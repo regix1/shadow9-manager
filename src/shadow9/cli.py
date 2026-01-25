@@ -94,39 +94,49 @@ def serve(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     host: Annotated[Optional[str], typer.Option("--host", "-h", help="Host to bind to")] = None,
     port: Annotated[Optional[int], typer.Option("--port", "-p", help="Port to listen on")] = None,
-    background: Annotated[bool, typer.Option("--background", "-d", help="Run server in background (daemon)")] = False,
+    background: Annotated[Optional[bool], typer.Option("--background/--foreground", "-d/-f", help="Run in background or foreground")] = None,
     interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Run interactive configuration")] = False,
 ):
     """Start the SOCKS5 proxy server.
     
     User settings control Tor routing, bridges, and security levels.
     """
+    # Load config to get defaults
+    cfg = Config.load(Path(config)) if Path(config).exists() else Config()
+    
+    # Use config daemon setting if not specified on command line
+    run_background = background if background is not None else cfg.server.daemon
+    
     # Run interactive mode if requested or no host/port provided
-    if interactive or (host is None and port is None and not background):
+    if interactive or (host is None and port is None and background is None):
         if not interactive:
-            console.print("\n[dim]No host/port specified. Use -i for interactive or provide --host/--port.[/dim]")
-            if not typer.confirm("Run with defaults (127.0.0.1:1080)?", default=True):
+            console.print("\n[dim]No options specified. Use -i for interactive or provide --host/--port.[/dim]")
+            if not typer.confirm("Run with defaults?", default=True):
                 interactive = True
         
         if interactive:
-            host, port, background = run_serve_wizard()
-            show_serve_preview(host, port, background)
+            host, port, run_background = run_serve_wizard()
+            show_serve_preview(host, port, run_background)
             if not typer.confirm("\nStart server?", default=True):
                 console.print("[yellow]Cancelled[/yellow]")
                 raise typer.Abort()
     
+    # Apply defaults from config if not set
+    if host is None:
+        host = cfg.server.host
+    if port is None:
+        port = cfg.server.port
+    
     # Handle background mode
-    if background:
+    if run_background:
         import subprocess
         
         # Build command without --background flag
-        cmd = [sys.executable, "-m", "shadow9", "serve"]
+        cmd = [sys.executable, "-m", "shadow9", "serve", "--foreground"]
         if config != "config/config.yaml":
             cmd.extend(["--config", config])
-        if host:
-            cmd.extend(["--host", host])
-        if port:
-            cmd.extend(["--port", str(port)])
+        cmd.extend(["--host", host])
+        cmd.extend(["--port", str(port)])
         
         # Start detached process
         if sys.platform == "win32":
@@ -147,7 +157,7 @@ def serve(
             )
         
         console.print(f"[green]Server started in background[/green]")
-        console.print(f"[dim]Host: {host or '127.0.0.1'}:{port or 1080}[/dim]")
+        console.print(f"[dim]Listen: {host}:{port}[/dim]")
         console.print(f"[dim]To stop: shadow9 stop[/dim]")
         return
     

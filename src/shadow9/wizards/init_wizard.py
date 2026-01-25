@@ -42,7 +42,13 @@ def run_init_wizard() -> Config:
     except ValueError:
         max_connections = 100
 
-    server = ServerConfig(host=host, port=port, max_connections=max_connections)
+    # Daemon mode
+    console.print("\n  [cyan]Run mode:[/cyan]")
+    console.print("    [dim]Foreground[/dim] - See logs in terminal, stop with Ctrl+C")
+    console.print("    [dim]Background[/dim] - Run as daemon, stop with 'shadow9 stop'\n")
+    daemon = typer.confirm("  Run in background by default?", default=False)
+
+    server = ServerConfig(host=host, port=port, max_connections=max_connections, daemon=daemon)
     
     # Tor settings
     console.print("\n[bold]Step 2:[/bold] Tor Settings")
@@ -128,6 +134,7 @@ def show_config_summary(config: Config) -> None:
     table.add_row("Server Host", config.server.host)
     table.add_row("Server Port", str(config.server.port))
     table.add_row("Max Connections", str(config.server.max_connections))
+    table.add_row("Run Mode", "Background (daemon)" if config.server.daemon else "Foreground")
     table.add_row("", "")
     table.add_row("Tor Enabled", "Yes" if config.tor.enabled else "No")
     if config.tor.enabled:
