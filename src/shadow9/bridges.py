@@ -381,10 +381,12 @@ class TorBridgeConnector:
             bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
             print(f"    Testing {bridge_name}...", end=" ", flush=True)
             
-            speed = await self._quick_bridge_test(bridge, test_timeout, target_progress)
+            speed, error = await self._quick_bridge_test(bridge, test_timeout, target_progress)
             
             if speed is not None:
                 print(f"{speed:.1f}s")
+            elif error:
+                print(f"FAILED: {error}")
             else:
                 print("timeout/failed")
             
@@ -392,12 +394,12 @@ class TorBridgeConnector:
         
         return results
 
-    async def _quick_bridge_test(self, bridge: Bridge, timeout: int, target_progress: int) -> Optional[float]:
+    async def _quick_bridge_test(self, bridge: Bridge, timeout: int, target_progress: int) -> tuple[Optional[float], Optional[str]]:
         """
         Quick test a bridge - measure time to reach target bootstrap percentage.
         
         Returns:
-            Time in seconds to reach target_progress, or None if failed/timeout.
+            Tuple of (time_in_seconds, error_message). time is None if failed, error is None if succeeded.
         """
         import re
         import time as time_module
@@ -431,8 +433,7 @@ class TorBridgeConnector:
             # Find tor binary
             tor_path = shutil.which("tor")
             if not tor_path:
-                print(f"      [ERROR] tor binary not found in PATH")
-                return None
+                return None, "tor binary not found"
             
             # Start Tor process
             tor_process = subprocess.Popen(
@@ -447,33 +448,41 @@ class TorBridgeConnector:
             while True:
                 elapsed = time_module.time() - start_time
                 if elapsed > timeout:
-                    return None  # Timeout
+                    return None, None  # Timeout (no error message needed)
                 
                 poll_result = tor_process.poll()
                 if poll_result is not None:
                     # Process died - try to get stderr for diagnostics
-                    stderr_output = ""
+                    error_detail = ""
                     try:
                         _, stderr = tor_process.communicate(timeout=1)
-                        stderr_output = stderr.decode('utf-8', errors='ignore').strip()
+                        stderr_text = stderr.decode('utf-8', errors='ignore').strip()
+                        if stderr_text:
+                            # Get last meaningful line
+                            lines = [l for l in stderr_text.splitlines() if l.strip()]
+                            if lines:
+                                error_detail = lines[-1][:100]
                     except Exception:
                         pass
                     
                     # Also check tor log for errors
-                    log_errors = ""
-                    try:
-                        if log_file.exists():
-                            log_content = log_file.read_text()
-                            error_lines = [l for l in log_content.splitlines() if 'err' in l.lower() or 'warn' in l.lower()]
-                            if error_lines:
-                                log_errors = error_lines[-1][:150]  # Last error, truncated
-                    except Exception:
-                        pass
+                    if not error_detail:
+                        try:
+                            if log_file.exists():
+                                log_content = log_file.read_text()
+                                error_lines = [l for l in log_content.splitlines() 
+                                             if 'err' in l.lower() or '[warn]' in l.lower()]
+                                if error_lines:
+                                    # Extract just the message part
+                                    last_err = error_lines[-1]
+                                    if ']' in last_err:
+                                        error_detail = last_err.split(']', 1)[-1].strip()[:100]
+                                    else:
+                                        error_detail = last_err[:100]
+                        except Exception:
+                            pass
                     
-                    error_detail = stderr_output[:150] if stderr_output else log_errors
-                    if error_detail:
-                        print(f"\n      [Tor exit {poll_result}] {error_detail}", end="", flush=True)
-                    return None  # Process died
+                    return None, f"Tor exit {poll_result}: {error_detail}" if error_detail else f"Tor exit {poll_result}"
                 
                 # Check log file for bootstrap progress
                 try:
@@ -489,15 +498,14 @@ class TorBridgeConnector:
                                     if match:
                                         progress = int(match.group(1))
                                         if progress >= target_progress:
-                                            return time_module.time() - start_time
+                                            return time_module.time() - start_time, None
                 except Exception:
                     pass
                 
                 await asyncio.sleep(0.5)
                 
         except Exception as e:
-            print(f"\n      [Exception] {type(e).__name__}: {e}", end="", flush=True)
-            return None
+            return None, f"{type(e).__name__}: {str(e)[:80]}"
         finally:
             # Cleanup
             if tor_process:
