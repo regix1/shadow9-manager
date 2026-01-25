@@ -122,35 +122,31 @@ class PluggableTransportManager:
         ]
         
         # Performance and timeout tuning for bridges (especially snowflake)
-        # These settings help with slow connections and large transfers
         # Requires Tor 0.4.8+ (installed from official Tor Project repo)
         lines.extend([
             # Conflux: Split traffic across multiple circuits for ~30% speed boost
-            # This uses two circuits to the same exit, optimizing for latency
             "ConfluxEnabled 1",
             "ConfluxClientUX latency",
-            # Disable adaptive timeout learning, use fixed values
+            
+            # Circuit building
             "LearnCircuitBuildTimeout 0",
-            # Higher timeout for bridges (snowflake is slow) - default is 60
             "CircuitBuildTimeout 120",
-            # SOCKS timeout for client connections (default 120, increase for large pages)
+            
+            # Timeouts
             "SocksTimeout 300",
-            # Keep circuits alive longer for large transfers (default 600)
+            
+            # Circuit management - keep circuits alive longer
             "MaxCircuitDirtiness 1800",
-            # Don't close idle circuits quickly (default 3600)
             "CircuitIdleTimeout 3600",
-            # Keep connections alive
             "KeepalivePeriod 60",
-            # Don't retry too aggressively during transfers
             "NewCircuitPeriod 30",
-            # Connection padding helps with stability
+            
+            # Connection limits - increase for more concurrent connections
+            "MaxClientCircuitsPending 128",      # Default 32, allow more pending circuits
             "ConnectionPadding 1",
-            # Reduce circuit preemption during active transfers
-            "MaxClientCircuitsPending 64",
-            # Hidden service (.onion) specific settings - requires Tor 0.4.5+
-            # Don't give up on slow hidden service client circuits too quickly
+            
+            # Hidden service optimizations
             "CloseHSClientCircuitsImmediatelyOnTimeout 0",
-            # Don't timeout hidden service rendezvous circuits too quickly  
             "CloseHSServiceRendCircuitsImmediatelyOnTimeout 0",
         ])
 

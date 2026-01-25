@@ -1,156 +1,155 @@
 # Shadow9 Manager
 
-A secure SOCKS5 proxy server with Tor routing, per-user settings, and DPI bypass.
+Secure SOCKS5 proxy with Tor routing, per-user settings, and DPI bypass.
 
 ## Features
 
-- **SOCKS5 Proxy** - RFC 1928/1929 compliant with authentication
-- **Per-User Tor Routing** - Each user gets isolated Tor circuits
-- **Bridge Support** - obfs4, snowflake to hide Tor usage
-- **DPI Bypass** - Multiple security levels for restrictive networks
-- **Per-User Ports** - Dedicated listener ports per user
+- **SOCKS5 Proxy** - RFC 1928/1929 compliant
+- **Per-User Tor Routing** - Isolated circuits per user
+- **Bridge Support** - obfs4, snowflake for censorship bypass
+- **Conflux** - Multi-path routing (~30% speed boost)
+- **Smart Bridge Selection** - Auto speed-test and ranking
+- **DPI Bypass** - Multiple evasion levels
+- **Per-User Ports** - Dedicated listeners
 
 ## Quick Start
 
 ```bash
-# Clone and setup
 git clone https://github.com/regix1/shadow9-manager.git
 cd shadow9-manager
 chmod +x setup shadow9
-./setup
-
-# Create a user
-./shadow9 user generate
-
-# Start server
-./shadow9 serve
+./setup              # Install shadow9
+shadow9 setup        # Install Tor + bridges (optional)
+shadow9 user generate
+shadow9 serve
 ```
 
-Connect your application to `127.0.0.1:1080` with your username/password.
+Connect to `127.0.0.1:1080` with your credentials.
+
+## Installation
+
+### Two-Phase Setup
+
+1. `./setup` - Installs shadow9 CLI and dependencies
+2. `shadow9 setup` - Installs Tor 0.4.8+ and pluggable transports from official Tor Project repo
+
+### Why Tor 0.4.8+?
+
+Required for Conflux multi-path support and modern bridge protocols.
 
 ## Commands
 
 ```bash
 # Server
-./shadow9 serve                     # Start server
-./shadow9 serve --host 0.0.0.0 --port 8080
+shadow9 serve
+shadow9 serve --host 0.0.0.0 --port 8080
 
 # Users
-./shadow9 user generate             # Create user (interactive)
-./shadow9 user generate --username myuser --password "MyP@ss123!"
-./shadow9 user list                 # List all users
-./shadow9 user info <username>      # Show user details
-./shadow9 user modify <username>    # Change settings
-./shadow9 user remove <username>    # Delete user
+shadow9 user generate
+shadow9 user list [-i]
+shadow9 user info <user>
+shadow9 user modify <user>
+shadow9 user remove <user>
+shadow9 user enable|disable <user>
 
 # Service (Linux)
-sudo ./shadow9 service install      # Install systemd service
-sudo ./shadow9 service start|stop|restart
-sudo ./shadow9 service status
-sudo ./shadow9 service logs [-f]
+sudo shadow9 service install
+sudo shadow9 service start|stop|restart|status
+shadow9 service logs [-f] [-c]    # -c = current run only
 
-# Utilities
-./shadow9 check-tor                 # Test Tor connection
-./shadow9 setup                     # Install Tor and bridges
+# Setup
+shadow9 setup                     # Install Tor + bridges
+shadow9 check-tor
 ```
 
-## User Settings
-
-Create users with custom settings:
+## User Options
 
 ```bash
-./shadow9 user generate --username myuser --password "MyP@ss123!" \
-  --tor --bridge obfs4 --security paranoid --ports "80,443" --rate-limit 100
+shadow9 user generate --username myuser --password "MyP@ss!" \
+  --tor --bridge snowflake --security basic
 ```
 
-| Option | Flag | Values | Default |
-|--------|------|--------|---------|
-| Tor Routing | `--tor/--no-tor` | - | `--tor` |
-| Bridge | `--bridge` | none, obfs4, snowflake | none |
-| Security | `--security` | none, basic, moderate, paranoid | basic |
-| Ports | `--ports` | comma-separated or "all" | all |
-| Rate Limit | `--rate-limit` | requests/min | unlimited |
-| Bind Port | `--bind-port` | dedicated listener port | shared |
+| Option | Values | Default |
+|--------|--------|---------|
+| `--tor/--no-tor` | - | tor |
+| `--bridge` | none, obfs4, snowflake | none |
+| `--security` | none, basic, moderate, paranoid | basic |
+| `--ports` | "80,443" or "all" | all |
+| `--rate-limit` | requests/min | unlimited |
+| `--bind-port` | dedicated port | shared |
 
 ### Security Levels
 
-| Level | Description |
-|-------|-------------|
-| none | Raw SOCKS5, maximum speed |
-| basic | TLS wrapping |
-| moderate | TLS + packet splitting |
-| paranoid | Full DPI bypass |
+| Level | Effect |
+|-------|--------|
+| none | Raw SOCKS5, max speed |
+| basic | Standard protection |
+| moderate | Header randomization, timing jitter |
+| paranoid | Full evasion, decoy traffic |
 
 ### Bridge Types
 
 | Bridge | Use Case |
 |--------|----------|
 | none | Unrestricted networks |
-| obfs4 | ISPs blocking Tor |
+| obfs4 | Tor blocked by ISP |
 | snowflake | Heavy censorship |
 
-## Per-User Ports
+## Performance
 
-Users can have dedicated listener ports:
+### Conflux (Tor 0.4.8+)
 
-```bash
-./shadow9 user generate --username vip --password "MyP@ss123!" --bind-port 8081
+Splits traffic across two circuits. ~30% faster downloads.
+
+### Bridge Speed Testing
+
+Auto-tests all bridges at startup, ranks by speed, connects via fastest.
+
+### Tor Optimizations
+
+Extended timeouts, connection padding, hidden service tuning applied automatically.
+
+## Architecture
+
 ```
-
-The server automatically spawns a listener on port 8081 for this user.
-
-## Multi-Bridge Architecture
-
-The server automatically starts separate Tor instances for each bridge type in use:
-
-```
-Tor Instances:
-  none: 127.0.0.1:9050
-  obfs4: 127.0.0.1:9051
+Tor Instances (auto-managed):
+  none:      127.0.0.1:9050
+  obfs4:     127.0.0.1:9051
   snowflake: 127.0.0.1:9052
 
-Users are routed to their configured bridge automatically.
+Users route through their configured bridge type.
 ```
 
 ## Configuration
 
-Config file: `config/config.yaml`
+**File:** `config/config.yaml`
 
 ```yaml
 server:
   host: "0.0.0.0"
   port: 1080
-
 tor:
-  socks_host: "127.0.0.1"
   socks_port: 9050
   control_port: 9051
-
-auth:
-  credentials_file: "config/credentials.enc"
 ```
 
-Environment: `SHADOW9_MASTER_KEY` - encryption key for credentials
+**Environment:**
+- `SHADOW9_MASTER_KEY` - Credential encryption key
+- `SHADOW9_HOME` - Base directory
 
-## Tor Installation
+## Troubleshooting
 
-```bash
-# Linux
-sudo apt install tor && sudo systemctl start tor
+| Issue | Solution |
+|-------|----------|
+| Bridges failing | Run `shadow9 setup` to upgrade Tor to 0.4.8+ |
+| Old logs showing | Use `shadow9 service logs -c` |
+| Config errors | Check `tor --version` is 0.4.8+ |
 
-# macOS
-brew install tor && brew services start tor
+## Requirements
 
-# Windows
-# Download Tor Expert Bundle from torproject.org
-```
-
-## Development
-
-```bash
-pip install -e ".[dev]"
-pytest tests/ -v
-```
+- Python 3.10+
+- Tor 0.4.8+ (for Conflux)
+- Linux/macOS/Windows
 
 ## License
 

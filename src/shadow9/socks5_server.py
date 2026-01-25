@@ -91,6 +91,9 @@ class Socks5Server:
     BRIDGE_CONNECTION_TIMEOUT = 120  # Longer timeout for Snowflake/bridge connections
     ONION_CONNECTION_TIMEOUT = 180   # Even longer for .onion (6-hop circuits)
     RELAY_TIMEOUT = 600  # 10 minutes for large transfers
+    
+    # Connection tuning
+    LISTEN_BACKLOG = 256             # TCP listen queue size
 
     def __init__(
         self,
@@ -204,6 +207,7 @@ class Socks5Server:
             self.host,
             self.port,
             reuse_address=True,
+            backlog=self.LISTEN_BACKLOG,
         )
 
         self._running = True
@@ -269,7 +273,7 @@ class Socks5Server:
         logger.debug("New connection", client=conn_id)
 
         try:
-            # Set timeouts
+            # Set buffer limits
             reader._transport.set_write_buffer_limits(high=self.MAX_BUFFER_SIZE)
 
             # Perform SOCKS5 handshake with authentication
@@ -288,7 +292,6 @@ class Socks5Server:
                     username=username,
                     allowed_user=allowed_user
                 )
-                # Close connection - user authenticated but not allowed on this port
                 return
 
             # Get user settings from auth manager
@@ -338,20 +341,14 @@ class Socks5Server:
             use_tor = conn_info.use_tor
 
             # Select the appropriate upstream proxy based on bridge type
-            # Priority: bridge-specific proxy (or create dynamically) > default proxy > direct
             upstream_proxy = None
             if use_tor:
-                # Try to get existing proxy or create a new Tor instance dynamically
                 upstream_proxy = await self._get_or_create_bridge_proxy(bridge_type)
-                
-                # If dynamic creation failed, fall back to default proxy
                 if upstream_proxy is None and self.upstream_proxy:
                     upstream_proxy = self.upstream_proxy
 
-            # Connect to target (directly or via upstream proxy based on user preference)
+            # Connect to target
             if upstream_proxy and use_tor:
-                # Determine timeout based on connection type
-                # .onion addresses need 6-hop circuits (3 to rendezvous + 3 from hidden service)
                 is_onion = target_host.endswith('.onion')
                 if is_onion:
                     connect_timeout = self.ONION_CONNECTION_TIMEOUT
@@ -360,14 +357,12 @@ class Socks5Server:
                 else:
                     connect_timeout = self.CONNECTION_TIMEOUT
                 
-                # Pass username for Tor circuit isolation (IsolateSOCKSAuth)
-                # Each unique username gets a separate Tor circuit/exit IP
                 target_reader, target_writer = await asyncio.wait_for(
                     self._connect_via_proxy(
                         target_host, target_port,
                         proxy=upstream_proxy,
                         socks_username=username,
-                        socks_password=username  # Password can match username for isolation
+                        socks_password=username
                     ),
                     timeout=connect_timeout
                 )
