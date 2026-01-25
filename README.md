@@ -5,7 +5,8 @@ A secure SOCKS5 proxy server with Tor network support, authentication, and DPI b
 ## Features
 
 - **SOCKS5 Proxy Server** - RFC 1928/1929 compliant with username/password authentication
-- **Tor Integration** - Route traffic through the Tor network, access .onion sites
+- **Per-User Tor Routing** - Each user gets their own isolated Tor circuit via `IsolateSOCKSAuth`
+- **Circuit Isolation** - Users with Tor enabled get unique exit IPs, preventing cross-user tracking
 - **DPI Bypass** - Modern techniques to evade Deep Packet Inspection (GoodbyeDPI, ByeDPI inspired)
 - **TLS Encryption** - Wrap SOCKS5 in TLS to appear as HTTPS traffic
 - **Bridge Support** - Use obfs4, snowflake, or meek bridges to hide Tor usage
@@ -47,10 +48,13 @@ This step is optional if you only want to use the proxy without Tor routing.
 ### 3. Create a User
 
 ```bash
-# Add a user with your own credentials
-./shadow9 user add myuser --password "MySecureP@ss123"
+# Generate a user with random credentials
+./shadow9 user generate
 
-# Or generate random secure credentials
+# Or specify your own username and/or password
+./shadow9 user generate --username myuser --password "MySecureP@ss123"
+
+# Interactive mode - prompts for custom or random credentials
 ./shadow9 user generate
 ```
 
@@ -111,8 +115,8 @@ Run the setup script for initial configuration:
 This will:
 - Create a Python virtual environment
 - Install all dependencies
-- Create your first user with credentials
 - Generate a master encryption key
+- Configure Tor connection settings (if Tor is installed)
 
 ### Management Script
 
@@ -121,28 +125,33 @@ Use the management script for ongoing operations:
 ```bash
 # Show help
 ./shadow9 --help
+./shadow9                                            # Also shows help
+./shadow9 user                                       # Shows user subcommands
 
 # Start the server
 ./shadow9 serve
 
 # User management
-./shadow9 user add <username> --password <password>  # Add a new user
+./shadow9 user generate                              # Generate/create a new user
 ./shadow9 user remove <username>                     # Remove a user
 ./shadow9 user list                                  # List all users
 ./shadow9 user info <username>                       # Show user details
 ./shadow9 user modify <username>                     # Change user settings
 ./shadow9 user enable <username>                     # Enable a user
 ./shadow9 user disable <username>                    # Disable a user
-./shadow9 user generate                              # Generate random credentials
 
-# Test connection
-./shadow9 test
+# Server management
+./shadow9 stop                                       # Stop the running server
 
-# Check system status
-./shadow9 status
+# Tor utilities
+./shadow9 check-tor                                  # Check Tor connectivity
+./shadow9 fetch <url>                                # Fetch URL through proxy
 
-# Update to latest version from GitHub
-./shadow9 update
+# System utilities
+./shadow9 init                                       # Run initial setup wizard
+./shadow9 setup                                      # Install Tor and bridges
+./shadow9 status                                     # Check system status
+./shadow9 update                                     # Update to latest version
 ```
 
 ### Tab Completion
@@ -212,40 +221,47 @@ The server is minimal - users control their own settings.
 #### Creating Users
 
 ```bash
-# Add a user with username and password
-./shadow9 user add myuser --password "MySecureP@ss123"
-
-# Add a user with interactive password prompt (more secure)
-./shadow9 user add myuser
+# Generate a user with random credentials (interactive)
+./shadow9 user generate
 # You'll be prompted for:
-#   - Password (with confirmation)
+#   - Custom or random username
+#   - Custom or random password
 #   - Tor routing preference
 
-# Add a user with Tor routing (anonymous)
-./shadow9 user add myuser --password "MySecureP@ss123" --tor
+# Generate with specific username
+./shadow9 user generate --username myuser
+
+# Generate with specific password
+./shadow9 user generate --password "MySecureP@ss123"
+
+# Generate with both custom username and password
+./shadow9 user generate --username myuser --password "MySecureP@ss123"
+
+# Generate a user with Tor routing (anonymous)
+./shadow9 user generate --username myuser --password "MySecureP@ss123" --tor
 # Traffic goes: Client -> Shadow9 -> Tor Network -> Internet
 
-# Add a user with direct routing (faster, not anonymous)
-./shadow9 user add myuser --password "MySecureP@ss123" --no-tor
+# Generate a user with direct routing (faster, not anonymous)
+./shadow9 user generate --username myuser --password "MySecureP@ss123" --no-tor
 # Traffic goes: Client -> Shadow9 -> Internet
 
-# Add a user with paranoid security (for restrictive networks)
-./shadow9 user add myuser --password "MySecureP@ss123" --tor --security paranoid
+# Generate a user with paranoid security (for restrictive networks)
+./shadow9 user generate --username myuser --password "MySecureP@ss123" --tor --security paranoid
 
-# Add a user with obfs4 bridge (hide Tor from ISP)
-./shadow9 user add myuser --password "MySecureP@ss123" --tor --bridge obfs4
+# Generate a user with obfs4 bridge (hide Tor from ISP)
+./shadow9 user generate --username myuser --password "MySecureP@ss123" --tor --bridge obfs4
 
-# Add a user with snowflake bridge (for heavy censorship)
-./shadow9 user add myuser --password "MySecureP@ss123" --tor --bridge snowflake --security paranoid
+# Generate a user with snowflake bridge (for heavy censorship)
+./shadow9 user generate --username myuser --password "MySecureP@ss123" --tor --bridge snowflake --security paranoid
 
-# Add a user with port restrictions (only HTTP/HTTPS)
-./shadow9 user add myuser --password "MySecureP@ss123" --ports "80,443"
+# Generate a user with port restrictions (only HTTP/HTTPS)
+./shadow9 user generate --username myuser --password "MySecureP@ss123" --ports "80,443"
 
-# Add a user with rate limiting
-./shadow9 user add myuser --password "MySecureP@ss123" --rate-limit 100
+# Generate a user with rate limiting
+./shadow9 user generate --username myuser --password "MySecureP@ss123" --rate-limit 100
 
 # Combine multiple options
-./shadow9 user add secure_user --password "MySecureP@ss123" --tor --security paranoid --ports "80,443,8080" --rate-limit 50
+./shadow9 user generate --username secure_user --password "MySecureP@ss123" --tor --security paranoid --ports "80,443,8080" --rate-limit 50
 
 # Generate random credentials with all options
 ./shadow9 user generate --tor --security moderate
@@ -339,19 +355,19 @@ The server is minimal - users control their own settings.
 
 ```bash
 # Create an anonymous user for sensitive browsing (maximum security)
-./shadow9 user add secure_user --password "Str0ngP@ssword!" --tor --bridge obfs4 --security paranoid --ports "443"
+./shadow9 user generate --username secure_user --password "Str0ngP@ssword!" --tor --bridge obfs4 --security paranoid --ports "443"
 # This user: Tor + obfs4 bridge, DPI bypass, HTTPS only
 
 # Create a fast user for regular browsing (minimum overhead)
-./shadow9 user add fast_user --password "Str0ngP@ssword!" --no-tor --security none
+./shadow9 user generate --username fast_user --password "Str0ngP@ssword!" --no-tor --security none
 # This user: direct connection, no encryption overhead, all ports allowed
 
 # Create a balanced user for everyday use
-./shadow9 user add daily_user --password "Str0ngP@ssword!" --tor --security basic --rate-limit 200
+./shadow9 user generate --username daily_user --password "Str0ngP@ssword!" --tor --security basic --rate-limit 200
 # This user: Tor routing, TLS wrapping, rate limited
 
 # Create a restricted user for shared access
-./shadow9 user add guest_user --password "Str0ngP@ssword!" --no-tor --security basic --ports "80,443" --rate-limit 50
+./shadow9 user generate --username guest_user --password "Str0ngP@ssword!" --no-tor --security basic --ports "80,443" --rate-limit 50
 # This user: direct, HTTP/HTTPS only, heavily rate limited
 
 # Generate a temporary high-security user (random credentials)
@@ -383,8 +399,9 @@ server:
   max_connections: 100
 
 tor:
-  enabled: true
+  socks_host: "127.0.0.1"
   socks_port: 9050
+  control_port: 9051
 
 auth:
   require_auth: true
@@ -393,6 +410,8 @@ auth:
 security:
   allowed_ports: [80, 443, 8080, 8443]
 ```
+
+**Note**: Tor routing is configured per-user, not at the server level. The `tor` section only configures how to connect to the Tor daemon. Each user's `--tor/--no-tor` setting determines whether their traffic is routed through Tor.
 
 ## Environment Variables
 
@@ -442,6 +461,10 @@ Download Tor Expert Bundle from [torproject.org](https://www.torproject.org/down
 2. **Master Key** - Set via environment variable, never stored in files
 3. **TLS** - Self-signed certificates generated on startup
 4. **Permissions** - Credential files are chmod 600 on Unix
+5. **Tor Circuit Isolation** - Each user with Tor enabled gets their own isolated circuit via Tor's `IsolateSOCKSAuth` feature. This means:
+   - Different users get different exit IPs
+   - Users cannot correlate each other's traffic
+   - Compromising one user's session doesn't affect others
 
 ## Troubleshooting
 
