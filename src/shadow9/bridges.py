@@ -158,14 +158,16 @@ SNOWFLAKE_BRIDGES = [SNOWFLAKE_BRIDGE_AZURE, SNOWFLAKE_BRIDGE_FASTLY]
 # Backwards compatibility alias
 SNOWFLAKE_BRIDGE = SNOWFLAKE_BRIDGE_AZURE
 
-# Meek Azure bridge
+# Meek bridge (CDN77-based, replaces deprecated Azure bridge as of Jan 2025)
+# Azure stopped supporting domain fronting, so Tor switched to CDN77
 MEEK_AZURE_BRIDGE = Bridge(
     type=BridgeType.MEEK_AZURE,
-    address="0.0.0.1:2",  # Dummy address
-    fingerprint="97700DFE9F483596DDA6264C4D7DF7641E1E39CE",
+    address="192.0.2.20:80",  # Standard meek address
+    fingerprint="",  # CDN77 bridge doesn't use fingerprint
     params={
-        "url": "https://meek.azureedge.net/",
-        "front": "ajax.aspnetcdn.com"
+        "url": "https://1314488750.rsc.cdn77.org",
+        "front": "www.phpmyadmin.net",
+        "utls": "HelloRandomizedALPN"
     }
 )
 
@@ -224,13 +226,14 @@ class PluggableTransportManager:
 
         return transports
 
-    def generate_torrc(self, data_dir: Path, socks_port: int = 9050) -> str:
+    def generate_torrc(self, data_dir: Path, socks_port: int = 9050, control_port: int = 0) -> str:
         """
         Generate torrc configuration for bridges.
 
         Args:
             data_dir: Tor data directory
             socks_port: SOCKS port for this Tor instance
+            control_port: Control port for this Tor instance (0 = auto-assign)
 
         Returns:
             torrc content string
@@ -240,6 +243,14 @@ class PluggableTransportManager:
             f"SocksPort {socks_port}",
             "UseBridges 1",
         ]
+
+        # Add control port for bootstrap monitoring
+        if control_port > 0:
+            lines.append(f"ControlPort {control_port}")
+        else:
+            # Use auto port assignment with a socket file
+            control_socket = data_dir / "control.sock"
+            lines.append(f"ControlSocket {control_socket}")
 
         # Get bridges to use
         if self.config.use_builtin_bridges and not self.config.bridges:
@@ -330,6 +341,8 @@ class TorBridgeConnector:
         self.pt_manager = PluggableTransportManager(bridge_config)
         self._tor_process: Optional[subprocess.Popen] = None
         self._temp_dir: Optional[tempfile.TemporaryDirectory] = None
+        self._data_dir: Optional[Path] = None
+        self._log_file: Optional[Path] = None
 
     async def start_tor_with_bridges(self) -> tuple[str, int]:
         """
@@ -348,11 +361,16 @@ class TorBridgeConnector:
 
         # Create temp directory for Tor data
         self._temp_dir = tempfile.TemporaryDirectory(prefix="shadow9_tor_")
-        data_dir = Path(self._temp_dir.name)
+        self._data_dir = Path(self._temp_dir.name)
 
         # Generate torrc with specified port
-        torrc_content = self.pt_manager.generate_torrc(data_dir, self.socks_port)
-        torrc_path = data_dir / "torrc"
+        torrc_content = self.pt_manager.generate_torrc(self._data_dir, self.socks_port)
+        
+        # Add log file to torrc for bootstrap monitoring
+        self._log_file = self._data_dir / "tor.log"
+        torrc_content += f"\nLog notice file {self._log_file}"
+        
+        torrc_path = self._data_dir / "torrc"
         torrc_path.write_text(torrc_content)
 
         logger.info(
@@ -379,32 +397,66 @@ class TorBridgeConnector:
 
         return "127.0.0.1", self.socks_port
 
-    async def _wait_for_bootstrap(self, timeout: int = 120) -> None:
-        """Wait for Tor to finish bootstrapping."""
+    async def _wait_for_bootstrap(self, timeout: int = 180) -> None:
+        """Wait for Tor to finish bootstrapping by monitoring the log file."""
+        import re
+        
         logger.info("Waiting for Tor to bootstrap...", socks_port=self.socks_port)
 
         start_time = asyncio.get_event_loop().time()
+        last_progress = 0
+        log_position = 0
 
         while True:
-            if asyncio.get_event_loop().time() - start_time > timeout:
-                raise RuntimeError("Tor bootstrap timeout")
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                raise RuntimeError(f"Tor bootstrap timeout after {timeout}s (last progress: {last_progress}%)")
 
             if self._tor_process.poll() is not None:
                 stderr = self._tor_process.stderr.read().decode() if self._tor_process.stderr else ""
                 raise RuntimeError(f"Tor process died: {stderr}")
 
-            # Check if Tor is ready by trying to connect to SOCKS port
-            try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", self.socks_port),
-                    timeout=2.0
-                )
-                writer.close()
-                await writer.wait_closed()
-                logger.info("Tor bootstrap complete", socks_port=self.socks_port)
-                return
-            except (ConnectionRefusedError, asyncio.TimeoutError):
-                await asyncio.sleep(2)
+            # Read from log file
+            if hasattr(self, '_log_file') and self._log_file.exists():
+                try:
+                    with open(self._log_file, 'r') as f:
+                        f.seek(log_position)
+                        new_content = f.read()
+                        log_position = f.tell()
+                        
+                        for line in new_content.splitlines():
+                            # Look for bootstrap progress
+                            if 'Bootstrapped' in line:
+                                match = re.search(r'Bootstrapped (\d+)%', line)
+                                if match:
+                                    progress = int(match.group(1))
+                                    if progress != last_progress:
+                                        last_progress = progress
+                                        logger.info(f"Tor bootstrap: {progress}%")
+                                    if progress >= 100:
+                                        # Give it a moment to fully stabilize
+                                        await asyncio.sleep(1)
+                                        logger.info("Tor bootstrap complete", socks_port=self.socks_port)
+                                        return
+                except Exception as e:
+                    logger.debug(f"Error reading log file: {e}")
+
+            # Fallback: check if SOCKS port is actually working after some time
+            if elapsed > 30:  # After 30s, try a connection test
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection("127.0.0.1", self.socks_port),
+                        timeout=2.0
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    if last_progress >= 95:  # Close enough
+                        logger.info("Tor bootstrap complete (connection test)", socks_port=self.socks_port)
+                        return
+                except (ConnectionRefusedError, asyncio.TimeoutError):
+                    pass
+
+            await asyncio.sleep(1)
 
     async def stop(self) -> None:
         """Stop Tor process and cleanup."""
