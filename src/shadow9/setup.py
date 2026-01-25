@@ -49,6 +49,8 @@ class Dependency:
     binary_name: str             # Name of binary to check in PATH
     required: bool = True
     description: str = ""
+    min_version: str = ""        # Minimum required version (e.g., "0.4.8")
+    version_command: str = ""    # Command to get version string
 
 
 # Commands to add official Tor Project repository (for latest Tor version)
@@ -76,6 +78,8 @@ DEPENDENCIES = [
         check_command="tor --version",
         binary_name="tor",
         description="Tor anonymity network daemon (from official Tor Project repo)",
+        min_version="0.4.8",
+        version_command="tor --version 2>&1 | head -1 | sed -n 's/.*Tor version \\([0-9.]*\\).*/\\1/p'",
         install_commands={
             OS.LINUX_DEBIAN: TOR_REPO_SETUP_DEBIAN,
             OS.LINUX_FEDORA: TOR_REPO_SETUP_FEDORA,
@@ -202,15 +206,59 @@ class SystemSetup:
         except Exception as e:
             return False, str(e)
 
-    def check_dependency(self, dep: Dependency) -> bool:
-        """Check if a dependency is installed."""
-        # First check if binary is in PATH
-        if shutil.which(dep.binary_name):
-            return True
+    def _compare_versions(self, v1: str, v2: str) -> int:
+        """
+        Compare two version strings.
+        
+        Returns:
+            -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
+        """
+        def parse_version(v: str) -> list:
+            # Extract just the version numbers, ignore any suffix
+            import re
+            match = re.match(r'(\d+(?:\.\d+)*)', v)
+            if match:
+                return [int(x) for x in match.group(1).split('.')]
+            return [0]
+        
+        parts1 = parse_version(v1)
+        parts2 = parse_version(v2)
+        
+        # Pad shorter version with zeros
+        max_len = max(len(parts1), len(parts2))
+        parts1.extend([0] * (max_len - len(parts1)))
+        parts2.extend([0] * (max_len - len(parts2)))
+        
+        for p1, p2 in zip(parts1, parts2):
+            if p1 < p2:
+                return -1
+            elif p1 > p2:
+                return 1
+        return 0
 
-        # Try running the check command
-        success, _ = self._run_command(dep.check_command)
-        return success
+    def check_dependency(self, dep: Dependency) -> tuple[bool, bool]:
+        """
+        Check if a dependency is installed and meets version requirements.
+        
+        Returns:
+            Tuple of (is_installed, meets_version_requirement)
+        """
+        # First check if binary is in PATH
+        if not shutil.which(dep.binary_name):
+            # Try running the check command
+            success, _ = self._run_command(dep.check_command)
+            if not success:
+                return False, False
+        
+        # Binary exists, check version if required
+        if dep.min_version and dep.version_command:
+            success, output = self._run_command(dep.version_command)
+            if success and output.strip():
+                installed_version = output.strip()
+                if self._compare_versions(installed_version, dep.min_version) < 0:
+                    return True, False  # Installed but outdated
+        
+        return True, True
 
     def install_dependency(self, dep: Dependency) -> bool:
         """Install a dependency."""
@@ -247,9 +295,9 @@ class SystemSetup:
         """Check status of all dependencies."""
         status = {}
         for dep in DEPENDENCIES:
-            installed = self.check_dependency(dep)
+            is_installed, meets_version = self.check_dependency(dep)
             status[dep.name] = {
-                "installed": installed,
+                "installed": is_installed and meets_version,
                 "required": dep.required,
                 "description": dep.description,
             }
@@ -266,8 +314,16 @@ class SystemSetup:
             if not dep.required and not include_optional:
                 continue
 
-            if self.check_dependency(dep):
+            is_installed, meets_version = self.check_dependency(dep)
+            
+            if is_installed and meets_version:
                 self._log(f"{dep.name} is already installed", "success")
+            elif is_installed and not meets_version:
+                self._log(f"{dep.name} is installed but outdated (need {dep.min_version}+)", "warning")
+                self._log(f"Upgrading {dep.name} from official repository...", "step")
+                success = self.install_dependency(dep)
+                if not success and dep.required:
+                    all_success = False
             else:
                 self._log(f"{dep.name} is not installed", "warning")
                 if dep.required or include_optional:
