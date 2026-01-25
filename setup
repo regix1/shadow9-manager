@@ -178,23 +178,31 @@ if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
     # Key exists, ask if user wants to regenerate
     echo -e "${YELLOW}[INFO] Existing master key found in .env${NC}"
     echo -e "${RED}WARNING: Regenerating the key will make existing credentials unreadable!${NC}"
-    read -p "Would you like to generate a new master key? (y/n): " REGEN_KEY
-    if [[ "$REGEN_KEY" =~ ^[Yy]$ ]]; then
+    echo -n "Would you like to generate a new master key? (y/n): "
+    read REGEN_KEY </dev/tty
+    if [[ "$REGEN_KEY" =~ ^[Yy] ]]; then
         GENERATE_NEW_KEY=true
+        echo -e "${YELLOW}[INFO] Regenerating master key...${NC}"
         # Backup old .env
-        cp .env .env.backup 2>/dev/null
+        cp .env .env.backup 2>/dev/null || true
         echo -e "${YELLOW}[INFO] Old .env backed up to .env.backup${NC}"
         
         # Remove old credentials file (encrypted with old key)
         if [ -f "config/credentials.enc" ]; then
-            cp config/credentials.enc config/credentials.enc.backup 2>/dev/null
+            cp config/credentials.enc config/credentials.enc.backup 2>/dev/null || true
             rm -f config/credentials.enc
             echo -e "${YELLOW}[INFO] Old credentials removed (backup: config/credentials.enc.backup)${NC}"
             echo -e "${YELLOW}[INFO] You will need to create new users after setup${NC}"
         fi
+        
+        # Remove old salt file (used for key derivation)
+        if [ -f "config/.salt" ]; then
+            rm -f config/.salt
+            echo -e "${YELLOW}[INFO] Old salt file removed${NC}"
+        fi
     else
         # Load existing key
-        source .env
+        source .env 2>/dev/null || true
         MASTER_KEY="$SHADOW9_MASTER_KEY"
         echo -e "${GREEN}[OK] Using existing master key${NC}"
     fi
@@ -281,8 +289,9 @@ echo -e "${NC}"
 
 # Ask if user wants to run shadow9 setup
 echo ""
-read -p "Would you like to run shadow9 setup to install Tor and bridges? (y/n): " RUNSETUP
-if [[ "$RUNSETUP" =~ ^[Yy]$ ]]; then
+echo -n "Would you like to run shadow9 setup to install Tor and bridges? (y/n): "
+read RUNSETUP </dev/tty
+if [[ "$RUNSETUP" =~ ^[Yy] ]]; then
     echo ""
     echo -e "${CYAN}Running shadow9 setup...${NC}"
     echo ""
