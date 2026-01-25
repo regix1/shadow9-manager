@@ -139,6 +139,10 @@ class TorConnector:
         except Exception as e:
             logger.error("Failed to connect to Tor", error=str(e))
             await self._set_status(TorStatus.ERROR)
+            # Close session if it was created
+            if self._session:
+                await self._session.close()
+                self._session = None
             return False
 
     async def disconnect(self) -> None:

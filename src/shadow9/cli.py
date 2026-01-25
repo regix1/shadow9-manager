@@ -94,7 +94,7 @@ def serve(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     host: Annotated[Optional[str], typer.Option("--host", "-h", help="Host to bind to")] = None,
     port: Annotated[Optional[int], typer.Option("--port", "-p", help="Port to listen on")] = None,
-    background: Annotated[bool, typer.Option("--background", "-b", help="Run server in background")] = False,
+    background: Annotated[bool, typer.Option("--background", "-d", help="Run server in background (daemon)")] = False,
     interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Run interactive configuration")] = False,
 ):
     """Start the SOCKS5 proxy server.
