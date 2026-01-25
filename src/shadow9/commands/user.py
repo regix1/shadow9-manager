@@ -15,7 +15,7 @@ from rich.panel import Panel
 
 from ..config import Config
 from ..auth import AuthManager
-from ..paths import get_paths
+from ..paths import get_paths, load_master_key
 from ..wizards import (
     run_user_modify_wizard,
     run_user_list_wizard, display_user_info
@@ -165,8 +165,7 @@ def register_user_commands(app: typer.Typer):
                 console.print("[red]Error: Invalid port format. Use comma-separated numbers.[/red]")
                 raise typer.Exit(1)
 
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+        master_key = load_master_key()
 
         auth_manager = AuthManager(
             credentials_file=cfg.get_credentials_file(),
@@ -254,8 +253,7 @@ def register_user_commands(app: typer.Typer):
         """Remove a user (interactive menu if no username provided)."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+        master_key = load_master_key()
 
         auth_manager = AuthManager(
             credentials_file=cfg.get_credentials_file(),
@@ -353,8 +351,7 @@ def register_user_commands(app: typer.Typer):
         """List all users (use -i for interactive mode with actions)."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+        master_key = load_master_key()
 
         auth_manager = AuthManager(
             credentials_file=cfg.get_credentials_file(),
@@ -393,8 +390,7 @@ def register_user_commands(app: typer.Typer):
         """Show detailed information about a user."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+        master_key = load_master_key()
 
         auth_manager = AuthManager(
             credentials_file=cfg.get_credentials_file(),
@@ -465,8 +461,7 @@ def register_user_commands(app: typer.Typer):
         
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+        master_key = load_master_key()
 
         auth_manager = AuthManager(
             credentials_file=cfg.get_credentials_file(),
@@ -556,8 +551,7 @@ def register_user_commands(app: typer.Typer):
         """Enable a user account."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+        master_key = load_master_key()
 
         auth_manager = AuthManager(
             credentials_file=cfg.get_credentials_file(),
@@ -627,8 +621,7 @@ def register_user_commands(app: typer.Typer):
         """Disable a user account (prevents login)."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+        master_key = load_master_key()
 
         auth_manager = AuthManager(
             credentials_file=cfg.get_credentials_file(),

@@ -57,34 +57,12 @@ def register_service_commands(app: typer.Typer):
             python_exec = shutil.which("python3") or shutil.which("python") or sys.executable
             python_path = "/usr/local/bin:/usr/bin:/bin"
 
-        # Get master key from environment or .env files
-        # Check multiple locations to ensure we use the same key as user generation
-        master_key = os.getenv("SHADOW9_MASTER_KEY")
-        env_file_used = None
+        # Get master key from paths module (checks env var and .env file)
+        from ..paths import load_master_key
+        master_key = load_master_key()
         
-        if not master_key:
-            # Search for .env in multiple locations (in priority order)
-            env_locations = [
-                Path.cwd() / ".env",                          # Current working directory
-                Path(install_path) / ".env",                  # Install directory
-                Path.home() / ".shadow9" / ".env",            # User config directory
-                Path("/etc/shadow9/.env"),                    # System config
-            ]
-            
-            for env_file in env_locations:
-                if env_file.exists():
-                    try:
-                        for line in env_file.read_text().splitlines():
-                            line = line.strip()
-                            if line.startswith("SHADOW9_MASTER_KEY="):
-                                master_key = line.split("=", 1)[1].strip()
-                                env_file_used = env_file
-                                console.print(f"[dim]Using master key from: {env_file}[/dim]")
-                                break
-                        if master_key:
-                            break
-                    except Exception:
-                        pass
+        if master_key:
+            console.print(f"[dim]Using master key from: {paths.env_file}[/dim]")
 
         if not master_key:
             import secrets
@@ -94,13 +72,12 @@ def register_service_commands(app: typer.Typer):
             os.chmod(env_file, 0o600)
             console.print(f"[green]Generated master key and saved to {env_file}[/green]")
         
-        # If we found the key in a different location, also save it to install_path for consistency
-        if env_file_used and env_file_used != Path(install_path) / ".env":
-            target_env = Path(install_path) / ".env"
-            if not target_env.exists():
-                target_env.write_text(f"SHADOW9_MASTER_KEY={master_key}\n")
-                os.chmod(target_env, 0o600)
-                console.print(f"[dim]Copied master key to: {target_env}[/dim]")
+        # Ensure .env file exists in install path for the service
+        target_env = Path(install_path) / ".env"
+        if not target_env.exists():
+            target_env.write_text(f"SHADOW9_MASTER_KEY={master_key}\n")
+            os.chmod(target_env, 0o600)
+            console.print(f"[dim]Saved master key to: {target_env}[/dim]")
 
         # Create systemd service file
         # Set SHADOW9_HOME to ensure consistent path resolution

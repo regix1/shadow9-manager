@@ -13,6 +13,7 @@ from rich.panel import Panel
 
 from ..auth import AuthManager
 from ..config import Config
+from ..paths import load_master_key
 
 console = Console()
 
@@ -38,8 +39,7 @@ def run_user_wizard(config_path: str = "config/config.yaml") -> None:
     
     cfg = Config.load(Path(config_path)) if Path(config_path).exists() else Config()
     
-    import os
-    master_key = os.getenv(cfg.auth.master_key_env)
+    master_key = load_master_key()
     
     auth_manager = AuthManager(
         credentials_file=cfg.get_credentials_file(),

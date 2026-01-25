@@ -17,6 +17,7 @@ from rich.panel import Panel
 
 from ..config import Config, setup_logging
 from ..auth import AuthManager
+from ..paths import load_master_key
 from ..socks5_server import Socks5Server, ConnectionInfo
 from ..tor_connector import TorConnector, TorConfig
 from ..bridges import TorBridgeConnector, BridgeConfig, BridgeType
@@ -132,10 +133,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     setup_logging(cfg.log)
 
     # Initialize authentication
-    master_key = None
-    if cfg.auth.master_key_env:
-        import os
-        master_key = os.getenv(cfg.auth.master_key_env)
+    master_key = load_master_key()
 
     auth_manager = AuthManager(
         credentials_file=cfg.get_credentials_file(),
