@@ -24,6 +24,10 @@ echo "         Secure SOCKS5 Proxy with Tor Support               "
 echo "============================================================"
 echo -e "${NC}"
 
+# Make scripts executable
+chmod +x "$SCRIPT_DIR/shadow9" 2>/dev/null || true
+chmod +x "$SCRIPT_DIR/setup" 2>/dev/null || true
+
 # Check Python version
 echo -e "${CYAN}[1/6]${NC} Checking Python version..."
 if ! command -v python3 &> /dev/null; then
@@ -89,12 +93,35 @@ echo -e "\n${CYAN}[5/6]${NC} Setting up tab completion..."
 # Detect shell and configure completion
 COMPLETION_INSTALLED=false
 
-# Generate completion script
-COMPLETION_CMD='eval "$(_SHADOW9_COMPLETE=bash_source shadow9)"'
+# Create completion script that works with both 'shadow9' and './shadow9'
+COMPLETION_SCRIPT="$SCRIPT_DIR/.shadow9-completion.bash"
+cat > "$COMPLETION_SCRIPT" << COMPLETION_EOF
+# Shadow9 tab completion
+_shadow9_completion() {
+    local IFS=\$'\n'
+    local shadow9_cmd="$SCRIPT_DIR/venv/bin/shadow9"
+
+    if [ -x "\$shadow9_cmd" ]; then
+        COMPREPLY=( \$( env COMP_WORDS="\${COMP_WORDS[*]}" \\
+                       COMP_CWORD=\$COMP_CWORD \\
+                       _SHADOW9_COMPLETE=bash_complete "\$shadow9_cmd" ) )
+    fi
+    return 0
+}
+
+# Register completion for both 'shadow9' and './shadow9'
+complete -o default -F _shadow9_completion shadow9
+complete -o default -F _shadow9_completion ./shadow9
+COMPLETION_EOF
+
+COMPLETION_CMD="source \"$SCRIPT_DIR/.shadow9-completion.bash\""
 
 # Try to add to bashrc
 if [ -f "$HOME/.bashrc" ]; then
-    if ! grep -q "_SHADOW9_COMPLETE" "$HOME/.bashrc" 2>/dev/null; then
+    if ! grep -q ".shadow9-completion.bash" "$HOME/.bashrc" 2>/dev/null; then
+        # Remove old completion if present
+        sed -i '/_SHADOW9_COMPLETE/d' "$HOME/.bashrc" 2>/dev/null || true
+        sed -i '/Shadow9 tab completion/d' "$HOME/.bashrc" 2>/dev/null || true
         echo "" >> "$HOME/.bashrc"
         echo "# Shadow9 tab completion" >> "$HOME/.bashrc"
         echo "$COMPLETION_CMD" >> "$HOME/.bashrc"
@@ -108,8 +135,46 @@ fi
 
 # Try to add to zshrc if zsh is present
 if [ -f "$HOME/.zshrc" ]; then
-    ZSH_COMPLETION_CMD='eval "$(_SHADOW9_COMPLETE=zsh_source shadow9)"'
-    if ! grep -q "_SHADOW9_COMPLETE" "$HOME/.zshrc" 2>/dev/null; then
+    # Create zsh completion script
+    ZSH_COMPLETION_SCRIPT="$SCRIPT_DIR/.shadow9-completion.zsh"
+    cat > "$ZSH_COMPLETION_SCRIPT" << ZSH_COMPLETION_EOF
+# Shadow9 tab completion for zsh
+_shadow9_completion() {
+    local -a completions
+    local -a completions_with_descriptions
+    local -a response
+    local shadow9_cmd="$SCRIPT_DIR/venv/bin/shadow9"
+
+    [[ ! -x "\$shadow9_cmd" ]] && return 1
+
+    response=("\${(@f)\$(env COMP_WORDS="\${words[*]}" COMP_CWORD=\$((CURRENT-1)) _SHADOW9_COMPLETE=zsh_complete "\$shadow9_cmd")}")
+
+    for key descr in \${(kv)response}; do
+        if [[ "\$descr" == "_" ]]; then
+            completions+=("\$key")
+        else
+            completions_with_descriptions+=("\$key":"\$descr")
+        fi
+    done
+
+    if [ -n "\$completions_with_descriptions" ]; then
+        _describe -V unsorted completions_with_descriptions -U
+    fi
+
+    if [ -n "\$completions" ]; then
+        compadd -U -V unsorted -a completions
+    fi
+}
+
+compdef _shadow9_completion shadow9
+compdef _shadow9_completion ./shadow9
+ZSH_COMPLETION_EOF
+
+    ZSH_COMPLETION_CMD="source \"$SCRIPT_DIR/.shadow9-completion.zsh\""
+    if ! grep -q ".shadow9-completion.zsh" "$HOME/.zshrc" 2>/dev/null; then
+        # Remove old completion if present
+        sed -i '/_SHADOW9_COMPLETE/d' "$HOME/.zshrc" 2>/dev/null || true
+        sed -i '/Shadow9 tab completion/d' "$HOME/.zshrc" 2>/dev/null || true
         echo "" >> "$HOME/.zshrc"
         echo "# Shadow9 tab completion" >> "$HOME/.zshrc"
         echo "$ZSH_COMPLETION_CMD" >> "$HOME/.zshrc"
@@ -122,9 +187,8 @@ if [ -f "$HOME/.zshrc" ]; then
 fi
 
 if [ "$COMPLETION_INSTALLED" = false ]; then
-    echo -e "${YELLOW}[INFO] Could not auto-configure completion. Add manually:${NC}"
-    echo -e "  Bash: echo '$COMPLETION_CMD' >> ~/.bashrc"
-    echo -e "  Zsh:  echo 'eval \"\$(_SHADOW9_COMPLETE=zsh_source shadow9)\"' >> ~/.zshrc"
+    echo -e "${YELLOW}[INFO] Could not auto-configure completion.${NC}"
+    echo -e "  Add to your shell config: source \"$COMPLETION_SCRIPT\""
 fi
 
 # Create first user
@@ -168,24 +232,24 @@ print(f'''
 ''')
 "
 
+# Reload shell config to enable completion immediately
+if [ -f "$HOME/.bashrc" ]; then
+    source "$HOME/.bashrc" 2>/dev/null || true
+fi
+
 echo -e "${GREEN}"
 echo "============================================================"
 echo "                    Setup Complete!                         "
 echo "------------------------------------------------------------"
-echo "  Next steps:                                               "
-echo "                                                            "
-echo "  1. Restart your shell or run:                             "
-echo "     source ~/.bashrc                                       "
-echo "                                                            "
-echo "  2. Start the server:                                      "
+echo "  Start the server:                                         "
 echo "     ./shadow9 serve                                        "
 echo "                                                            "
-echo "  3. Configure your app to use SOCKS5 proxy:                "
+echo "  Configure your app to use SOCKS5 proxy:                   "
 echo "     Host: 127.0.0.1                                        "
 echo "     Port: 1080                                             "
 echo "     Auth: Use the credentials above                        "
 echo "                                                            "
-echo "  Tab completion is now enabled. Try:                       "
+echo "  Tab completion is enabled. Try:                           "
 echo "     ./shadow9 [TAB][TAB]                                   "
 echo "                                                            "
 echo "  For more options:                                         "
