@@ -270,13 +270,32 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     try:
         await server.start()
 
-        tor_status = "Available (per-user circuits)" if upstream_proxy else "Not connected"
+        # Build user routing summary
+        users = auth_manager.list_users()
+        tor_users = [u for u in users if auth_manager.get_user_tor_preference(u)]
+        direct_users = [u for u in users if not auth_manager.get_user_tor_preference(u)]
+        
+        routing_lines = []
+        if tor_users:
+            routing_lines.append(f"[green]Tor[/green]: {', '.join(tor_users)}")
+        if direct_users:
+            routing_lines.append(f"[yellow]Direct[/yellow]: {', '.join(direct_users)}")
+        
+        routing_summary = "\n".join(routing_lines) if routing_lines else "[dim]No users configured[/dim]"
+        
+        # Tor availability note
+        if tor_users and not upstream_proxy:
+            tor_note = "\n[red]Warning: Tor not available - Tor users will fail![/red]"
+        elif tor_users:
+            tor_note = "\n[dim]Each Tor user gets isolated circuit (IsolateSOCKSAuth)[/dim]"
+        else:
+            tor_note = ""
+        
         console.print(Panel(
             f"[bold green]SOCKS5 Server Running[/bold green]\n"
             f"Listen: [cyan]{cfg.server.host}:{cfg.server.port}[/cyan]\n"
-            f"Tor:    [cyan]{tor_status}[/cyan]\n"
             f"Auth:   [cyan]Username/Password[/cyan]\n\n"
-            f"[dim]Each user gets isolated Tor circuit. Routing per user settings.[/dim]\n"
+            f"[bold]User Routing:[/bold]\n{routing_summary}{tor_note}\n\n"
             f"[dim]Press Ctrl+C to stop.[/dim]",
             title="Shadow9 Manager",
             border_style="green"
