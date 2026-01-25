@@ -277,6 +277,15 @@ echo "  For more options: shadow9 --help                          "
 echo "============================================================"
 echo -e "${NC}"
 
+# Check if service file exists and warn about reinstalling
+if [ -f "/etc/systemd/system/shadow9.service" ]; then
+    echo -e "${YELLOW}"
+    echo "[INFO] Existing systemd service detected."
+    echo "       If the master key was regenerated, reinstall the service:"
+    echo "         shadow9 service install --host 0.0.0.0 --port 1080"
+    echo -e "${NC}"
+fi
+
 # Ask if user wants to run shadow9 setup
 echo ""
 read -p "Would you like to run shadow9 setup to install Tor and bridges? (y/n): " RUNSETUP
