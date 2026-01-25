@@ -184,6 +184,14 @@ if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
         # Backup old .env
         cp .env .env.backup 2>/dev/null
         echo -e "${YELLOW}[INFO] Old .env backed up to .env.backup${NC}"
+        
+        # Remove old credentials file (encrypted with old key)
+        if [ -f "config/credentials.enc" ]; then
+            cp config/credentials.enc config/credentials.enc.backup 2>/dev/null
+            rm -f config/credentials.enc
+            echo -e "${YELLOW}[INFO] Old credentials removed (backup: config/credentials.enc.backup)${NC}"
+            echo -e "${YELLOW}[INFO] You will need to create new users after setup${NC}"
+        fi
     else
         # Load existing key
         source .env
