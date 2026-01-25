@@ -374,7 +374,7 @@ def user_add(
         console.print("[yellow]No username provided.[/yellow]")
         run_wizard = typer.confirm("Run interactive wizard?", default=True)
         if run_wizard:
-            from .user_wizard import run_user_wizard
+            # run_user_wizard already imported at top of file
             run_user_wizard(config)
             return
         else:
