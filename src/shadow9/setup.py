@@ -51,16 +51,34 @@ class Dependency:
     description: str = ""
 
 
+# Commands to add official Tor Project repository (for latest Tor version)
+# These ensure we get Tor 0.4.8+ with all modern features
+TOR_REPO_SETUP_DEBIAN = [
+    "sudo apt-get update",
+    "sudo apt-get install -y apt-transport-https gpg",
+    # Add Tor Project signing key
+    "wget -qO- https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc | sudo gpg --dearmor -o /usr/share/keyrings/tor-archive-keyring.gpg --yes",
+    # Add Tor Project repository (auto-detect distro codename)
+    "echo \"deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org $(lsb_release -cs) main\" | sudo tee /etc/apt/sources.list.d/tor.list",
+    "sudo apt-get update",
+    "sudo apt-get install -y tor deb.torproject.org-keyring",
+]
+
+TOR_REPO_SETUP_FEDORA = [
+    # Fedora has reasonably up-to-date Tor in repos
+    "sudo dnf install -y tor",
+]
+
 # Required dependencies
 DEPENDENCIES = [
     Dependency(
         name="Tor",
         check_command="tor --version",
         binary_name="tor",
-        description="Tor anonymity network daemon",
+        description="Tor anonymity network daemon (from official Tor Project repo)",
         install_commands={
-            OS.LINUX_DEBIAN: ["sudo apt-get update", "sudo apt-get install -y tor"],
-            OS.LINUX_FEDORA: ["sudo dnf install -y tor"],
+            OS.LINUX_DEBIAN: TOR_REPO_SETUP_DEBIAN,
+            OS.LINUX_FEDORA: TOR_REPO_SETUP_FEDORA,
             OS.LINUX_ARCH: ["sudo pacman -S --noconfirm tor"],
             OS.LINUX_ALPINE: ["sudo apk add tor"],
             OS.MACOS: ["brew install tor"],
