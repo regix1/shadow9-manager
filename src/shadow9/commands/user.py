@@ -266,6 +266,8 @@ def register_user_commands(app: typer.Typer):
 
     @user_app.command("generate")
     def user_generate(
+        username: Annotated[Optional[str], typer.Option("--username", "-u", help="Custom username (random if not provided)")] = None,
+        password: Annotated[Optional[str], typer.Option("--password", "-p", help="Custom password (random if not provided)")] = None,
         use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")] = None,
         bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")] = None,
         security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
@@ -273,8 +275,27 @@ def register_user_commands(app: typer.Typer):
         rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
-        """Generate a random user with secure credentials."""
+        """Generate a user with optional custom username/password.
+        
+        If username or password not provided, secure random values are generated.
+        """
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
+
+        # Prompt for username if not specified
+        if username is None:
+            console.print("\n[bold]Username:[/bold]")
+            console.print("  [dim]Leave blank for a secure random username.[/dim]\n")
+            username_input = typer.prompt("  Username (enter for random)", default="", show_default=False)
+            if username_input.strip():
+                username = username_input.strip()
+
+        # Prompt for password if not specified
+        if password is None:
+            console.print("\n[bold]Password:[/bold]")
+            console.print("  [dim]Leave blank for a secure random password.[/dim]\n")
+            password_input = typer.prompt("  Password (enter for random)", default="", show_default=False, hide_input=False)
+            if password_input.strip():
+                password = password_input.strip()
 
         # Prompt for Tor preference if not specified
         if use_tor is None:
@@ -367,7 +388,11 @@ def register_user_commands(app: typer.Typer):
             master_key=master_key
         )
 
-        username, password = auth_manager.generate_credentials()
+        # Generate random values for any not provided
+        random_user, random_pass = auth_manager.generate_credentials()
+        final_username = username if username else random_user
+        final_password = password if password else random_pass
+        
         routing = "Tor" if use_tor else "Direct"
         if bridge != BridgeChoice.none:
             bridge_display = "meek-azure" if bridge == BridgeChoice.meek else bridge.value
@@ -375,7 +400,7 @@ def register_user_commands(app: typer.Typer):
 
         try:
             auth_manager.add_user(
-                username, password,
+                final_username, final_password,
                 use_tor=use_tor,
                 bridge_type=bridge.value,
                 security_level=security.value,
@@ -386,8 +411,8 @@ def register_user_commands(app: typer.Typer):
             # Build info string
             info_lines = [
                 f"[bold green]New user created:[/bold green]\n",
-                f"Username: [cyan]{username}[/cyan]",
-                f"Password: [cyan]{password}[/cyan]",
+                f"Username: [cyan]{final_username}[/cyan]",
+                f"Password: [cyan]{final_password}[/cyan]",
                 f"Routing: [cyan]{routing}[/cyan]",
                 f"Security: [cyan]{security.value}[/cyan]",
             ]
