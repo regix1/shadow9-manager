@@ -394,7 +394,10 @@ def register_util_commands(app: typer.Typer):
                 console.print("\n[cyan]Running setup script...[/cyan]\n")
                 setup_script = script_dir / "setup"
                 if setup_script.exists():
-                    subprocess.run([str(setup_script)], cwd=script_dir)
+                    # Use os.system to ensure proper terminal/stdin handling for interactive prompts
+                    import os
+                    os.chdir(script_dir)
+                    os.system(str(setup_script))
                 else:
                     console.print("[red]Error: setup script not found[/red]")
 
