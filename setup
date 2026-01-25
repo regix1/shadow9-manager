@@ -107,20 +107,23 @@ COMPLETION_SCRIPT="$SCRIPT_DIR/.shadow9-completion.bash"
 cat > "$COMPLETION_SCRIPT" << COMPLETION_EOF
 # Shadow9 tab completion
 _shadow9_completion() {
-    local IFS=\$'\n'
+    local IFS=\$'\\n'
+    local cur="\${COMP_WORDS[COMP_CWORD]}"
     local shadow9_cmd="$SCRIPT_DIR/venv/bin/shadow9"
 
     if [ -x "\$shadow9_cmd" ]; then
-        COMPREPLY=( \$( env COMP_WORDS="\${COMP_WORDS[*]}" \\
-                       COMP_CWORD=\$COMP_CWORD \\
-                       _SHADOW9_COMPLETE=bash_complete "\$shadow9_cmd" ) )
+        local response
+        response=\$( env COMP_WORDS="\${COMP_WORDS[*]}" \\
+                        COMP_CWORD=\$COMP_CWORD \\
+                        _SHADOW9_COMPLETE=bash_complete "\$shadow9_cmd" 2>/dev/null )
+        COMPREPLY=( \$response )
     fi
     return 0
 }
 
-# Register completion for both 'shadow9' and './shadow9'
-complete -o default -F _shadow9_completion shadow9
-complete -o default -F _shadow9_completion ./shadow9
+# Register completion - use -o nosort to preserve order, no -o default to avoid file fallback
+complete -o nosort -F _shadow9_completion shadow9
+complete -o nosort -F _shadow9_completion ./shadow9
 COMPLETION_EOF
 
 COMPLETION_CMD="source \"$SCRIPT_DIR/.shadow9-completion.bash\""
