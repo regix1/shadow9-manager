@@ -35,6 +35,7 @@ def register_service_commands(app: typer.Typer):
     def service_install(
         host: Annotated[str, typer.Option("--host", "-h", help="Host to bind to")] = "0.0.0.0",
         port: Annotated[int, typer.Option("--port", "-p", help="Port to listen on")] = 1080,
+        global_cmd: Annotated[bool, typer.Option("--global", "-g", help="Install 'shadow9' command globally in /usr/local/bin")] = True,
     ):
         """Install Shadow9 as a systemd service."""
         _check_linux()
@@ -106,11 +107,29 @@ WantedBy=multi-user.target
         # Reload systemd
         subprocess.run(["systemctl", "daemon-reload"], check=True)
 
+        # Install global command symlink
+        global_note = ""
+        if global_cmd:
+            shadow9_script = Path(install_path) / "shadow9"
+            symlink_path = Path("/usr/local/bin/shadow9")
+
+            # Remove existing symlink if it exists
+            if symlink_path.is_symlink():
+                symlink_path.unlink()
+            elif symlink_path.exists():
+                console.print(f"[yellow]Warning: {symlink_path} exists and is not a symlink, skipping[/yellow]")
+                global_cmd = False
+
+            if global_cmd:
+                symlink_path.symlink_to(shadow9_script)
+                console.print(f"[green]Installed global command: {symlink_path}[/green]")
+                global_note = f"\n\nGlobal command: [cyan]shadow9[/cyan] (available system-wide)"
+
         console.print(Panel(
             f"[bold green]Service installed![/bold green]\n\n"
             f"Service file: [cyan]{SERVICE_FILE}[/cyan]\n"
             f"Install path: [cyan]{install_path}[/cyan]\n"
-            f"Listen: [cyan]{host}:{port}[/cyan]\n\n"
+            f"Listen: [cyan]{host}:{port}[/cyan]{global_note}\n\n"
             f"[bold]Next steps:[/bold]\n"
             f"  shadow9 service start    - Start the service\n"
             f"  shadow9 service enable   - Enable auto-start on boot\n"
@@ -142,6 +161,12 @@ WantedBy=multi-user.target
         # Remove service file
         Path(SERVICE_FILE).unlink()
         subprocess.run(["systemctl", "daemon-reload"], check=True)
+
+        # Remove global symlink if it exists
+        symlink_path = Path("/usr/local/bin/shadow9")
+        if symlink_path.is_symlink():
+            symlink_path.unlink()
+            console.print("[green]Removed global command symlink[/green]")
 
         console.print("[green]Service uninstalled[/green]")
 

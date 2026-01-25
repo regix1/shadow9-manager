@@ -17,6 +17,18 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.resolve()
 os.chdir(SCRIPT_DIR)
 
+# Check for virtual environment and re-exec with venv Python if needed
+venv_dir = SCRIPT_DIR / "venv"
+if venv_dir.exists():
+    if sys.platform == "win32":
+        venv_python = venv_dir / "Scripts" / "python.exe"
+    else:
+        venv_python = venv_dir / "bin" / "python"
+
+    # Re-exec with venv Python if we're not already using it
+    if venv_python.exists() and Path(sys.executable).resolve() != venv_python.resolve():
+        os.execv(str(venv_python), [str(venv_python)] + sys.argv)
+
 # Add src to path for development
 sys.path.insert(0, str(SCRIPT_DIR / "src"))
 
@@ -29,20 +41,6 @@ if env_file.exists():
             if line and not line.startswith('#') and '=' in line:
                 key, _, value = line.partition('=')
                 os.environ[key.strip()] = value.strip()
-
-# Check for virtual environment (optional - allows running without venv if deps installed)
-venv_dir = SCRIPT_DIR / "venv"
-if venv_dir.exists():
-    # Add venv to path
-    if sys.platform == "win32":
-        venv_python = venv_dir / "Scripts" / "python.exe"
-        venv_site = venv_dir / "Lib" / "site-packages"
-    else:
-        venv_python = venv_dir / "bin" / "python"
-        venv_site = venv_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
-    
-    if venv_site.exists():
-        sys.path.insert(0, str(venv_site))
 
 
 # Check if we can use Unicode
