@@ -18,17 +18,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo -e "${CYAN}"
-echo "╔═══════════════════════════════════════════════════════════════╗"
-echo "║                   Shadow9 Manager Setup                       ║"
-echo "║         Secure SOCKS5 Proxy with Tor Support                  ║"
-echo "╚═══════════════════════════════════════════════════════════════╝"
+echo "============================================================"
+echo "                 Shadow9 Manager Setup                      "
+echo "         Secure SOCKS5 Proxy with Tor Support               "
+echo "============================================================"
 echo -e "${NC}"
 
 # Check Python version
-echo -e "${CYAN}[1/5]${NC} Checking Python version..."
+echo -e "${CYAN}[1/6]${NC} Checking Python version..."
 if ! command -v python3 &> /dev/null; then
     if ! command -v python &> /dev/null; then
-        echo -e "${RED}Error: Python 3.10+ is required but not found.${NC}"
+        echo -e "${RED}[ERROR] Python 3.10+ is required but not found.${NC}"
         echo "Please install Python from https://www.python.org/downloads/"
         exit 1
     fi
@@ -42,34 +42,34 @@ PYTHON_MAJOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.major)')
 PYTHON_MINOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.minor)')
 
 if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 10 ]); then
-    echo -e "${RED}Error: Python 3.10+ is required. Found: $PYTHON_VERSION${NC}"
+    echo -e "${RED}[ERROR] Python 3.10+ is required. Found: $PYTHON_VERSION${NC}"
     exit 1
 fi
-echo -e "${GREEN}✓ Python $PYTHON_VERSION found${NC}"
+echo -e "${GREEN}[OK] Python $PYTHON_VERSION found${NC}"
 
 # Create virtual environment
-echo -e "\n${CYAN}[2/5]${NC} Setting up virtual environment..."
+echo -e "\n${CYAN}[2/6]${NC} Setting up virtual environment..."
 if [ ! -d "venv" ]; then
     $PYTHON_CMD -m venv venv
-    echo -e "${GREEN}✓ Virtual environment created${NC}"
+    echo -e "${GREEN}[OK] Virtual environment created${NC}"
 else
-    echo -e "${YELLOW}  Virtual environment already exists${NC}"
+    echo -e "${YELLOW}[INFO] Virtual environment already exists${NC}"
 fi
 
 # Activate virtual environment
 source venv/bin/activate
 
 # Install dependencies
-echo -e "\n${CYAN}[3/5]${NC} Installing dependencies..."
+echo -e "\n${CYAN}[3/6]${NC} Installing dependencies..."
 pip install --upgrade pip -q
 pip install -e . -q
-echo -e "${GREEN}✓ Dependencies installed${NC}"
+echo -e "${GREEN}[OK] Dependencies installed${NC}"
 
 # Create config directory if needed
 mkdir -p config
 
 # Generate master key
-echo -e "\n${CYAN}[4/5]${NC} Generating encryption key..."
+echo -e "\n${CYAN}[4/6]${NC} Generating encryption key..."
 MASTER_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 
 # Save to .env file
@@ -80,11 +80,55 @@ SHADOW9_MASTER_KEY=$MASTER_KEY
 EOF
 chmod 600 .env
 
-echo -e "${GREEN}✓ Master key generated and saved to .env${NC}"
-echo -e "${YELLOW}  IMPORTANT: Keep this key safe! You'll need it to access your credentials.${NC}"
+echo -e "${GREEN}[OK] Master key generated and saved to .env${NC}"
+echo -e "${YELLOW}[INFO] IMPORTANT: Keep this key safe! You'll need it to access your credentials.${NC}"
+
+# Setup shell completion
+echo -e "\n${CYAN}[5/6]${NC} Setting up tab completion..."
+
+# Detect shell and configure completion
+COMPLETION_INSTALLED=false
+
+# Generate completion script
+COMPLETION_CMD='eval "$(_SHADOW9_COMPLETE=bash_source shadow9)"'
+
+# Try to add to bashrc
+if [ -f "$HOME/.bashrc" ]; then
+    if ! grep -q "_SHADOW9_COMPLETE" "$HOME/.bashrc" 2>/dev/null; then
+        echo "" >> "$HOME/.bashrc"
+        echo "# Shadow9 tab completion" >> "$HOME/.bashrc"
+        echo "$COMPLETION_CMD" >> "$HOME/.bashrc"
+        COMPLETION_INSTALLED=true
+        echo -e "${GREEN}[OK] Tab completion added to ~/.bashrc${NC}"
+    else
+        echo -e "${YELLOW}[INFO] Tab completion already configured in ~/.bashrc${NC}"
+        COMPLETION_INSTALLED=true
+    fi
+fi
+
+# Try to add to zshrc if zsh is present
+if [ -f "$HOME/.zshrc" ]; then
+    ZSH_COMPLETION_CMD='eval "$(_SHADOW9_COMPLETE=zsh_source shadow9)"'
+    if ! grep -q "_SHADOW9_COMPLETE" "$HOME/.zshrc" 2>/dev/null; then
+        echo "" >> "$HOME/.zshrc"
+        echo "# Shadow9 tab completion" >> "$HOME/.zshrc"
+        echo "$ZSH_COMPLETION_CMD" >> "$HOME/.zshrc"
+        COMPLETION_INSTALLED=true
+        echo -e "${GREEN}[OK] Tab completion added to ~/.zshrc${NC}"
+    else
+        echo -e "${YELLOW}[INFO] Tab completion already configured in ~/.zshrc${NC}"
+        COMPLETION_INSTALLED=true
+    fi
+fi
+
+if [ "$COMPLETION_INSTALLED" = false ]; then
+    echo -e "${YELLOW}[INFO] Could not auto-configure completion. Add manually:${NC}"
+    echo -e "  Bash: echo '$COMPLETION_CMD' >> ~/.bashrc"
+    echo -e "  Zsh:  echo 'eval \"\$(_SHADOW9_COMPLETE=zsh_source shadow9)\"' >> ~/.zshrc"
+fi
 
 # Create first user
-echo -e "\n${CYAN}[5/5]${NC} Creating your first user..."
+echo -e "\n${CYAN}[6/6]${NC} Creating your first user..."
 echo ""
 
 # Export the master key for the Python process
@@ -113,35 +157,38 @@ auth.add_user(username, password, use_tor=True)
 
 # Print credentials
 print(f'''
-╔═══════════════════════════════════════════════════════════════╗
-║                    Your Credentials                           ║
-╠═══════════════════════════════════════════════════════════════╣
-║  Username: {username:<42} ║
-║  Password: {password:<42} ║
-╠═══════════════════════════════════════════════════════════════╣
-║  ⚠️  SAVE THESE NOW! They will not be shown again.            ║
-╚═══════════════════════════════════════════════════════════════╝
+============================================================
+                    Your Credentials
+------------------------------------------------------------
+  Username: {username}
+  Password: {password}
+------------------------------------------------------------
+  [!] SAVE THESE NOW! They will not be shown again.
+============================================================
 ''')
 "
 
 echo -e "${GREEN}"
-echo "╔═══════════════════════════════════════════════════════════════╗"
-echo "║                    Setup Complete!                            ║"
-echo "╠═══════════════════════════════════════════════════════════════╣"
-echo "║  Next steps:                                                  ║"
-echo "║                                                               ║"
-echo "║  1. Source the environment:                                   ║"
-echo "║     source .env                                               ║"
-echo "║                                                               ║"
-echo "║  2. Start the server:                                         ║"
-echo "║     ./shadow9 serve                                           ║"
-echo "║                                                               ║"
-echo "║  3. Configure your app to use SOCKS5 proxy:                   ║"
-echo "║     Host: 127.0.0.1                                           ║"
-echo "║     Port: 1080                                                ║"
-echo "║     Auth: Use the credentials above                           ║"
-echo "║                                                               ║"
-echo "║  For more options:                                            ║"
-echo "║     ./shadow9 --help                                          ║"
-echo "╚═══════════════════════════════════════════════════════════════╝"
+echo "============================================================"
+echo "                    Setup Complete!                         "
+echo "------------------------------------------------------------"
+echo "  Next steps:                                               "
+echo "                                                            "
+echo "  1. Restart your shell or run:                             "
+echo "     source ~/.bashrc                                       "
+echo "                                                            "
+echo "  2. Start the server:                                      "
+echo "     ./shadow9 serve                                        "
+echo "                                                            "
+echo "  3. Configure your app to use SOCKS5 proxy:                "
+echo "     Host: 127.0.0.1                                        "
+echo "     Port: 1080                                             "
+echo "     Auth: Use the credentials above                        "
+echo "                                                            "
+echo "  Tab completion is now enabled. Try:                       "
+echo "     ./shadow9 [TAB][TAB]                                   "
+echo "                                                            "
+echo "  For more options:                                         "
+echo "     ./shadow9 --help                                       "
+echo "============================================================"
 echo -e "${NC}"

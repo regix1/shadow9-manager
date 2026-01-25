@@ -153,11 +153,11 @@ class SystemSetup:
         """Log a message."""
         if self.verbose:
             prefix = {
-                "info": "ℹ️ ",
-                "success": "✅ ",
-                "warning": "⚠️ ",
-                "error": "❌ ",
-                "step": "➡️ ",
+                "info": "[INFO] ",
+                "success": "[OK] ",
+                "warning": "[WARN] ",
+                "error": "[ERROR] ",
+                "step": "[>] ",
             }.get(level, "")
             print(f"{prefix}{message}")
 
@@ -347,40 +347,40 @@ class SystemSetup:
                 self._log("Some operations require sudo. You may be prompted for password.", "warning")
 
         # Step 1: Install dependencies
-        print("\n📦 Step 1: Installing Dependencies")
+        print("\nStep 1: Installing Dependencies")
         print("-" * 40)
         if not self.install_all_dependencies(include_optional):
             self._log("Some required dependencies failed to install", "error")
             return False
 
         # Step 2: Configure Tor
-        print("\n⚙️  Step 2: Configuring Tor")
+        print("\nStep 2: Configuring Tor")
         print("-" * 40)
         self.configure_tor()
 
         # Step 3: Start Tor
-        print("\n🚀 Step 3: Starting Tor Service")
+        print("\nStep 3: Starting Tor Service")
         print("-" * 40)
         self.start_tor_service()
 
         # Step 4: Verify
-        print("\n✔️  Step 4: Verification")
+        print("\nStep 4: Verification")
         print("-" * 40)
         status = self.check_all_dependencies()
 
         all_good = True
         for name, info in status.items():
-            status_icon = "✅" if info["installed"] else ("⚠️" if not info["required"] else "❌")
+            status_icon = "[OK]" if info["installed"] else ("[WARN]" if not info["required"] else "[ERROR]")
             print(f"  {status_icon} {name}: {'Installed' if info['installed'] else 'Not installed'}")
             if info["required"] and not info["installed"]:
                 all_good = False
 
         print("\n" + "=" * 60)
         if all_good:
-            print("✅ Setup completed successfully!")
+            print("[OK] Setup completed successfully!")
             print("\nYou can now run: shadow9 serve")
         else:
-            print("⚠️  Setup completed with warnings")
+            print("[WARN] Setup completed with warnings")
             print("Some optional components may need manual installation")
         print("=" * 60 + "\n")
 

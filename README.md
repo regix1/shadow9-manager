@@ -140,6 +140,25 @@ Use the management script for ongoing operations:
 
 # Check system status
 ./shadow9 status
+
+# Update to latest version from GitHub
+./shadow9 update
+```
+
+### Tab Completion
+
+Tab completion is automatically configured when you run `./setup`. After setup, restart your shell or run:
+
+```bash
+source ~/.bashrc   # For Bash
+source ~/.zshrc    # For Zsh
+```
+
+Then use Tab to auto-complete commands:
+```bash
+./shadow9 [TAB][TAB]           # Show all commands
+./shadow9 user [TAB][TAB]      # Show user subcommands
+./shadow9 serve --[TAB][TAB]   # Show serve options
 ```
 
 ### Server Options
@@ -188,7 +207,7 @@ The server is minimal - users control their own settings.
 | `none` | Direct Tor connection | Unrestricted networks |
 | `obfs4` | Obfuscated traffic, looks random | ISPs blocking Tor |
 | `snowflake` | Uses WebRTC, looks like video chat | Heavy censorship |
-| `meek` | Tunnels through CDNs | Extreme censorship |
+| `meek` | Tunnels through Microsoft Azure CDN | Extreme censorship |
 
 #### Creating Users
 

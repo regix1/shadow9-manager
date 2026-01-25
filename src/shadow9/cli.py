@@ -880,11 +880,10 @@ def status():
     # Check dependencies
     status = check_setup()
 
-    # Use ASCII fallbacks on Windows to avoid encoding issues
-    is_windows = platform.system() == "Windows"
-    check_mark = "[+]" if is_windows else "✓"
-    x_mark = "[X]" if is_windows else "✗"
-    circle = "[o]" if is_windows else "○"
+    # Use ASCII characters for compatibility
+    check_mark = "[OK]"
+    x_mark = "[X]"
+    circle = "[?]"
 
     table = Table(title="System Components")
     table.add_column("Component", style="cyan")
@@ -911,6 +910,76 @@ def status():
     else:
         console.print(f"  [red]{x_mark} Tor not running[/red]")
         console.print("  [dim]Run 'shadow9 setup' to install and start Tor[/dim]")
+
+
+
+
+
+@main.command()
+def update():
+    """
+    Update Shadow9 to the latest version from GitHub.
+
+    This will force pull the latest changes from the repository.
+    """
+    import subprocess
+    import os
+
+    console.print("[cyan]Updating Shadow9 Manager...[/cyan]\n")
+
+    # Get the script directory (project root)
+    script_dir = Path(__file__).parent.parent.parent
+
+    # Check if we're in a git repository
+    git_dir = script_dir / ".git"
+    if not git_dir.exists():
+        console.print("[red]Error: Not a git repository.[/red]")
+        console.print("[dim]Clone from: https://github.com/regix1/shadow9-manager[/dim]")
+        return
+
+    try:
+        # Fetch latest
+        console.print("[>] Fetching latest changes...")
+        result = subprocess.run(
+            ["git", "fetch", "--all"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[red]Error fetching: {result.stderr}[/red]")
+            return
+
+        # Force reset to origin/main
+        console.print("[>] Applying updates...")
+        result = subprocess.run(
+            ["git", "reset", "--hard", "origin/main"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[red]Error updating: {result.stderr}[/red]")
+            return
+
+        # Reinstall package
+        console.print("[>] Reinstalling package...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", ".", "-q"],
+            cwd=script_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            console.print(f"[yellow]Warning: pip install failed: {result.stderr}[/yellow]")
+
+        console.print("\n[green][OK] Shadow9 updated successfully![/green]")
+        console.print("[dim]Restart the server to apply changes.[/dim]")
+
+    except FileNotFoundError:
+        console.print("[red]Error: git not found. Please install git.[/red]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
 
 
 if __name__ == "__main__":
