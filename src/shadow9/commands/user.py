@@ -37,6 +37,53 @@ class BridgeChoice(str, Enum):
     snowflake = "snowflake"
 
 
+def _offer_service_restart(reason: str = "Changes will apply after restart.") -> None:
+    """Check if service is running and offer to restart it."""
+    import subprocess
+    import shutil
+    
+    # Check if systemctl is available (Linux with systemd)
+    if not shutil.which("systemctl"):
+        console.print(f"\n[yellow]{reason}[/yellow]")
+        console.print("[dim]Restart manually: shadow9 service restart[/dim]")
+        return
+    
+    # Check if shadow9 service is running
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "shadow9.service"],
+            capture_output=True
+        )
+        service_running = result.returncode == 0
+    except Exception:
+        service_running = False
+    
+    if not service_running:
+        console.print(f"\n[dim]{reason}[/dim]")
+        console.print("[dim]Start with: shadow9 service start[/dim]")
+        return
+    
+    # Service is running - offer to restart
+    console.print(f"\n[yellow]{reason}[/yellow]")
+    if typer.confirm("Restart service now?", default=True):
+        console.print("[cyan]Restarting service...[/cyan]")
+        try:
+            result = subprocess.run(
+                ["systemctl", "restart", "shadow9.service"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                console.print("[green][OK] Service restarted[/green]")
+            else:
+                console.print(f"[red]Failed to restart: {result.stderr}[/red]")
+                console.print("[dim]Try: sudo shadow9 service restart[/dim]")
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+    else:
+        console.print("[dim]Restart later: shadow9 service restart[/dim]")
+
+
 def register_user_commands(app: typer.Typer):
     """Register user subcommands with the app."""
     
@@ -231,8 +278,8 @@ def register_user_commands(app: typer.Typer):
                 console.print(f"[dim]User folder: {paths.get_user_dir(final_username)}[/dim]")
                 console.print("[dim]Keep this folder secure![/dim]")
 
-            # Service restart hint
-            console.print("\n[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+            # Auto-restart service if running
+            _offer_service_restart("New user will be available after restart.")
 
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
@@ -275,7 +322,7 @@ def register_user_commands(app: typer.Typer):
                 paths.delete_user_dir(user)
                 console.print(f"[dim]Removed: {user}[/dim]")
             console.print(f"[green]All {len(users)} users removed[/green]")
-            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+            _offer_service_restart("Changes will apply after restart.")
             return
 
         # Interactive mode if no username provided
@@ -310,7 +357,7 @@ def register_user_commands(app: typer.Typer):
                     paths.delete_user_dir(user)
                     console.print(f"[dim]Removed: {user}[/dim]")
                 console.print(f"[green]All {len(users)} users removed[/green]")
-                console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+                _offer_service_restart("Changes will apply after restart.")
                 return
             
             # Handle number selection
@@ -337,7 +384,7 @@ def register_user_commands(app: typer.Typer):
             if paths.delete_user_dir(username):
                 console.print(f"[dim]Deleted user folder: {paths.get_user_dir(username)}[/dim]")
             console.print(f"[green]User '{username}' removed[/green]")
-            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+            _offer_service_restart("Changes will apply after restart.")
         else:
             console.print(f"[red]User '{username}' not found[/red]")
 
@@ -537,7 +584,7 @@ def register_user_commands(app: typer.Typer):
             console.print(f"[green]User '{username}' updated:[/green]")
             for change in changes:
                 console.print(f"  - {change}")
-            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+            _offer_service_restart("Changes will apply after restart.")
         else:
             console.print("[yellow]No changes specified.[/yellow]")
             console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit, --bind-port[/dim]")
@@ -593,7 +640,7 @@ def register_user_commands(app: typer.Typer):
                     auth_manager.set_user_enabled(user, True)
                     console.print(f"[dim]Enabled: {user}[/dim]")
                 console.print(f"[green]All {len(disabled_users)} users enabled[/green]")
-                console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+                _offer_service_restart("Changes will apply after restart.")
                 return
 
             # Handle number selection
@@ -610,7 +657,7 @@ def register_user_commands(app: typer.Typer):
 
         if auth_manager.set_user_enabled(username, True):
             console.print(f"[green]User '{username}' enabled[/green]")
-            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+            _offer_service_restart("Changes will apply after restart.")
         else:
             console.print(f"[red]User '{username}' not found[/red]")
 
@@ -665,7 +712,7 @@ def register_user_commands(app: typer.Typer):
                     auth_manager.set_user_enabled(user, False)
                     console.print(f"[dim]Disabled: {user}[/dim]")
                 console.print(f"[yellow]All {len(enabled_users)} users disabled[/yellow]")
-                console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+                _offer_service_restart("Changes will apply after restart.")
                 return
 
             # Handle number selection
@@ -682,7 +729,7 @@ def register_user_commands(app: typer.Typer):
 
         if auth_manager.set_user_enabled(username, False):
             console.print(f"[yellow]User '{username}' disabled[/yellow]")
-            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+            _offer_service_restart("Changes will apply after restart.")
         else:
             console.print(f"[red]User '{username}' not found[/red]")
 
