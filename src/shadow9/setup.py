@@ -67,7 +67,7 @@ DEPENDENCIES = [
         name="obfs4proxy",
         check_command="obfs4proxy -version",
         binary_name="obfs4proxy",
-        description="Pluggable transport for obfs4 bridges",
+        description="Pluggable transport for obfs4 and meek bridges",
         required=False,
         install_commands={
             OS.LINUX_DEBIAN: ["sudo apt-get install -y obfs4proxy"],

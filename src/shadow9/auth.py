@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, asdict
@@ -88,6 +89,11 @@ class AuthManager:
         else:
             self._fernet = None
 
+        # Async save infrastructure
+        self._save_lock = threading.Lock()
+        self._pending_save = False
+        self._save_thread: Optional[threading.Thread] = None
+
         self._load_credentials()
 
     def _derive_fernet_key(self, master_key: str) -> Fernet:
@@ -140,26 +146,59 @@ class AuthManager:
             raise
 
     def _save_credentials(self) -> None:
-        """Save credentials to encrypted file."""
-        data = {
-            username: asdict(cred)
-            for username, cred in self._credentials.items()
-        }
-        json_data = json.dumps(data, indent=2)
+        """Save credentials to encrypted file (blocking)."""
+        with self._save_lock:
+            data = {
+                username: asdict(cred)
+                for username, cred in self._credentials.items()
+            }
+            json_data = json.dumps(data, indent=2)
 
-        self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
+            self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
 
-        if self._fernet:
-            encrypted_data = self._fernet.encrypt(json_data.encode())
-            self.credentials_file.write_bytes(encrypted_data)
-        else:
-            self.credentials_file.write_text(json_data)
+            if self._fernet:
+                encrypted_data = self._fernet.encrypt(json_data.encode())
+                self.credentials_file.write_bytes(encrypted_data)
+            else:
+                self.credentials_file.write_text(json_data)
 
-        # Restrict permissions on credentials file
-        if os.name != 'nt':  # Unix
-            os.chmod(self.credentials_file, 0o600)
+            # Restrict permissions on credentials file
+            if os.name != 'nt':  # Unix
+                os.chmod(self.credentials_file, 0o600)
 
-        logger.info("Saved credentials", count=len(self._credentials))
+            self._pending_save = False
+            logger.info("Saved credentials", count=len(self._credentials))
+
+    def _save_credentials_async(self) -> None:
+        """Schedule credentials save in background thread (non-blocking).
+        
+        This method returns immediately and saves credentials in a background
+        thread to avoid blocking connection handling.
+        """
+        self._pending_save = True
+        
+        # Don't start a new thread if one is already running
+        if self._save_thread is not None and self._save_thread.is_alive():
+            return
+        
+        def _do_save():
+            try:
+                self._save_credentials()
+            except Exception as e:
+                logger.error("Failed to save credentials in background", error=str(e))
+        
+        self._save_thread = threading.Thread(target=_do_save, daemon=True)
+        self._save_thread.start()
+
+    def flush_credentials(self) -> None:
+        """Ensure all pending credential saves are completed.
+        
+        Call this during graceful shutdown to ensure no data is lost.
+        """
+        if self._pending_save:
+            self._save_credentials()
+        elif self._save_thread is not None and self._save_thread.is_alive():
+            self._save_thread.join(timeout=5.0)
 
     def add_user(
         self,
@@ -266,11 +305,11 @@ class AuthManager:
             # Check if rehash is needed (parameters changed)
             if self._hasher.check_needs_rehash(cred.password_hash):
                 cred.password_hash = self._hasher.hash(password)
-                self._save_credentials()
+                self._save_credentials()  # Blocking save for security-critical update
 
-            # Update last used timestamp
+            # Update last used timestamp (non-blocking save)
             cred.last_used = datetime.utcnow().isoformat()
-            self._save_credentials()
+            self._save_credentials_async()
 
             logger.info("Authentication successful", username=username)
             return True

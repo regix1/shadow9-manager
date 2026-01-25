@@ -258,3 +258,13 @@ echo "                                                            "
 echo "  For more options: shadow9 --help                          "
 echo "============================================================"
 echo -e "${NC}"
+
+# Ask if user wants to run shadow9 setup
+echo ""
+read -p "Would you like to run shadow9 setup to install Tor and bridges? (y/n): " RUNSETUP
+if [[ "$RUNSETUP" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo -e "${CYAN}Running shadow9 setup...${NC}"
+    echo ""
+    "$SCRIPT_DIR/shadow9" setup
+fi

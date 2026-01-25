@@ -48,8 +48,13 @@ class Bridge:
         if self.type == BridgeType.NONE:
             return ""
 
+        # Get the transport name (meek uses meek_lite in Tor)
+        transport_name = self.type.value
+        if self.type == BridgeType.MEEK_AZURE:
+            transport_name = "meek_lite"
+
         # Format: Bridge <transport> <address> <fingerprint> <params>
-        parts = [self.type.value, self.address]
+        parts = [transport_name, self.address]
 
         if self.fingerprint:
             parts.append(self.fingerprint)
@@ -109,11 +114,24 @@ BUILTIN_OBFS4_BRIDGES = [
     ),
 ]
 
-# Built-in snowflake configuration
-SNOWFLAKE_BRIDGE = Bridge(
+# Built-in snowflake configurations (multiple options for reliability)
+# Primary: Azure CDN (most reliable as of 2025)
+SNOWFLAKE_BRIDGE_AZURE = Bridge(
     type=BridgeType.SNOWFLAKE,
     address="192.0.2.3:80",  # Dummy address, snowflake uses STUN/TURN
     fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
+    params={
+        "url": "https://snowflake-broker.azureedge.net/",
+        "front": "ajax.aspnetcdn.com",
+        "ice": "stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478,stun:stun.voip.blackberry.com:3478"
+    }
+)
+
+# Fallback: Fastly CDN with AMP cache
+SNOWFLAKE_BRIDGE_FASTLY = Bridge(
+    type=BridgeType.SNOWFLAKE,
+    address="192.0.2.4:80",
+    fingerprint="8838024498816A039FCBBAB14E6F40A0843051FA",
     params={
         "url": "https://snowflake-broker.torproject.net.global.prod.fastly.net/",
         "ampcache": "https://cdn.ampproject.org/",
@@ -121,6 +139,24 @@ SNOWFLAKE_BRIDGE = Bridge(
         "ice": "stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478"
     }
 )
+
+# Alternative: CDN77 (good for some regions)
+SNOWFLAKE_BRIDGE_CDN77 = Bridge(
+    type=BridgeType.SNOWFLAKE,
+    address="192.0.2.5:80",
+    fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
+    params={
+        "url": "https://1098762253.rsc.cdn77.org/",
+        "fronts": "www.phpmyadmin.net,docs.plesk.com",
+        "ice": "stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478"
+    }
+)
+
+# All snowflake bridges for fallback
+SNOWFLAKE_BRIDGES = [SNOWFLAKE_BRIDGE_AZURE, SNOWFLAKE_BRIDGE_FASTLY]
+
+# Backwards compatibility alias
+SNOWFLAKE_BRIDGE = SNOWFLAKE_BRIDGE_AZURE
 
 # Meek Azure bridge
 MEEK_AZURE_BRIDGE = Bridge(
@@ -174,6 +210,18 @@ class PluggableTransportManager:
         if self.config.snowflake_path and Path(self.config.snowflake_path).exists():
             transports[BridgeType.SNOWFLAKE] = self.config.snowflake_path
 
+        # Look for meek-client (often bundled with obfs4proxy or as separate binary)
+        meek_names = ["meek-client", "meek-client.exe"]
+        for name in meek_names:
+            path = shutil.which(name)
+            if path:
+                transports[BridgeType.MEEK_AZURE] = path
+                break
+
+        # obfs4proxy can also handle meek transport
+        if BridgeType.MEEK_AZURE not in transports and BridgeType.OBFS4 in transports:
+            transports[BridgeType.MEEK_AZURE] = transports[BridgeType.OBFS4]
+
         return transports
 
     def generate_torrc(self, data_dir: Path, socks_port: int = 9050) -> str:
@@ -198,7 +246,7 @@ class PluggableTransportManager:
             if self.config.bridge_type == BridgeType.OBFS4:
                 bridges = BUILTIN_OBFS4_BRIDGES
             elif self.config.bridge_type == BridgeType.SNOWFLAKE:
-                bridges = [SNOWFLAKE_BRIDGE]
+                bridges = SNOWFLAKE_BRIDGES  # Use multiple bridges for fallback
             elif self.config.bridge_type == BridgeType.MEEK_AZURE:
                 bridges = [MEEK_AZURE_BRIDGE]
             else:
@@ -220,6 +268,9 @@ class PluggableTransportManager:
 
         if BridgeType.SNOWFLAKE in transports and self.config.bridge_type == BridgeType.SNOWFLAKE:
             lines.append(f"ClientTransportPlugin snowflake exec {transports[BridgeType.SNOWFLAKE]}")
+
+        if BridgeType.MEEK_AZURE in transports and self.config.bridge_type == BridgeType.MEEK_AZURE:
+            lines.append(f"ClientTransportPlugin meek_lite exec {transports[BridgeType.MEEK_AZURE]}")
 
         return "\n".join(lines)
 

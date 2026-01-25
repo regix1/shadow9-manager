@@ -16,6 +16,7 @@ from ipaddress import ip_address, IPv4Address, IPv6Address
 import structlog
 
 from .auth import AuthManager
+from .security import SecurityLevel, get_security_preset, DPIBypass
 
 logger = structlog.get_logger(__name__)
 
@@ -214,6 +215,10 @@ class Socks5Server:
             logger.info("User listener stopped", username=username, port=port)
         self._user_listeners.clear()
 
+        # Flush any pending credential saves
+        if self.auth_manager:
+            self.auth_manager.flush_credentials()
+
         logger.info("SOCKS5 server stopped")
 
     async def serve_forever(self) -> None:
@@ -361,8 +366,20 @@ class Socks5Server:
             if self._on_connection:
                 await self._on_connection(conn_info)
 
+            # Setup DPI bypass if security level requires it
+            dpi_bypass = None
+            if conn_info.security_level in ("moderate", "paranoid"):
+                security_config = get_security_preset(SecurityLevel(conn_info.security_level))
+                if security_config.dpi_bypass.enabled:
+                    dpi_bypass = DPIBypass(security_config.dpi_bypass)
+                    logger.debug(
+                        "DPI bypass enabled",
+                        username=username,
+                        security=conn_info.security_level
+                    )
+
             # Relay data between client and target
-            await self._relay(reader, writer, target_reader, target_writer, conn_info)
+            await self._relay(reader, writer, target_reader, target_writer, conn_info, dpi_bypass)
 
         except asyncio.TimeoutError:
             logger.warning("Connection timeout", client=conn_id)
@@ -697,11 +714,13 @@ class Socks5Server:
         client_writer: asyncio.StreamWriter,
         target_reader: asyncio.StreamReader,
         target_writer: asyncio.StreamWriter,
-        conn_info: ConnectionInfo
+        conn_info: ConnectionInfo,
+        dpi_bypass: Optional[DPIBypass] = None
     ) -> None:
-        """Relay data between client and target."""
+        """Relay data between client and target with optional DPI bypass."""
 
         async def relay_to_target():
+            first_packet = True
             try:
                 while True:
                     data = await asyncio.wait_for(
@@ -710,9 +729,22 @@ class Socks5Server:
                     )
                     if not data:
                         break
-                    target_writer.write(data)
-                    await target_writer.drain()
-                    conn_info.bytes_sent += len(data)
+                    
+                    # Apply DPI bypass to first packet (TLS ClientHello)
+                    if first_packet and dpi_bypass and dpi_bypass.config.enabled:
+                        first_packet = False
+                        fragments = dpi_bypass.fragment_for_bypass(data)
+                        for i, fragment in enumerate(fragments):
+                            target_writer.write(fragment)
+                            await target_writer.drain()
+                            # Small delay between fragments to ensure separate packets
+                            if i < len(fragments) - 1:
+                                await asyncio.sleep(0.001)
+                        conn_info.bytes_sent += len(data)
+                    else:
+                        target_writer.write(data)
+                        await target_writer.drain()
+                        conn_info.bytes_sent += len(data)
             except (asyncio.TimeoutError, ConnectionError, OSError):
                 pass
             finally:

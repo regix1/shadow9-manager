@@ -87,5 +87,16 @@ echo.
 echo   For more options: shadow9.bat --help
 echo.
 echo ================================================================
+echo.
+
+REM Ask if user wants to run shadow9 setup
+set /p RUNSETUP="Would you like to run shadow9 setup to install Tor and bridges? (y/n): "
+if /i "%RUNSETUP%"=="y" (
+    echo.
+    echo Running shadow9 setup...
+    echo.
+    call venv\Scripts\activate.bat
+    shadow9.bat setup
+)
 
 pause
