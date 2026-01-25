@@ -149,10 +149,9 @@ def register_util_commands(app: typer.Typer):
         if success:
             console.print(Panel(
                 "[bold green]Setup Complete![/bold green]\n\n"
-                "You can now run:\n"
-                "  [cyan]shadow9 serve[/cyan]                    # Basic proxy\n"
-                "  [cyan]shadow9 serve --bridge obfs4[/cyan]     # With stealth bridges\n"
-                "  [cyan]shadow9 serve --security paranoid[/cyan] # With DPI bypass",
+                "Next steps:\n"
+                "  [cyan]shadow9 user generate[/cyan]    # Create a user\n"
+                "  [cyan]shadow9 serve[/cyan]            # Start the server",
                 title="Ready",
                 border_style="green"
             ))
