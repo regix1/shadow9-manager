@@ -168,7 +168,7 @@ def register_user_commands(app: typer.Typer):
         master_key = os.getenv(cfg.auth.master_key_env)
 
         auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
+            credentials_file=cfg.get_credentials_file(),
             master_key=master_key
         )
 
@@ -276,7 +276,7 @@ Settings:
         master_key = os.getenv(cfg.auth.master_key_env)
 
         auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
+            credentials_file=cfg.get_credentials_file(),
             master_key=master_key
         )
 
@@ -367,7 +367,7 @@ Settings:
         master_key = os.getenv(cfg.auth.master_key_env)
 
         auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
+            credentials_file=cfg.get_credentials_file(),
             master_key=master_key
         )
 
@@ -407,7 +407,7 @@ Settings:
         master_key = os.getenv(cfg.auth.master_key_env)
 
         auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
+            credentials_file=cfg.get_credentials_file(),
             master_key=master_key
         )
 
@@ -479,7 +479,7 @@ Settings:
         master_key = os.getenv(cfg.auth.master_key_env)
 
         auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
+            credentials_file=cfg.get_credentials_file(),
             master_key=master_key
         )
 
@@ -570,7 +570,7 @@ Settings:
         master_key = os.getenv(cfg.auth.master_key_env)
 
         auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
+            credentials_file=cfg.get_credentials_file(),
             master_key=master_key
         )
 
@@ -641,7 +641,7 @@ Settings:
         master_key = os.getenv(cfg.auth.master_key_env)
 
         auth_manager = AuthManager(
-            credentials_file=Path(cfg.auth.credentials_file),
+            credentials_file=cfg.get_credentials_file(),
             master_key=master_key
         )
 

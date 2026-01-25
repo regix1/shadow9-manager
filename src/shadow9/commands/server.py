@@ -63,14 +63,7 @@ def register_server_commands(app: typer.Typer):
         if port is None:
             port = cfg.server.port
 
-        try:
-            asyncio.run(_serve(config, host, port))
-        except Exception as e:
-            import traceback
-            console.print(f"[red]Server failed to start:[/red]")
-            console.print(f"[red]{type(e).__name__}: {e}[/red]")
-            console.print(f"[dim]{traceback.format_exc()}[/dim]")
-            raise typer.Exit(1)
+        asyncio.run(_serve(config, host, port))
 
     @app.command()
     def stop(
@@ -120,12 +113,9 @@ def register_server_commands(app: typer.Typer):
 
 async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     """Async implementation of serve command."""
-    console.print("[dim]DEBUG: Starting server initialization...[/dim]")
-    
     config_file = Path(config_path)
 
     # Load or create configuration
-    console.print(f"[dim]DEBUG: Loading config from {config_file}...[/dim]")
     if config_file.exists():
         cfg = Config.load(config_file)
     else:
@@ -137,25 +127,20 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
         cfg.server.host = host
     if port:
         cfg.server.port = port
-    console.print(f"[dim]DEBUG: Server will listen on {cfg.server.host}:{cfg.server.port}[/dim]")
 
     # Setup logging
     setup_logging(cfg.log)
 
     # Initialize authentication
-    console.print("[dim]DEBUG: Initializing authentication...[/dim]")
     master_key = None
     if cfg.auth.master_key_env:
         import os
         master_key = os.getenv(cfg.auth.master_key_env)
-        console.print(f"[dim]DEBUG: Master key from env: {'set' if master_key else 'NOT SET'}[/dim]")
 
-    console.print(f"[dim]DEBUG: Credentials file: {cfg.auth.credentials_file}[/dim]")
     auth_manager = AuthManager(
-        credentials_file=Path(cfg.auth.credentials_file),
+        credentials_file=cfg.get_credentials_file(),
         master_key=master_key
     )
-    console.print("[dim]DEBUG: AuthManager initialized[/dim]")
 
     # Check if any users exist
     if not auth_manager.list_users():
@@ -187,9 +172,6 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     default_proxy: Optional[tuple[str, int]] = None
 
     # Start Tor instances for each bridge type in use
-    console.print(f"[dim]DEBUG: Bridge type users: {bridge_type_users}[/dim]")
-    console.print(f"[dim]DEBUG: Direct users: {direct_users}[/dim]")
-    
     if bridge_type_users:
         console.print("[cyan]Starting Tor instances for configured bridge types...[/cyan]")
         
@@ -217,36 +199,29 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
                     console.print(f"    [dim]{TorConnector.get_tor_install_instructions()}[/dim]")
             else:
                 # Use bridge connector (starts separate Tor process)
-                console.print(f"[dim]DEBUG: Setting up bridge connector for {bridge_type}...[/dim]")
                 try:
                     bridge_enum = BridgeType(bridge_type)
-                    console.print(f"[dim]DEBUG: Bridge enum resolved: {bridge_enum}[/dim]")
                 except ValueError:
                     console.print(f"  [red]✗[/red] Unknown bridge type: {bridge_type}")
                     continue
                 
                 # Allocate unique port for each bridge type (starting from 9051)
                 bridge_socks_port = 9051 + len(bridge_connectors)
-                console.print(f"[dim]DEBUG: Bridge SOCKS port: {bridge_socks_port}[/dim]")
                 
                 bridge_config = BridgeConfig(
                     enabled=True,
                     bridge_type=bridge_enum,
                     use_builtin_bridges=True,
                 )
-                console.print(f"[dim]DEBUG: Creating TorBridgeConnector...[/dim]")
                 bridge_connector = TorBridgeConnector(bridge_config, socks_port=bridge_socks_port)
                 
                 try:
-                    console.print(f"[dim]DEBUG: Starting Tor with bridges...[/dim]")
                     socks_host, socks_port = await bridge_connector.start_tor_with_bridges()
                     upstream_proxies[bridge_type] = (socks_host, socks_port)
                     bridge_connectors.append(bridge_connector)
                     console.print(f"  [green]✓[/green] {bridge_type}: {socks_host}:{socks_port}")
                 except Exception as e:
-                    import traceback
                     console.print(f"  [red]✗[/red] Failed to start {bridge_type}: {e}")
-                    console.print(f"[dim]DEBUG: {traceback.format_exc()}[/dim]")
         
         if upstream_proxies:
             console.print(Panel(
