@@ -148,6 +148,49 @@ def register_util_commands(app: typer.Typer):
         success = run_setup(verbose=True, include_optional=not skip_optional)
 
         if success:
+            # Check if systemd service exists and offer to reinstall/install it
+            service_file = Path("/etc/systemd/system/shadow9.service")
+            if sys.platform == "linux":
+                if service_file.exists():
+                    console.print("\n[yellow]Existing systemd service detected.[/yellow]")
+                    console.print("[dim]Reinstalling ensures the service uses the current master key.[/dim]")
+                    if typer.confirm("Reinstall the systemd service?", default=True):
+                        import subprocess
+                        console.print("[cyan]Reinstalling service...[/cyan]")
+                        result = subprocess.run(
+                            ["shadow9", "service", "install", "--host", "0.0.0.0", "--port", "1080"],
+                            capture_output=True,
+                            text=True
+                        )
+                        if result.returncode == 0:
+                            console.print("[green]Service reinstalled successfully![/green]")
+                            # Start the service
+                            if typer.confirm("Start the service now?", default=True):
+                                subprocess.run(["shadow9", "service", "start"])
+                                subprocess.run(["shadow9", "service", "status"])
+                        else:
+                            console.print(f"[red]Service install failed: {result.stderr}[/red]")
+                else:
+                    # No service exists, offer to install it
+                    console.print("\n[dim]No systemd service installed yet.[/dim]")
+                    if typer.confirm("Install Shadow9 as a systemd service (for background operation)?", default=True):
+                        import subprocess
+                        console.print("[cyan]Installing service...[/cyan]")
+                        result = subprocess.run(
+                            ["shadow9", "service", "install", "--host", "0.0.0.0", "--port", "1080"],
+                            capture_output=True,
+                            text=True
+                        )
+                        if result.returncode == 0:
+                            console.print("[green]Service installed successfully![/green]")
+                            if typer.confirm("Enable service to start on boot?", default=True):
+                                subprocess.run(["shadow9", "service", "enable"])
+                            if typer.confirm("Start the service now?", default=True):
+                                subprocess.run(["shadow9", "service", "start"])
+                                subprocess.run(["shadow9", "service", "status"])
+                        else:
+                            console.print(f"[red]Service install failed: {result.stderr}[/red]")
+            
             console.print(Panel(
                 "[bold green]Setup Complete![/bold green]\n\n"
                 "Next steps:\n"
@@ -340,11 +383,12 @@ def register_util_commands(app: typer.Typer):
             # Ask if user wants to run setup script
             console.print("")
             if setup_changed:
-                prompt_text = "Would you like to run the setup script? [Y/n] [green](recommended - setup changed)[/green]: "
+                console.print("[green](recommended - setup script changed)[/green]")
+                run_setup_confirm = typer.confirm("Would you like to run the setup script?", default=True)
             else:
-                prompt_text = "Would you like to run the setup script? [y/N]: "
+                run_setup_confirm = typer.confirm("Would you like to run the setup script?", default=False)
             
-            run_setup = typer.prompt(prompt_text, default="y" if setup_changed else "n", show_default=False)
+            run_setup = "y" if run_setup_confirm else "n"
             
             if run_setup.lower() in ('y', 'yes'):
                 console.print("\n[cyan]Running setup script...[/cyan]\n")
