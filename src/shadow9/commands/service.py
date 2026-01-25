@@ -7,6 +7,7 @@ Manages Shadow9 as a systemd service on Linux.
 import os
 import sys
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Annotated
 
@@ -47,11 +48,15 @@ def register_service_commands(app: typer.Typer):
         else:
             install_path = Path(__file__).parent.parent.parent.parent.resolve()
 
+        # Find Python executable - prefer venv if it exists, otherwise use system Python
         venv_python = Path(install_path) / "venv" / "bin" / "python"
-        if not venv_python.exists():
-            console.print(f"[red]Virtual environment not found at {venv_python}[/red]")
-            console.print("[yellow]Run ./setup first to create the virtual environment[/yellow]")
-            raise typer.Exit(1)
+        if venv_python.exists():
+            python_exec = str(venv_python)
+            python_path = f"{install_path}/venv/bin:/usr/local/bin:/usr/bin:/bin"
+        else:
+            # Use system Python
+            python_exec = shutil.which("python3") or shutil.which("python") or sys.executable
+            python_path = "/usr/local/bin:/usr/bin:/bin"
 
         # Get master key from environment or generate
         master_key = os.getenv("SHADOW9_MASTER_KEY")
@@ -82,9 +87,10 @@ Wants=tor.service
 Type=simple
 User=root
 WorkingDirectory={install_path}
-Environment="PATH={install_path}/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH={python_path}"
+Environment="PYTHONPATH={install_path}/src"
 Environment="SHADOW9_MASTER_KEY={master_key}"
-ExecStart={venv_python} -m shadow9.cli serve --host {host} --port {port}
+ExecStart={python_exec} -m shadow9.cli serve --host {host} --port {port}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
