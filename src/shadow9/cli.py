@@ -32,9 +32,8 @@ from .bridges import (
     get_bridge_preset, print_bridge_info, PluggableTransportManager
 )
 from .wizards import (
-    run_user_wizard, run_user_modify_wizard, run_user_remove_wizard,
-    run_user_list_wizard, run_user_info_wizard, display_user_info,
-    run_user_enable_wizard, run_user_disable_wizard,
+    run_user_wizard, run_user_modify_wizard,
+    run_user_list_wizard, display_user_info,
     run_serve_wizard, show_serve_preview,
     run_init_wizard, show_config_summary, show_master_key
 )
@@ -95,50 +94,30 @@ def serve(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     host: Annotated[Optional[str], typer.Option("--host", "-h", help="Host to bind to")] = None,
     port: Annotated[Optional[int], typer.Option("--port", "-p", help="Port to listen on")] = None,
-    tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Enable/disable Tor routing")] = None,
-    tor_port: Annotated[Optional[int], typer.Option("--tor-port", help="Tor SOCKS port (default: 9050)")] = None,
-    security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
-    bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type for stealth")] = None,
-    interactive: Annotated[Optional[bool], typer.Option("--interactive/--no-interactive", "-i", help="Run interactive configuration wizard")] = None,
+    interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Run interactive configuration")] = False,
 ):
-    """Start the SOCKS5 proxy server."""
-    # Detect if we should run interactive mode
-    config_flags_provided = any([
-        tor is not None,
-        security is not None,
-        bridge is not None,
-    ])
+    """Start the SOCKS5 proxy server.
     
-    # Determine if interactive mode should run
-    run_interactive = False
-    if interactive is True:
-        run_interactive = True
-    elif interactive is False:
-        run_interactive = False
-    elif not config_flags_provided:
-        # No config flags provided, ask user
-        console.print("\n[dim]No configuration flags provided.[/dim]")
-        run_interactive = typer.confirm("Run interactive configuration wizard?", default=True)
+    User settings control Tor routing, bridges, and security levels.
+    """
+    # Run interactive mode if requested or no host/port provided
+    if interactive or (host is None and port is None):
+        if not interactive:
+            console.print("\n[dim]No host/port specified. Use -i for interactive or provide --host/--port.[/dim]")
+            if not typer.confirm("Run with defaults (127.0.0.1:1080)?", default=True):
+                interactive = True
+        
+        if interactive:
+            host, port = run_serve_wizard()
+            show_serve_preview(host, port)
+            if not typer.confirm("\nStart server?", default=True):
+                console.print("[yellow]Cancelled[/yellow]")
+                raise typer.Abort()
     
-    # Run interactive mode or use defaults
-    if run_interactive:
-        use_tor, security_val, bridge_val = run_serve_wizard()
-        show_serve_preview(use_tor, security_val, bridge_val)
-        if not typer.confirm("\nStart server with these settings?", default=True):
-            console.print("[yellow]Cancelled[/yellow]")
-            raise typer.Abort()
-    else:
-        # Use provided values or defaults
-        use_tor = tor if tor is not None else True
-        security_val = security.value if security is not None else "none"
-        bridge_val = bridge.value if bridge is not None else "none"
-    
-    asyncio.run(_serve(config, host, port, use_tor, tor_port, security_val, bridge_val))
+    asyncio.run(_serve(config, host, port))
 
 
-async def _serve(config_path: str, host: Optional[str], port: Optional[int],
-                 enable_tor: bool, tor_port: Optional[int], security: str = "none",
-                 bridge: str = "none"):
+async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     """Async implementation of serve command."""
     config_file = Path(config_path)
 
@@ -154,9 +133,6 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
         cfg.server.host = host
     if port:
         cfg.server.port = port
-    if tor_port:
-        cfg.tor.socks_port = tor_port
-    cfg.tor.enabled = enable_tor
 
     # Setup logging
     setup_logging(cfg.log)
@@ -190,55 +166,14 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
             console.print(f"[red]Failed to create default user: {e}[/red]")
             return
 
-    # Initialize Tor connector if enabled
+    # Initialize Tor connector if any users need Tor routing
     tor_connector = None
-    bridge_connector = None
-    bridge_type = BridgeType(bridge) if bridge != "none" else BridgeType.NONE
+    users_need_tor = any(
+        auth_manager.get_user_tor_preference(u) 
+        for u in auth_manager.list_users()
+    )
 
-    if cfg.tor.enabled:
-        # Check if using bridges for stealth Tor connection
-        if bridge_type != BridgeType.NONE:
-            console.print(f"[cyan]Initializing Tor with {bridge_type.value} bridges...[/cyan]")
-
-            bridge_config = get_bridge_preset(bridge_type)
-            console.print(Panel(
-                print_bridge_info(bridge_config),
-                title="Bridge Configuration",
-                border_style="cyan"
-            ))
-
-            # Check if pluggable transport is available
-            pt_manager = PluggableTransportManager(bridge_config)
-            transports = pt_manager.detect_transports()
-
-            if bridge_type not in transports:
-                console.print(f"[red]Pluggable transport '{bridge_type.value}' not found![/red]")
-                console.print(f"[dim]{pt_manager.get_install_instructions()}[/dim]")
-                console.print("\n[yellow]Falling back to direct Tor connection...[/yellow]")
-                bridge_type = BridgeType.NONE
-            else:
-                console.print(f"[green]Found {bridge_type.value}: {transports[bridge_type]}[/green]")
-                bridge_connector = TorBridgeConnector(bridge_config)
-
-                try:
-                    socks_host, socks_port = await bridge_connector.start_tor_with_bridges()
-                    cfg.tor.socks_host = socks_host
-                    cfg.tor.socks_port = socks_port
-                    console.print(Panel(
-                        f"[bold green]Tor with Bridges Started[/bold green]\n\n"
-                        f"Bridge Type: [cyan]{bridge_type.value}[/cyan]\n"
-                        f"SOCKS: [cyan]{socks_host}:{socks_port}[/cyan]\n\n"
-                        f"[dim]Your Tor connection is now hidden from network observers[/dim]",
-                        title="Stealth Tor",
-                        border_style="green"
-                    ))
-                except Exception as e:
-                    console.print(f"[red]Failed to start Tor with bridges: {e}[/red]")
-                    console.print("\n[yellow]Falling back to direct Tor connection...[/yellow]")
-                    bridge_connector = None
-                    bridge_type = BridgeType.NONE
-
-        # Connect to Tor (either with bridges already started, or direct)
+    if users_need_tor or cfg.tor.enabled:
         console.print("[cyan]Connecting to Tor network...[/cyan]")
         tor_config = TorConfig(
             socks_host=cfg.tor.socks_host,
@@ -250,23 +185,18 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
 
         if await tor_connector.connect():
             circuit_info = tor_connector.circuit_info
-            stealth_info = f"\nBridge: [cyan]{bridge_type.value}[/cyan]" if bridge_type != BridgeType.NONE else ""
             console.print(Panel(
                 f"[bold green]Connected to Tor Network[/bold green]\n\n"
                 f"Exit IP: [cyan]{circuit_info.exit_ip if circuit_info else 'Unknown'}[/cyan]\n"
-                f"Tor SOCKS: [cyan]{cfg.tor.socks_host}:{cfg.tor.socks_port}[/cyan]"
-                f"{stealth_info}",
+                f"Tor SOCKS: [cyan]{cfg.tor.socks_host}:{cfg.tor.socks_port}[/cyan]",
                 title="Tor Status",
                 border_style="green"
             ))
         else:
             console.print("[yellow]Warning: Could not connect to Tor network[/yellow]")
             console.print(f"[dim]{TorConnector.get_tor_install_instructions()}[/dim]")
-            console.print("\n[yellow]Starting without Tor support...[/yellow]")
+            console.print("\n[yellow]Users with Tor routing enabled will fall back to direct.[/yellow]")
             tor_connector = None
-            if bridge_connector:
-                await bridge_connector.stop()
-                bridge_connector = None
 
     # Create SOCKS5 server
     upstream_proxy = None
@@ -279,21 +209,6 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
         auth_manager=auth_manager,
         upstream_proxy=upstream_proxy,
     )
-
-    # Apply security settings
-    security_level = SecurityLevel(security)
-    security_config = get_security_preset(security_level)
-
-    # Wrap with secure server if security is enabled
-    secure_server = None
-    if security_level != SecurityLevel.NONE:
-        from .security import SecureServer, print_security_info
-        secure_server = SecureServer(server, security_config)
-        console.print(Panel(
-            print_security_info(security_config),
-            title="Security Configuration",
-            border_style="cyan"
-        ))
 
     # Connection monitoring callback
     async def on_connection(info: ConnectionInfo):
@@ -321,20 +236,15 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
 
     # Start server
     try:
-        # Use secure server if security is enabled
-        if secure_server:
-            await secure_server.start()
-        else:
-            await server.start()
+        await server.start()
 
-        security_info = f"Security: [cyan]{security_level.value.upper()}[/cyan]\n" if security_level != SecurityLevel.NONE else ""
-
+        tor_status = "Available" if upstream_proxy else "Not connected"
         console.print(Panel(
             f"[bold green]SOCKS5 Server Running[/bold green]\n\n"
             f"Listen: [cyan]{cfg.server.host}:{cfg.server.port}[/cyan]\n"
-            f"Tor Routing: [cyan]{'Enabled' if upstream_proxy else 'Disabled'}[/cyan]\n"
-            f"{security_info}"
+            f"Tor: [cyan]{tor_status}[/cyan]\n"
             f"Auth: [cyan]Username/Password Required[/cyan]\n\n"
+            f"[dim]Routing and security controlled by user settings.[/dim]\n"
             f"[dim]Press Ctrl+C to stop[/dim]",
             title="Shadow9 Manager",
             border_style="green"
@@ -344,14 +254,9 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int],
         await shutdown_event.wait()
 
     finally:
-        if secure_server:
-            await secure_server.stop()
-        else:
-            await server.stop()
+        await server.stop()
         if tor_connector:
             await tor_connector.disconnect()
-        if bridge_connector:
-            await bridge_connector.stop()
 
         console.print("[green]Server stopped[/green]")
 
