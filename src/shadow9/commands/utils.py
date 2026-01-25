@@ -271,25 +271,47 @@ def register_util_commands(app: typer.Typer):
             console.print("[dim]Clone from: https://github.com/regix1/shadow9-manager[/dim]")
             return
 
-        # Check if server is running (look for shadow9 serve process)
+        # Check if server is running - first check systemd service, then fallback to PID
         server_was_running = False
+        running_as_service = False
         server_pid = None
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "shadow9.*serve"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                server_was_running = True
-                server_pid = result.stdout.strip().split('\n')[0]
-                console.print(f"[>] Stopping running server (PID: {server_pid})...")
-                subprocess.run(["kill", server_pid], capture_output=True)
-                # Wait for process to stop
-                time.sleep(2)
-        except FileNotFoundError:
-            # pgrep not available (Windows), skip server detection
-            pass
+        
+        # Check if running as systemd service first
+        if shutil.which("systemctl"):
+            try:
+                result = subprocess.run(
+                    ["systemctl", "is-active", "shadow9"],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip() == "active":
+                    server_was_running = True
+                    running_as_service = True
+                    console.print("[>] Stopping shadow9 service...")
+                    subprocess.run(["sudo", "systemctl", "stop", "shadow9"], capture_output=True)
+                    # Wait for service to fully stop and release resources
+                    time.sleep(3)
+            except Exception:
+                pass
+        
+        # Fallback: check for standalone process if not running as service
+        if not running_as_service:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", "shadow9.*serve"],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    server_was_running = True
+                    server_pid = result.stdout.strip().split('\n')[0]
+                    console.print(f"[>] Stopping running server (PID: {server_pid})...")
+                    subprocess.run(["kill", server_pid], capture_output=True)
+                    # Wait for process to stop and release socket
+                    time.sleep(3)
+            except FileNotFoundError:
+                # pgrep not available (Windows), skip server detection
+                pass
 
         try:
             # Fetch latest
@@ -367,16 +389,29 @@ def register_util_commands(app: typer.Typer):
             # Restart server if it was running
             if server_was_running:
                 console.print("[>] Restarting server...")
-                # Start server in background
-                shadow9_script = script_dir / "shadow9"
-                subprocess.Popen(
-                    [str(shadow9_script), "serve"],
-                    cwd=script_dir,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
-                console.print("[green][OK] Server restarted![/green]")
+                if running_as_service:
+                    # Restart via systemctl
+                    result = subprocess.run(
+                        ["sudo", "systemctl", "start", "shadow9"],
+                        capture_output=True,
+                        text=True
+                    )
+                    if result.returncode == 0:
+                        console.print("[green][OK] Service restarted![/green]")
+                    else:
+                        console.print(f"[yellow]Warning: Failed to restart service: {result.stderr}[/yellow]")
+                        console.print("[dim]Try: sudo systemctl start shadow9[/dim]")
+                else:
+                    # Start server in background (standalone mode)
+                    shadow9_script = script_dir / "shadow9"
+                    subprocess.Popen(
+                        [str(shadow9_script), "serve"],
+                        cwd=script_dir,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True
+                    )
+                    console.print("[green][OK] Server restarted![/green]")
             else:
                 console.print("[dim]Server was not running. Start with: shadow9 serve[/dim]")
 
