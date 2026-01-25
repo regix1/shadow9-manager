@@ -32,7 +32,7 @@ dependencies = [
     "argon2-cffi>=23.1.0",
     "pyyaml>=6.0.1",
     "python-dotenv>=1.0.0",
-    "typer[all]>=0.9.0",
+    "typer>=0.9.0",
     "rich>=13.7.0",
     "structlog>=24.1.0",
 ]

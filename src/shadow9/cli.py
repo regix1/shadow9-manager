@@ -718,6 +718,15 @@ def user_disable(
         console.print(f"[red]User '{username}' not found[/red]")
 
 
+@user_app.command("new")
+def user_new(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+):
+    """Interactive wizard to create a new user."""
+    from .user_wizard import run_user_wizard
+    run_user_wizard(config)
+
+
 # ============== Utility Commands ==============
 
 @app.command()
