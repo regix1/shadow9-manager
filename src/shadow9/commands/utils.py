@@ -279,16 +279,26 @@ def register_util_commands(app: typer.Typer):
                 if script_path.exists():
                     script_path.chmod(0o755)
 
-            # Reinstall package
+            # Reinstall package using venv pip
             console.print("[>] Reinstalling package...")
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", ".", "-q"],
-                cwd=script_dir,
-                capture_output=True,
-                text=True
-            )
-            if result.returncode != 0:
-                console.print(f"[yellow]Warning: pip install failed: {result.stderr}[/yellow]")
+            venv_dir = script_dir / "venv"
+            if sys.platform == "win32":
+                venv_pip = venv_dir / "Scripts" / "pip.exe"
+            else:
+                venv_pip = venv_dir / "bin" / "pip"
+
+            if venv_pip.exists():
+                result = subprocess.run(
+                    [str(venv_pip), "install", "-e", ".", "-q"],
+                    cwd=script_dir,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    console.print(f"[yellow]Warning: pip install failed: {result.stderr}[/yellow]")
+            else:
+                console.print("[yellow]Warning: Virtual environment not found, skipping reinstall[/yellow]")
+                console.print("[dim]Run ./setup to create the virtual environment[/dim]")
 
             console.print("\n[green][OK] Shadow9 updated successfully![/green]")
 

@@ -144,21 +144,10 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
 
     # Check if any users exist
     if not auth_manager.list_users():
-        console.print("[yellow]No users configured. Creating default user...[/yellow]")
-        username, password = auth_manager.generate_credentials()
-        try:
-            auth_manager.add_user(username, password)
-            console.print(Panel(
-                f"[bold green]Default credentials created:[/bold green]\n\n"
-                f"Username: [cyan]{username}[/cyan]\n"
-                f"Password: [cyan]{password}[/cyan]\n\n"
-                f"[yellow]Save these credentials! They won't be shown again.[/yellow]",
-                title="New User Created",
-                border_style="green"
-            ))
-        except ValueError as e:
-            console.print(f"[red]Failed to create default user: {e}[/red]")
-            return
+        console.print("[red]No users configured.[/red]")
+        console.print("\nCreate a user first:")
+        console.print("  [cyan]shadow9 user generate[/cyan]")
+        return
 
     # Group users by bridge type (only those needing Tor)
     users = auth_manager.list_users()
