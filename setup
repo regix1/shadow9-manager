@@ -225,7 +225,7 @@ auth = AuthManager(
 # Check if users already exist
 existing_users = auth.list_users()
 if existing_users:
-    print(f'[INFO] Found {len(existing_users)} existing user(s): {', '.join(existing_users)}')
+    print(f\"[INFO] Found {len(existing_users)} existing user(s): {', '.join(existing_users)}\")
     print('[INFO] Skipping user creation. Use ./shadow9 user add <username> to add more.')
 else:
     # Generate secure credentials
