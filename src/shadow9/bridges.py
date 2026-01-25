@@ -431,7 +431,7 @@ class TorBridgeConnector:
             # Find tor binary
             tor_path = shutil.which("tor")
             if not tor_path:
-                logger.debug(f"Bridge test failed for {bridge_name}: tor binary not found")
+                print(f"      [ERROR] tor binary not found in PATH")
                 return None
             
             # Start Tor process
@@ -447,7 +447,6 @@ class TorBridgeConnector:
             while True:
                 elapsed = time_module.time() - start_time
                 if elapsed > timeout:
-                    logger.debug(f"Bridge test timeout for {bridge_name} after {elapsed:.1f}s")
                     return None  # Timeout
                 
                 poll_result = tor_process.poll()
@@ -456,10 +455,24 @@ class TorBridgeConnector:
                     stderr_output = ""
                     try:
                         _, stderr = tor_process.communicate(timeout=1)
-                        stderr_output = stderr.decode('utf-8', errors='ignore')[:200]
+                        stderr_output = stderr.decode('utf-8', errors='ignore').strip()
                     except Exception:
                         pass
-                    logger.debug(f"Bridge test failed for {bridge_name}: Tor process exited with code {poll_result}. stderr: {stderr_output}")
+                    
+                    # Also check tor log for errors
+                    log_errors = ""
+                    try:
+                        if log_file.exists():
+                            log_content = log_file.read_text()
+                            error_lines = [l for l in log_content.splitlines() if 'err' in l.lower() or 'warn' in l.lower()]
+                            if error_lines:
+                                log_errors = error_lines[-1][:150]  # Last error, truncated
+                    except Exception:
+                        pass
+                    
+                    error_detail = stderr_output[:150] if stderr_output else log_errors
+                    if error_detail:
+                        print(f"\n      [Tor exit {poll_result}] {error_detail}", end="", flush=True)
                     return None  # Process died
                 
                 # Check log file for bootstrap progress
@@ -477,13 +490,13 @@ class TorBridgeConnector:
                                         progress = int(match.group(1))
                                         if progress >= target_progress:
                                             return time_module.time() - start_time
-                except Exception as e:
-                    logger.debug(f"Error reading log file for {bridge_name}: {e}")
+                except Exception:
+                    pass
                 
                 await asyncio.sleep(0.5)
                 
         except Exception as e:
-            logger.debug(f"Bridge test exception for {bridge_name}: {type(e).__name__}: {e}")
+            print(f"\n      [Exception] {type(e).__name__}: {e}", end="", flush=True)
             return None
         finally:
             # Cleanup
