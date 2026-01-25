@@ -32,6 +32,11 @@ from .bridge_list import (
 
 logger = structlog.get_logger(__name__)
 
+# Module-level cache for bridge speedtest results
+# This cache persists for the lifetime of the process, so subsequent users
+# don't need to re-run speedtests. Cleared on service restart.
+_bridge_speedtest_cache: dict[str, list[tuple["Bridge", float | None]]] = {}
+
 
 @dataclass
 class BridgeConfig:
@@ -117,22 +122,35 @@ class PluggableTransportManager:
         ]
         
         # Performance and timeout tuning for bridges (especially snowflake)
-        # These settings help reduce connection timeouts on slow/constrained links
+        # These settings help with slow connections and large transfers
         lines.extend([
             # Disable adaptive timeout learning, use fixed values
             "LearnCircuitBuildTimeout 0",
             # Higher timeout for bridges (snowflake is slow) - default is 60
             "CircuitBuildTimeout 120",
-            # Stream timeout before trying new circuit
-            "CircuitStreamTimeout 60",
+            # Stream timeout before trying new circuit - higher for large downloads
+            "CircuitStreamTimeout 120",
+            # SOCKS timeout for client connections (default 120, increase for large pages)
+            "SocksTimeout 300",
+            # Keep circuits alive longer for large transfers (default 600)
+            "MaxCircuitDirtiness 1800",
+            # Don't close idle circuits quickly (default 3600)
+            "CircuitIdleTimeout 3600",
             # Keep connections alive
             "KeepalivePeriod 60",
-            # Retry failed connections more aggressively  
-            "NewCircuitPeriod 15",
+            # Don't retry too aggressively during transfers
+            "NewCircuitPeriod 30",
             # Don't give up on slow circuits too quickly
             "CloseHSClientCircuitsImmediatelyOnTimeout 0",
             # Connection padding helps with stability
             "ConnectionPadding 1",
+            # Reduce circuit preemption during active transfers
+            "MaxClientCircuitsPending 64",
+            # Hidden service (.onion) specific settings
+            # More time for 6-hop circuits to hidden services
+            "HiddenServiceClientRendezvousOnionVersion 3",
+            # Don't timeout hidden service connections too quickly
+            "CloseHSServiceRendCircuitsImmediatelyOnTimeout 0",
         ])
 
         # Add control port for bootstrap monitoring
@@ -270,24 +288,43 @@ class TorBridgeConnector:
             # No fallback list, use default behavior
             return await self._try_single_bridge(None)
         
-        # Phase 1: Speed test all bridges
-        print(f"\n  Testing {len(fallback_bridges)} bridges for speed...")
-        bridge_speeds = await self._test_bridge_speeds(fallback_bridges)
+        # Phase 1: Speed test all bridges (with caching)
+        cache_key = self.config.bridge_type.value
         
-        # Sort by speed (fastest first), failed bridges at the end
-        sorted_bridges = sorted(
-            bridge_speeds,
-            key=lambda x: x[1] if x[1] is not None else float('inf')
-        )
-        
-        # Show speed test results
-        print("\n  Speed test results:")
-        for bridge, speed in sorted_bridges:
-            bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
-            if speed is not None:
-                print(f"    {bridge_name}: {speed:.1f}s to 15%")
-            else:
-                print(f"    {bridge_name}: failed/timeout")
+        if cache_key in _bridge_speedtest_cache:
+            # Use cached speedtest results
+            sorted_bridges = _bridge_speedtest_cache[cache_key]
+            print(f"\n  Using cached speedtest results for {len(sorted_bridges)} bridges...")
+            print("\n  Cached speed test results:")
+            for bridge, speed in sorted_bridges:
+                bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+                if speed is not None:
+                    print(f"    {bridge_name}: {speed:.1f}s to 15%")
+                else:
+                    print(f"    {bridge_name}: failed/timeout")
+        else:
+            # Run speedtests and cache the results
+            print(f"\n  Testing {len(fallback_bridges)} bridges for speed...")
+            bridge_speeds = await self._test_bridge_speeds(fallback_bridges)
+            
+            # Sort by speed (fastest first), failed bridges at the end
+            sorted_bridges = sorted(
+                bridge_speeds,
+                key=lambda x: x[1] if x[1] is not None else float('inf')
+            )
+            
+            # Cache the sorted results
+            _bridge_speedtest_cache[cache_key] = sorted_bridges
+            logger.info(f"Cached speedtest results for bridge type: {cache_key}")
+            
+            # Show speed test results
+            print("\n  Speed test results:")
+            for bridge, speed in sorted_bridges:
+                bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+                if speed is not None:
+                    print(f"    {bridge_name}: {speed:.1f}s to 15%")
+                else:
+                    print(f"    {bridge_name}: failed/timeout")
         
         # Filter to only working bridges
         working_bridges = [(b, s) for b, s in sorted_bridges if s is not None]

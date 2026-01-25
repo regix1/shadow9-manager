@@ -389,19 +389,36 @@ class AuthManager:
         password = self._generate_secure_password()
         return username, password
 
-    def _generate_secure_password(self, length: int = 20) -> str:
+    def _generate_secure_password(self, length: int = 24) -> str:
         """
         Generate a password that meets security requirements.
 
+        Includes a random word for memorability plus random characters.
         Ensures: uppercase, lowercase, digit, and special character.
         """
         import string
+
+        # Word list for memorability
+        words = [
+            "tiger", "ocean", "maple", "river", "storm", "eagle", "frost",
+            "blaze", "coral", "drift", "ember", "grove", "haven", "lunar",
+            "nexus", "oasis", "prism", "quartz", "ridge", "solar", "thorn",
+            "umbra", "vivid", "whirl", "zenith", "amber", "brisk", "cedar",
+            "delta", "flint", "glade", "hydra", "ivory", "joker", "karma",
+            "lotus", "mirth", "noble", "onyx", "pulse", "quest", "raven",
+            "shade", "tempo", "ultra", "valor", "wrath", "xylon", "yield"
+        ]
 
         # Character sets
         uppercase = string.ascii_uppercase
         lowercase = string.ascii_lowercase
         digits = string.digits
         special = "!@#$%^&*()-_=+"
+
+        # Pick a random word and randomly capitalize first letter
+        word = secrets.choice(words)
+        if secrets.randbelow(2):
+            word = word.capitalize()
 
         # Ensure at least one of each required type
         password_chars = [
@@ -411,13 +428,20 @@ class AuthManager:
             secrets.choice(special),
         ]
 
+        # Calculate remaining length after word and required chars
+        remaining = length - len(word) - 4
+
         # Fill remaining with random mix
         all_chars = uppercase + lowercase + digits + special
-        for _ in range(length - 4):
+        for _ in range(remaining):
             password_chars.append(secrets.choice(all_chars))
 
-        # Shuffle to randomize positions
+        # Shuffle the non-word characters
         secrets.SystemRandom().shuffle(password_chars)
+
+        # Insert word at a random position
+        insert_pos = secrets.randbelow(len(password_chars) + 1)
+        password_chars.insert(insert_pos, word)
 
         return ''.join(password_chars)
 

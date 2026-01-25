@@ -179,6 +179,19 @@ SNOWFLAKE_BUNNY = Bridge(
     }
 )
 
+# Azure CDN (good fallback, may work when others are blocked)
+SNOWFLAKE_AZURE = Bridge(
+    type=BridgeType.SNOWFLAKE,
+    address="192.0.2.15:80",
+    fingerprint=_SNOWFLAKE_FP,
+    params={
+        "url": "https://snowflake-broker.azureedge.net/",
+        "front": "ajax.aspnetcdn.com",
+        "ice": STUN_SERVERS,
+        "utls-imitate": "hellorandomizedalpn"
+    }
+)
+
 
 # =============================================================================
 # Bridge Lists (speed tested and sorted at runtime)
@@ -186,7 +199,7 @@ SNOWFLAKE_BUNNY = Bridge(
 
 # All snowflake bridges - Fastly fronts first (most reliable)
 SNOWFLAKE_BRIDGES: List[Bridge] = [
-    # Fastly CDN fronts
+    # Fastly CDN fronts (fastest, most reliable)
     SNOWFLAKE_FASTLY_SHAZAM,
     SNOWFLAKE_FASTLY_FOURSQUARE,
     SNOWFLAKE_FASTLY_COSMO,
@@ -197,9 +210,10 @@ SNOWFLAKE_BRIDGES: List[Bridge] = [
     SNOWFLAKE_FASTLY_SENTRY,
     SNOWFLAKE_FASTLY_1STDIBS,
     SNOWFLAKE_FASTLY_FILESTACK,
-    # AMP cache
+    # AMP cache (Google fronting)
     SNOWFLAKE_AMP_GOOGLE,
-    # Backup options
+    # Alternative CDNs
+    SNOWFLAKE_AZURE,
     SNOWFLAKE_CDN77,
     SNOWFLAKE_BUNNY,
 ]

@@ -99,45 +99,41 @@ def register_util_commands(app: typer.Typer):
 
     @app.command()
     def setup(
-        skip_optional: Annotated[bool, typer.Option("--skip-optional", help="Skip optional dependencies (bridges)")] = False,
+        skip_optional: Annotated[bool, typer.Option("--skip-optional", help="Skip optional bridge transports")] = False,
         check_only: Annotated[bool, typer.Option("--check-only", help="Only check status, do not install")] = False,
     ):
         """
-        Automated setup - installs Tor, bridges, and configures the system.
+        Setup Tor and proxy components for Shadow9.
 
-        This will:
-        - Detect your operating system
-        - Install Tor daemon
-        - Install pluggable transports (obfs4proxy, snowflake)
-        - Configure and start Tor service
+        Installs:
+        - Tor daemon (required)
+        - obfs4proxy, snowflake (optional bridges)
         """
-        from ..setup import SystemSetup, run_setup, check_setup, get_manual_install_instructions
+        from ..setup import SystemSetup, run_setup, check_setup
 
         if check_only:
-            console.print("[cyan]Checking current setup status...[/cyan]\n")
+            console.print("[cyan]Checking proxy components...[/cyan]\n")
             status = check_setup()
 
-            table = Table(title="Dependency Status")
+            table = Table(title="Proxy Components")
             table.add_column("Component", style="cyan")
-            table.add_column("Status", style="green")
-            table.add_column("Required", style="yellow")
+            table.add_column("Status")
+            table.add_column("Required")
 
             for name, info in status.items():
-                status_text = "[green]Installed[/green]" if info["installed"] else "[red]Not Installed[/red]"
-                required_text = "Yes" if info["required"] else "No"
+                status_text = "[green]Installed[/green]" if info["installed"] else "[red]Missing[/red]"
+                required_text = "[yellow]Yes[/yellow]" if info["required"] else "No"
                 table.add_row(name, status_text, required_text)
 
             console.print(table)
             return
 
         console.print(Panel(
-            "[bold cyan]Shadow9 Automated Setup[/bold cyan]\n\n"
-            "This will install and configure:\n"
-            "- Tor daemon\n"
-            "- obfs4proxy (for obfs4 bridges)\n"
-            "- snowflake-client (for snowflake bridges)\n\n"
-            "[dim]Some operations require sudo privileges[/dim]",
-            title="Setup",
+            "[bold cyan]Shadow9 Proxy Setup[/bold cyan]\n\n"
+            "Installing Tor and bridge transports for\n"
+            "anonymous SOCKS5 proxy routing.\n\n"
+            "[dim]sudo may be required[/dim]",
+            title="Proxy Setup",
             border_style="cyan"
         ))
 
@@ -192,62 +188,56 @@ def register_util_commands(app: typer.Typer):
                             console.print(f"[red]Service install failed: {result.stderr}[/red]")
             
             console.print(Panel(
-                "[bold green]Setup Complete![/bold green]\n\n"
-                "Next steps:\n"
-                "  [cyan]shadow9 user generate[/cyan]    # Create a user\n"
-                "  [cyan]shadow9 serve[/cyan]            # Start the server",
+                "[bold green]Proxy Setup Complete![/bold green]\n\n"
+                "Start the proxy:\n"
+                "  [cyan]shadow9 user generate[/cyan]  # Create user credentials\n"
+                "  [cyan]shadow9 serve[/cyan]          # Start SOCKS5 proxy",
                 title="Ready",
                 border_style="green"
             ))
         else:
-            setup_obj = SystemSetup(verbose=False)
-            instructions = get_manual_install_instructions(setup_obj.os_type)
             console.print(Panel(
-                f"[yellow]Some components need manual installation:[/yellow]\n\n{instructions}",
-                title="Manual Steps Required",
+                "[yellow]Some components could not be installed.[/yellow]\n\n"
+                "Please install Tor and pluggable transports manually for your system.",
+                title="Setup Incomplete",
                 border_style="yellow"
             ))
 
     @app.command()
     def status():
-        """Show current system status and configuration."""
+        """Show proxy status and Tor connectivity."""
         from ..setup import check_setup
 
-        console.print("[cyan]Shadow9 Manager Status[/cyan]\n")
+        console.print("[cyan]Shadow9 Proxy Status[/cyan]\n")
 
         # Check dependencies
         dep_status = check_setup()
 
-        # Use ASCII characters for compatibility
-        check_mark = "[OK]"
-        x_mark = "[X]"
-        circle = "[?]"
-
-        table = Table(title="System Components")
+        table = Table(title="Proxy Components")
         table.add_column("Component", style="cyan")
         table.add_column("Status")
         table.add_column("Description", style="dim")
 
         for name, info in dep_status.items():
             if info["installed"]:
-                status_text = f"[green]{check_mark} Installed[/green]"
+                status_text = "[green][OK] Ready[/green]"
             elif info["required"]:
-                status_text = f"[red]{x_mark} Missing (Required)[/red]"
+                status_text = "[red][X] Missing[/red]"
             else:
-                status_text = f"[yellow]{circle} Not Installed[/yellow]"
+                status_text = "[yellow][?] Optional[/yellow]"
 
             table.add_row(name, status_text, info["description"])
 
         console.print(table)
 
         # Check Tor connectivity
-        console.print("\n[cyan]Tor Connectivity:[/cyan]")
+        console.print("\n[cyan]Tor Connection:[/cyan]")
         tor_config = TorConnector.detect_tor_service()
         if tor_config:
-            console.print(f"  [green]{check_mark} Tor detected on port {tor_config.socks_port}[/green]")
+            console.print(f"  [green][OK][/green] Tor on port {tor_config.socks_port}")
         else:
-            console.print(f"  [red]{x_mark} Tor not running[/red]")
-            console.print("  [dim]Run 'shadow9 setup' to install and start Tor[/dim]")
+            console.print("  [red][X][/red] Tor not running")
+            console.print("  [dim]Run 'shadow9 setup' to install Tor[/dim]")
 
     @app.command()
     def update():
@@ -440,6 +430,150 @@ def register_util_commands(app: typer.Typer):
             console.print("[red]Error: git not found. Please install git.[/red]")
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
+
+    # Key management subcommand group
+    key_app = typer.Typer(help="Manage encryption keys")
+    app.add_typer(key_app, name="key")
+
+    @key_app.command("generate")
+    def key_generate(
+        force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation prompts")] = False,
+    ):
+        """
+        Generate or regenerate the master encryption key.
+
+        This key encrypts the credentials file. If a key already exists,
+        you will be prompted before regenerating (which invalidates existing credentials).
+        """
+        import secrets
+        import subprocess
+        
+        # Find project root (where .env should be)
+        project_root = Path(__file__).parent.parent.parent.parent
+        env_file = project_root / ".env"
+        config_dir = project_root / "config"
+        credentials_file = config_dir / "credentials.enc"
+        salt_file = config_dir / ".salt"
+        
+        # Check if key already exists
+        key_exists = False
+        if env_file.exists():
+            try:
+                with open(env_file) as f:
+                    content = f.read()
+                    if "SHADOW9_MASTER_KEY" in content:
+                        key_exists = True
+            except Exception:
+                pass
+        
+        if key_exists:
+            console.print("[yellow]Existing master key found in .env[/yellow]")
+            console.print("[red]WARNING: Regenerating the key will make existing credentials unreadable![/red]")
+            
+            if not force:
+                if not typer.confirm("Generate a new master key?", default=False):
+                    console.print("[dim]Keeping existing key[/dim]")
+                    return
+            
+            # Stop service if running to prevent key mismatch errors
+            if shutil.which("systemctl"):
+                try:
+                    result = subprocess.run(
+                        ["systemctl", "is-active", "--quiet", "shadow9.service"],
+                        capture_output=True
+                    )
+                    if result.returncode == 0:
+                        console.print("[yellow]Stopping shadow9 service before key regeneration...[/yellow]")
+                        subprocess.run(["systemctl", "stop", "shadow9.service"], capture_output=True)
+                except Exception:
+                    pass
+            
+            # Backup old .env
+            backup_env = project_root / ".env.backup"
+            try:
+                shutil.copy2(env_file, backup_env)
+                console.print(f"[dim]Old .env backed up to {backup_env}[/dim]")
+            except Exception:
+                pass
+            
+            # Remove old credentials (encrypted with old key)
+            if credentials_file.exists():
+                backup_creds = config_dir / "credentials.enc.backup"
+                try:
+                    shutil.copy2(credentials_file, backup_creds)
+                    credentials_file.unlink()
+                    console.print("[dim]Old credentials removed (backup: config/credentials.enc.backup)[/dim]")
+                    console.print("[yellow]You will need to create new users after this[/yellow]")
+                except Exception as e:
+                    console.print(f"[red]Error removing credentials: {e}[/red]")
+            
+            # Remove old salt file
+            if salt_file.exists():
+                try:
+                    salt_file.unlink()
+                    console.print("[dim]Old salt file removed[/dim]")
+                except Exception:
+                    pass
+        
+        # Generate new key
+        master_key = secrets.token_urlsafe(32)
+        
+        # Ensure config directory exists
+        config_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save to .env file
+        env_content = f"""# Shadow9 Master Key - Keep this secret!
+# This key encrypts your credentials file
+SHADOW9_MASTER_KEY={master_key}
+"""
+        
+        try:
+            with open(env_file, "w") as f:
+                f.write(env_content)
+            
+            # Set restrictive permissions (Unix only)
+            try:
+                env_file.chmod(0o600)
+            except Exception:
+                pass
+            
+            console.print("[green]Master key generated and saved to .env[/green]")
+            
+            # Also set in current environment for immediate use
+            import os
+            os.environ["SHADOW9_MASTER_KEY"] = master_key
+            
+        except Exception as e:
+            console.print(f"[red]Error saving key: {e}[/red]")
+            raise typer.Exit(1)
+
+    @key_app.command("check")
+    def key_check():
+        """Check if a master key is configured."""
+        import os
+        
+        # Check environment variable first
+        if os.environ.get("SHADOW9_MASTER_KEY"):
+            console.print("[green]Master key is set in environment[/green]")
+            return
+        
+        # Check .env file
+        project_root = Path(__file__).parent.parent.parent.parent
+        env_file = project_root / ".env"
+        
+        if env_file.exists():
+            try:
+                with open(env_file) as f:
+                    content = f.read()
+                    if "SHADOW9_MASTER_KEY" in content:
+                        console.print(f"[green]Master key found in {env_file}[/green]")
+                        return
+            except Exception:
+                pass
+        
+        console.print("[red]No master key configured[/red]")
+        console.print("[dim]Run 'shadow9 key generate' to create one[/dim]")
+        raise typer.Exit(1)
 
 
 async def _check_tor(tor_port: int):

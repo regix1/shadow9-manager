@@ -88,7 +88,9 @@ class Socks5Server:
     AUTH_VERSION = 0x01
     MAX_BUFFER_SIZE = 65536
     CONNECTION_TIMEOUT = 30
-    RELAY_TIMEOUT = 300
+    BRIDGE_CONNECTION_TIMEOUT = 120  # Longer timeout for Snowflake/bridge connections
+    ONION_CONNECTION_TIMEOUT = 180   # Even longer for .onion (6-hop circuits)
+    RELAY_TIMEOUT = 600  # 10 minutes for large transfers
 
     def __init__(
         self,
@@ -348,13 +350,26 @@ class Socks5Server:
 
             # Connect to target (directly or via upstream proxy based on user preference)
             if upstream_proxy and use_tor:
+                # Determine timeout based on connection type
+                # .onion addresses need 6-hop circuits (3 to rendezvous + 3 from hidden service)
+                is_onion = target_host.endswith('.onion')
+                if is_onion:
+                    connect_timeout = self.ONION_CONNECTION_TIMEOUT
+                elif bridge_type in ("snowflake", "obfs4"):
+                    connect_timeout = self.BRIDGE_CONNECTION_TIMEOUT
+                else:
+                    connect_timeout = self.CONNECTION_TIMEOUT
+                
                 # Pass username for Tor circuit isolation (IsolateSOCKSAuth)
                 # Each unique username gets a separate Tor circuit/exit IP
-                target_reader, target_writer = await self._connect_via_proxy(
-                    target_host, target_port,
-                    proxy=upstream_proxy,
-                    socks_username=username,
-                    socks_password=username  # Password can match username for isolation
+                target_reader, target_writer = await asyncio.wait_for(
+                    self._connect_via_proxy(
+                        target_host, target_port,
+                        proxy=upstream_proxy,
+                        socks_username=username,
+                        socks_password=username  # Password can match username for isolation
+                    ),
+                    timeout=connect_timeout
                 )
                 logger.debug(
                     "Routing through Tor (isolated circuit)",

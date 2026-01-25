@@ -20,6 +20,13 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# ANSI colors (matching bash setup script)
+CYAN = '\033[0;36m'
+GREEN = '\033[0;32m'
+YELLOW = '\033[1;33m'
+RED = '\033[0;31m'
+NC = '\033[0m'  # No color
+
 
 class OS(Enum):
     """Supported operating systems."""
@@ -147,15 +154,16 @@ class SystemSetup:
         return OS.LINUX_OTHER
 
     def _log(self, message: str, level: str = "info"):
-        """Log a message."""
+        """Log a message with colors matching bash setup script."""
         if self.verbose:
-            prefix = {
-                "info": "[INFO] ",
-                "success": "[OK] ",
-                "warning": "[WARN] ",
-                "error": "[ERROR] ",
-                "step": "[>] ",
-            }.get(level, "")
+            prefixes = {
+                "info": f"{CYAN}[INFO]{NC} ",
+                "success": f"{GREEN}[OK]{NC} ",
+                "warning": f"{YELLOW}[WARN]{NC} ",
+                "error": f"{RED}[ERROR]{NC} ",
+                "step": f"{CYAN}[>]{NC} ",
+            }
+            prefix = prefixes.get(level, "")
             print(f"{prefix}{message}")
 
     def _run_command(self, command: str, check: bool = True) -> Tuple[bool, str]:
@@ -334,9 +342,9 @@ class SystemSetup:
         3. Start Tor service
         4. Verify everything works
         """
-        print("\n" + "=" * 60)
-        print("Shadow9 Manager - Automated Setup")
-        print("=" * 60 + "\n")
+        print(f"\n{CYAN}{'=' * 60}")
+        print("           Shadow9 Proxy Setup")
+        print(f"{'=' * 60}{NC}\n")
 
         # Check if running as root/sudo for Linux
         if self.os_type in [OS.LINUX_DEBIAN, OS.LINUX_FEDORA, OS.LINUX_ARCH, OS.LINUX_ALPINE]:
@@ -344,134 +352,43 @@ class SystemSetup:
                 self._log("Some operations require sudo. You may be prompted for password.", "warning")
 
         # Step 1: Install dependencies
-        print("\nStep 1: Installing Dependencies")
-        print("-" * 40)
+        print(f"\n{CYAN}[1/4]{NC} Installing Dependencies")
         if not self.install_all_dependencies(include_optional):
             self._log("Some required dependencies failed to install", "error")
             return False
 
         # Step 2: Configure Tor
-        print("\nStep 2: Configuring Tor")
-        print("-" * 40)
+        print(f"\n{CYAN}[2/4]{NC} Configuring Tor")
         self.configure_tor()
 
         # Step 3: Start Tor
-        print("\nStep 3: Starting Tor Service")
-        print("-" * 40)
+        print(f"\n{CYAN}[3/4]{NC} Starting Tor Service")
         self.start_tor_service()
 
         # Step 4: Verify
-        print("\nStep 4: Verification")
-        print("-" * 40)
+        print(f"\n{CYAN}[4/4]{NC} Verification")
         status = self.check_all_dependencies()
 
         all_good = True
         for name, info in status.items():
-            status_icon = "[OK]" if info["installed"] else ("[WARN]" if not info["required"] else "[ERROR]")
-            print(f"  {status_icon} {name}: {'Installed' if info['installed'] else 'Not installed'}")
-            if info["required"] and not info["installed"]:
+            if info["installed"]:
+                print(f"  {GREEN}[OK]{NC} {name}")
+            elif not info["required"]:
+                print(f"  {YELLOW}[WARN]{NC} {name} (optional)")
+            else:
+                print(f"  {RED}[ERROR]{NC} {name} (required)")
                 all_good = False
 
-        print("\n" + "=" * 60)
+        print(f"\n{CYAN}{'=' * 60}{NC}")
         if all_good:
-            print("[OK] Setup completed successfully!")
-            print("\nYou can now run: shadow9 serve")
+            print(f"{GREEN}[OK]{NC} Proxy setup complete!")
+            print(f"\n  shadow9 serve    # Start the proxy server")
         else:
-            print("[WARN] Setup completed with warnings")
-            print("Some optional components may need manual installation")
-        print("=" * 60 + "\n")
+            print(f"{YELLOW}[WARN]{NC} Setup completed with warnings")
+        print(f"{CYAN}{'=' * 60}{NC}\n")
 
         return all_good
 
-
-def get_manual_install_instructions(os_type: OS) -> str:
-    """Get manual installation instructions for an OS."""
-    instructions = {
-        OS.LINUX_DEBIAN: """
-Manual Installation (Debian/Ubuntu):
-=====================================
-# Update package list
-sudo apt-get update
-
-# Install Tor
-sudo apt-get install -y tor
-
-# Install pluggable transports
-sudo apt-get install -y obfs4proxy
-
-# For snowflake (if available)
-sudo apt-get install -y snowflake-client
-
-# Start Tor
-sudo systemctl enable tor
-sudo systemctl start tor
-""",
-        OS.LINUX_FEDORA: """
-Manual Installation (Fedora/RHEL):
-==================================
-# Install Tor
-sudo dnf install -y tor
-
-# Install obfs4
-sudo dnf install -y obfs4
-
-# Start Tor
-sudo systemctl enable tor
-sudo systemctl start tor
-""",
-        OS.LINUX_ARCH: """
-Manual Installation (Arch Linux):
-=================================
-# Install Tor
-sudo pacman -S tor
-
-# Install obfs4proxy
-sudo pacman -S obfs4proxy
-
-# For snowflake (from AUR)
-yay -S snowflake-pt-client
-
-# Start Tor
-sudo systemctl enable tor
-sudo systemctl start tor
-""",
-        OS.MACOS: """
-Manual Installation (macOS):
-============================
-# Install Homebrew if not present
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install Tor
-brew install tor
-
-# Install pluggable transports
-brew install obfs4proxy
-brew install snowflake
-
-# Start Tor
-brew services start tor
-""",
-        OS.WINDOWS: """
-Manual Installation (Windows):
-==============================
-1. Download Tor Browser from: https://www.torproject.org/download/
-
-2. The Tor Browser includes:
-   - tor.exe
-   - obfs4proxy.exe
-   Located in: Tor Browser\\Browser\\TorBrowser\\Tor\\
-
-3. Add the Tor directory to your PATH, or copy the executables to a directory in PATH
-
-4. Alternatively, download Tor Expert Bundle from:
-   https://www.torproject.org/download/tor/
-
-5. For standalone obfs4proxy:
-   https://github.com/Yawning/obfs4/releases
-""",
-    }
-
-    return instructions.get(os_type, "Please install Tor and obfs4proxy manually for your system.")
 
 
 def run_setup(verbose: bool = True, include_optional: bool = True) -> bool:
