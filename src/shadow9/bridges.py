@@ -376,12 +376,14 @@ class TorBridgeConnector:
         results = []
         test_timeout = 30  # 30 seconds max per bridge for speed test
         target_progress = 15  # Target bootstrap percentage for speed test
+        first_test = True
         
         for bridge in bridges:
             bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
             print(f"    Testing {bridge_name}...", end=" ", flush=True)
             
-            speed, error = await self._quick_bridge_test(bridge, test_timeout, target_progress)
+            speed, error = await self._quick_bridge_test(bridge, test_timeout, target_progress, show_config=first_test)
+            first_test = False
             
             if speed is not None:
                 print(f"{speed:.1f}s")
@@ -394,7 +396,7 @@ class TorBridgeConnector:
         
         return results
 
-    async def _quick_bridge_test(self, bridge: Bridge, timeout: int, target_progress: int) -> tuple[Optional[float], Optional[str]]:
+    async def _quick_bridge_test(self, bridge: Bridge, timeout: int, target_progress: int, show_config: bool = False) -> tuple[Optional[float], Optional[str]]:
         """
         Quick test a bridge - measure time to reach target bootstrap percentage.
         
@@ -423,82 +425,118 @@ class TorBridgeConnector:
                 specific_bridge=bridge
             )
             
-            # Add log file
+            # Add log file - use stdout for immediate feedback
             log_file = data_dir / "tor.log"
             torrc_content += f"\nLog notice file {log_file}"
+            torrc_content += f"\nLog notice stdout"
             
             torrc_path = data_dir / "torrc"
             torrc_path.write_text(torrc_content)
+            
+            # Show config for first test to help debug
+            if show_config:
+                print(f"\n    [DEBUG] First test torrc:\n")
+                for line in torrc_content.splitlines():
+                    print(f"      {line}")
+                print(f"\n    Testing {bridge_name}...", end=" ", flush=True)
             
             # Find tor binary
             tor_path = shutil.which("tor")
             if not tor_path:
                 return None, "tor binary not found"
             
-            # Start Tor process
+            # Start Tor process - capture both stdout and stderr
             tor_process = subprocess.Popen(
                 [tor_path, "-f", str(torrc_path)],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout
             )
             
             start_time = time_module.time()
-            log_position = 0
+            output_lines = []
             
             while True:
                 elapsed = time_module.time() - start_time
                 if elapsed > timeout:
                     return None, None  # Timeout (no error message needed)
                 
+                # Non-blocking read from stdout
+                if tor_process.stdout:
+                    import select
+                    try:
+                        # Try to read available output (works on Unix)
+                        while True:
+                            ready, _, _ = select.select([tor_process.stdout], [], [], 0)
+                            if not ready:
+                                break
+                            line = tor_process.stdout.readline()
+                            if line:
+                                output_lines.append(line.decode('utf-8', errors='ignore').strip())
+                            else:
+                                break
+                    except Exception:
+                        # On Windows or error, try different approach
+                        pass
+                
                 poll_result = tor_process.poll()
                 if poll_result is not None:
-                    # Process died - try to get stderr for diagnostics
-                    error_detail = ""
+                    # Process exited - get remaining output
                     try:
-                        _, stderr = tor_process.communicate(timeout=1)
-                        stderr_text = stderr.decode('utf-8', errors='ignore').strip()
-                        if stderr_text:
-                            # Get last meaningful line
-                            lines = [l for l in stderr_text.splitlines() if l.strip()]
-                            if lines:
-                                error_detail = lines[-1][:100]
+                        remaining, _ = tor_process.communicate(timeout=1)
+                        if remaining:
+                            output_lines.extend(remaining.decode('utf-8', errors='ignore').strip().splitlines())
                     except Exception:
                         pass
                     
-                    # Also check tor log for errors
+                    # Find error message in output
+                    error_detail = ""
+                    for line in reversed(output_lines):
+                        line_lower = line.lower()
+                        if 'error' in line_lower or 'failed' in line_lower or '[err]' in line_lower or '[warn]' in line_lower:
+                            # Clean up the line
+                            if ']' in line:
+                                error_detail = line.split(']')[-1].strip()[:100]
+                            else:
+                                error_detail = line[:100]
+                            break
+                    
+                    # If no error found but process failed, show last line
+                    if not error_detail and output_lines:
+                        error_detail = output_lines[-1][:100]
+                    
+                    # If still nothing, check log file
                     if not error_detail:
                         try:
                             if log_file.exists():
                                 log_content = log_file.read_text()
-                                error_lines = [l for l in log_content.splitlines() 
-                                             if 'err' in l.lower() or '[warn]' in l.lower()]
-                                if error_lines:
-                                    # Extract just the message part
-                                    last_err = error_lines[-1]
-                                    if ']' in last_err:
-                                        error_detail = last_err.split(']', 1)[-1].strip()[:100]
-                                    else:
-                                        error_detail = last_err[:100]
+                                if log_content.strip():
+                                    last_line = log_content.strip().splitlines()[-1]
+                                    error_detail = last_line[:100]
                         except Exception:
                             pass
                     
                     return None, f"Tor exit {poll_result}: {error_detail}" if error_detail else f"Tor exit {poll_result}"
                 
-                # Check log file for bootstrap progress
+                # Check for bootstrap progress in collected output
+                for line in output_lines:
+                    if 'Bootstrapped' in line:
+                        match = re.search(r'Bootstrapped (\d+)%', line)
+                        if match:
+                            progress = int(match.group(1))
+                            if progress >= target_progress:
+                                return time_module.time() - start_time, None
+                
+                # Also check log file for bootstrap progress
                 try:
                     if log_file.exists():
-                        with open(log_file, 'r') as f:
-                            f.seek(log_position)
-                            new_content = f.read()
-                            log_position = f.tell()
-                            
-                            for line in new_content.splitlines():
-                                if 'Bootstrapped' in line:
-                                    match = re.search(r'Bootstrapped (\d+)%', line)
-                                    if match:
-                                        progress = int(match.group(1))
-                                        if progress >= target_progress:
-                                            return time_module.time() - start_time, None
+                        log_content = log_file.read_text()
+                        for line in log_content.splitlines():
+                            if 'Bootstrapped' in line:
+                                match = re.search(r'Bootstrapped (\d+)%', line)
+                                if match:
+                                    progress = int(match.group(1))
+                                    if progress >= target_progress:
+                                        return time_module.time() - start_time, None
                 except Exception:
                     pass
                 
