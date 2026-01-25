@@ -1,0 +1,37 @@
+server:
+  host: 127.0.0.1
+  port: 1080
+  max_connections: 100
+  connection_timeout: 30
+  relay_timeout: 300
+  buffer_size: 65536
+tor:
+  enabled: true
+  socks_host: 127.0.0.1
+  socks_port: 9050
+  control_port: 9051
+  control_password: null
+  auto_detect: true
+auth:
+  require_auth: true
+  credentials_file: config/credentials.enc
+  master_key_env: SHADOW9_MASTER_KEY
+  session_timeout_hours: 24
+  max_failed_attempts: 5
+  lockout_duration_minutes: 15
+log:
+  level: INFO
+  format: json
+  file: null
+  max_size_mb: 10
+  backup_count: 3
+security:
+  allowed_ports:
+  - 80
+  - 443
+  - 8080
+  - 8443
+  blocked_hosts: []
+  allow_localhost: false
+  rate_limit_per_minute: 100
+  max_request_size: 1048576

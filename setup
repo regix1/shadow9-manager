@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+#
+# Shadow9 Manager - Initial Setup Script
+# This script sets up the environment and creates the first user
+#
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+echo -e "${CYAN}"
+echo "╔═══════════════════════════════════════════════════════════════╗"
+echo "║                   Shadow9 Manager Setup                       ║"
+echo "║         Secure SOCKS5 Proxy with Tor Support                  ║"
+echo "╚═══════════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+
+# Check Python version
+echo -e "${CYAN}[1/5]${NC} Checking Python version..."
+if ! command -v python3 &> /dev/null; then
+    if ! command -v python &> /dev/null; then
+        echo -e "${RED}Error: Python 3.10+ is required but not found.${NC}"
+        echo "Please install Python from https://www.python.org/downloads/"
+        exit 1
+    fi
+    PYTHON_CMD="python"
+else
+    PYTHON_CMD="python3"
+fi
+
+PYTHON_VERSION=$($PYTHON_CMD -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PYTHON_MAJOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.major)')
+PYTHON_MINOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.minor)')
+
+if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 10 ]); then
+    echo -e "${RED}Error: Python 3.10+ is required. Found: $PYTHON_VERSION${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Python $PYTHON_VERSION found${NC}"
+
+# Create virtual environment
+echo -e "\n${CYAN}[2/5]${NC} Setting up virtual environment..."
+if [ ! -d "venv" ]; then
+    $PYTHON_CMD -m venv venv
+    echo -e "${GREEN}✓ Virtual environment created${NC}"
+else
+    echo -e "${YELLOW}  Virtual environment already exists${NC}"
+fi
+
+# Activate virtual environment
+source venv/bin/activate
+
+# Install dependencies
+echo -e "\n${CYAN}[3/5]${NC} Installing dependencies..."
+pip install --upgrade pip -q
+pip install -e . -q
+echo -e "${GREEN}✓ Dependencies installed${NC}"
+
+# Create config directory if needed
+mkdir -p config
+
+# Generate master key
+echo -e "\n${CYAN}[4/5]${NC} Generating encryption key..."
+MASTER_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# Save to .env file
+cat > .env << EOF
+# Shadow9 Master Key - Keep this secret!
+# This key encrypts your credentials file
+SHADOW9_MASTER_KEY=$MASTER_KEY
+EOF
+chmod 600 .env
+
+echo -e "${GREEN}✓ Master key generated and saved to .env${NC}"
+echo -e "${YELLOW}  IMPORTANT: Keep this key safe! You'll need it to access your credentials.${NC}"
+
+# Create first user
+echo -e "\n${CYAN}[5/5]${NC} Creating your first user..."
+echo ""
+
+# Export the master key for the Python process
+export SHADOW9_MASTER_KEY="$MASTER_KEY"
+
+# Run user creation
+python -c "
+import os
+import sys
+sys.path.insert(0, 'src')
+
+from pathlib import Path
+from shadow9.auth import AuthManager
+
+# Initialize auth manager with master key
+auth = AuthManager(
+    credentials_file=Path('config/credentials.enc'),
+    master_key=os.environ.get('SHADOW9_MASTER_KEY')
+)
+
+# Generate secure credentials
+username, password = auth.generate_credentials()
+
+# Add the user
+auth.add_user(username, password, use_tor=True)
+
+# Print credentials
+print(f'''
+╔═══════════════════════════════════════════════════════════════╗
+║                    Your Credentials                           ║
+╠═══════════════════════════════════════════════════════════════╣
+║  Username: {username:<42} ║
+║  Password: {password:<42} ║
+╠═══════════════════════════════════════════════════════════════╣
+║  ⚠️  SAVE THESE NOW! They will not be shown again.            ║
+╚═══════════════════════════════════════════════════════════════╝
+''')
+"
+
+echo -e "${GREEN}"
+echo "╔═══════════════════════════════════════════════════════════════╗"
+echo "║                    Setup Complete!                            ║"
+echo "╠═══════════════════════════════════════════════════════════════╣"
+echo "║  Next steps:                                                  ║"
+echo "║                                                               ║"
+echo "║  1. Source the environment:                                   ║"
+echo "║     source .env                                               ║"
+echo "║                                                               ║"
+echo "║  2. Start the server:                                         ║"
+echo "║     ./shadow9 serve                                           ║"
+echo "║                                                               ║"
+echo "║  3. Configure your app to use SOCKS5 proxy:                   ║"
+echo "║     Host: 127.0.0.1                                           ║"
+echo "║     Port: 1080                                                ║"
+echo "║     Auth: Use the credentials above                           ║"
+echo "║                                                               ║"
+echo "║  For more options:                                            ║"
+echo "║     ./shadow9 --help                                          ║"
+echo "╚═══════════════════════════════════════════════════════════════╝"
+echo -e "${NC}"

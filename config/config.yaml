@@ -1,0 +1,44 @@
+# Shadow9 Manager Configuration
+# =============================
+
+server:
+  host: "127.0.0.1"          # Host to bind to (use 0.0.0.0 for all interfaces)
+  port: 1080                  # SOCKS5 port
+  max_connections: 100        # Maximum concurrent connections
+  connection_timeout: 30      # Connection timeout in seconds
+  relay_timeout: 300          # Data relay timeout in seconds
+  buffer_size: 65536          # Buffer size for data relay
+
+tor:
+  enabled: true               # Enable Tor network routing
+  socks_host: "127.0.0.1"     # Tor SOCKS host
+  socks_port: 9050            # Tor SOCKS port (9050 for tor daemon, 9150 for Tor Browser)
+  control_port: 9051          # Tor control port (for new circuit requests)
+  control_password: null      # Tor control password (if set)
+  auto_detect: true           # Auto-detect Tor service
+
+auth:
+  require_auth: true          # Require SOCKS5 authentication
+  credentials_file: "config/credentials.enc"  # Encrypted credentials file
+  master_key_env: "SHADOW9_MASTER_KEY"        # Environment variable for master key
+  session_timeout_hours: 24   # Session timeout
+  max_failed_attempts: 5      # Max failed auth attempts before lockout
+  lockout_duration_minutes: 15  # Lockout duration
+
+log:
+  level: "INFO"               # Log level: DEBUG, INFO, WARNING, ERROR
+  format: "console"           # Log format: json or console
+  file: null                  # Log file path (null for stdout only)
+  max_size_mb: 10             # Max log file size in MB
+  backup_count: 3             # Number of backup log files
+
+security:
+  allowed_ports:              # Allowed destination ports (empty = all)
+    - 80
+    - 443
+    - 8080
+    - 8443
+  blocked_hosts: []           # Blocked destination hosts
+  allow_localhost: false      # Allow connections to localhost
+  rate_limit_per_minute: 100  # Max requests per minute per user
+  max_request_size: 1048576   # Max request size in bytes
