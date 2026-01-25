@@ -109,48 +109,114 @@ BUILTIN_OBFS4_BRIDGES = [
 ]
 
 # Built-in snowflake configurations (multiple options for reliability)
-# Primary: Azure CDN (most reliable as of 2025)
-SNOWFLAKE_BRIDGE_AZURE = Bridge(
+# Updated January 2025 - fixes bootstrap issues from March 2024
+# See: https://forum.torproject.org/t/fix-problems-with-snowflake-since-2024-03-01-broker-failure-unexpected-error-no-answer/11755
+# See: https://github.com/net4people/bbs/issues/338
+
+# Common STUN servers (from official Tor Browser build)
+_STUN_SERVERS = ",".join([
+    "stun:stun.l.google.com:19302",
+    "stun:stun.antisip.com:3478",
+    "stun:stun.bluesip.net:3478",
+    "stun:stun.dus.net:3478",
+    "stun:stun.epygi.com:3478",
+    "stun:stun.sonetel.com:3478",
+    "stun:stun.uls.co.za:3478",
+    "stun:stun.voipgate.com:3478",
+    "stun:stun.voys.nl:3478"
+])
+
+# Primary: CDN77 (official Tor Project choice as of 2025)
+SNOWFLAKE_BRIDGE_CDN77 = Bridge(
     type=BridgeType.SNOWFLAKE,
     address="192.0.2.3:80",  # Dummy address, snowflake uses STUN/TURN
     fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
     params={
-        "url": "https://snowflake-broker.azureedge.net/",
-        "front": "ajax.aspnetcdn.com",
-        "ice": "stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478,stun:stun.voip.blackberry.com:3478"
+        "url": "https://1098762253.rsc.cdn77.org/",
+        "front": "www.phpmyadmin.net",
+        "ice": _STUN_SERVERS,
+        "utls-imitate": "hellorandomizedalpn"
     }
 )
 
-# Fallback: Fastly CDN with AMP cache
-SNOWFLAKE_BRIDGE_FASTLY = Bridge(
+# CDN77 with alternative front domain
+SNOWFLAKE_BRIDGE_CDN77_ALT = Bridge(
     type=BridgeType.SNOWFLAKE,
     address="192.0.2.4:80",
     fingerprint="8838024498816A039FCBBAB14E6F40A0843051FA",
     params={
-        "url": "https://snowflake-broker.torproject.net.global.prod.fastly.net/",
-        "ampcache": "https://cdn.ampproject.org/",
-        "front": "www.google.com",
-        "ice": "stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478"
+        "url": "https://1098762253.rsc.cdn77.org/",
+        "front": "docs.plesk.com",
+        "ice": _STUN_SERVERS,
+        "utls-imitate": "hellorandomizedalpn"
     }
 )
 
-# Alternative: CDN77 (good for some regions)
-SNOWFLAKE_BRIDGE_CDN77 = Bridge(
+# AMP Cache with Google fronting (good alternative)
+SNOWFLAKE_BRIDGE_AMP = Bridge(
     type=BridgeType.SNOWFLAKE,
     address="192.0.2.5:80",
     fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
     params={
-        "url": "https://1098762253.rsc.cdn77.org/",
-        "fronts": "www.phpmyadmin.net,docs.plesk.com",
-        "ice": "stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478"
+        "url": "https://snowflake-broker.torproject.net/",
+        "ampcache": "https://cdn.ampproject.org/",
+        "front": "www.google.com",
+        "ice": _STUN_SERVERS,
+        "utls-imitate": "hellorandomizedalpn"
     }
 )
 
-# All snowflake bridges for fallback
-SNOWFLAKE_BRIDGES = [SNOWFLAKE_BRIDGE_AZURE, SNOWFLAKE_BRIDGE_FASTLY]
+# Fastly with Shazam fronting
+SNOWFLAKE_BRIDGE_FASTLY_SHAZAM = Bridge(
+    type=BridgeType.SNOWFLAKE,
+    address="192.0.2.6:80",
+    fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
+    params={
+        "url": "https://snowflake-broker.torproject.net.global.prod.fastly.net/",
+        "front": "www.shazam.com",
+        "ice": _STUN_SERVERS,
+        "utls-imitate": "hellorandomizedalpn"
+    }
+)
 
-# Backwards compatibility alias
-SNOWFLAKE_BRIDGE = SNOWFLAKE_BRIDGE_AZURE
+# Fastly with Foursquare fronting
+SNOWFLAKE_BRIDGE_FASTLY_FOURSQUARE = Bridge(
+    type=BridgeType.SNOWFLAKE,
+    address="192.0.2.7:80",
+    fingerprint="2B280B23E1107BB62ABFC40DDCC8824814F80A72",
+    params={
+        "url": "https://snowflake-broker.torproject.net.global.prod.fastly.net/",
+        "front": "foursquare.com",
+        "ice": _STUN_SERVERS,
+        "utls-imitate": "hellorandomizedalpn"
+    }
+)
+
+# Bunny CDN (Triplebit private broker - independent infrastructure)
+SNOWFLAKE_BRIDGE_BUNNY = Bridge(
+    type=BridgeType.SNOWFLAKE,
+    address="10.0.3.1:80",
+    fingerprint="53B65F538F5E9A5FA6DFE5D75C78CB66C5515EF7",
+    params={
+        "url": "https://triplebit-snowflake-broker.b-cdn.net/",
+        "front": "www.bunny.net",
+        "ice": _STUN_SERVERS,
+        "utls-imitate": "hellorandomizedalpn"
+    }
+)
+
+# All snowflake bridges for fallback (ordered by reliability)
+SNOWFLAKE_BRIDGES = [
+    SNOWFLAKE_BRIDGE_CDN77,           # Primary - official Tor choice
+    SNOWFLAKE_BRIDGE_CDN77_ALT,       # CDN77 alt front
+    SNOWFLAKE_BRIDGE_AMP,             # Google AMP cache
+    SNOWFLAKE_BRIDGE_FASTLY_SHAZAM,   # Fastly + Shazam
+    SNOWFLAKE_BRIDGE_FASTLY_FOURSQUARE,  # Fastly + Foursquare
+    SNOWFLAKE_BRIDGE_BUNNY,           # Bunny CDN (independent)
+]
+
+# Backwards compatibility alias (now points to CDN77)
+SNOWFLAKE_BRIDGE = SNOWFLAKE_BRIDGE_CDN77
 
 class PluggableTransportManager:
     """
@@ -194,7 +260,13 @@ class PluggableTransportManager:
 
         return transports
 
-    def generate_torrc(self, data_dir: Path, socks_port: int = 9050, control_port: int = 0) -> str:
+    def generate_torrc(
+        self, 
+        data_dir: Path, 
+        socks_port: int = 9050, 
+        control_port: int = 0,
+        specific_bridge: Optional[Bridge] = None
+    ) -> str:
         """
         Generate torrc configuration for bridges.
 
@@ -202,6 +274,7 @@ class PluggableTransportManager:
             data_dir: Tor data directory
             socks_port: SOCKS port for this Tor instance
             control_port: Control port for this Tor instance (0 = auto-assign)
+            specific_bridge: If provided, use only this specific bridge (for fallback testing)
 
         Returns:
             torrc content string
@@ -221,11 +294,15 @@ class PluggableTransportManager:
             lines.append(f"ControlSocket {control_socket}")
 
         # Get bridges to use
-        if self.config.use_builtin_bridges and not self.config.bridges:
+        if specific_bridge:
+            # Use only the specific bridge for fallback testing
+            bridges = [specific_bridge]
+        elif self.config.use_builtin_bridges and not self.config.bridges:
             if self.config.bridge_type == BridgeType.OBFS4:
                 bridges = BUILTIN_OBFS4_BRIDGES
             elif self.config.bridge_type == BridgeType.SNOWFLAKE:
-                bridges = SNOWFLAKE_BRIDGES  # Use multiple bridges for fallback
+                # For snowflake, just use the first bridge - fallback is handled at higher level
+                bridges = [SNOWFLAKE_BRIDGES[0]] if SNOWFLAKE_BRIDGES else []
             else:
                 bridges = []
         else:
@@ -247,6 +324,14 @@ class PluggableTransportManager:
             lines.append(f"ClientTransportPlugin snowflake exec {transports[BridgeType.SNOWFLAKE]}")
 
         return "\n".join(lines)
+    
+    def get_fallback_bridges(self) -> List[Bridge]:
+        """Get list of bridges to try for fallback."""
+        if self.config.bridge_type == BridgeType.SNOWFLAKE:
+            return SNOWFLAKE_BRIDGES
+        elif self.config.bridge_type == BridgeType.OBFS4:
+            return BUILTIN_OBFS4_BRIDGES
+        return []
 
     def get_install_instructions(self) -> str:
         """Get installation instructions for pluggable transports."""
@@ -306,10 +391,14 @@ class TorBridgeConnector:
         self._temp_dir: Optional[tempfile.TemporaryDirectory] = None
         self._data_dir: Optional[Path] = None
         self._log_file: Optional[Path] = None
+        self._current_bridge: Optional[Bridge] = None  # Track which bridge is working
 
     async def start_tor_with_bridges(self) -> tuple[str, int]:
         """
         Start a Tor process configured with bridges.
+        
+        For snowflake bridges, this will try each bridge in SNOWFLAKE_BRIDGES
+        until one successfully bootstraps.
 
         Returns:
             Tuple of (socks_host, socks_port)
@@ -322,12 +411,61 @@ class TorBridgeConnector:
             print(self.pt_manager.get_install_instructions())
             raise RuntimeError(f"Pluggable transport {self.config.bridge_type.value} not installed")
 
+        # Get list of bridges to try
+        fallback_bridges = self.pt_manager.get_fallback_bridges()
+        
+        if not fallback_bridges:
+            # No fallback list, use default behavior
+            return await self._try_single_bridge(None)
+        
+        # Try each bridge until one works
+        last_error = None
+        for i, bridge in enumerate(fallback_bridges):
+            bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+            logger.info(
+                f"Trying bridge {i+1}/{len(fallback_bridges)}: {bridge_name}",
+                bridge_type=self.config.bridge_type.value
+            )
+            print(f"  Trying bridge {i+1}/{len(fallback_bridges)}: {bridge_name}")
+            
+            try:
+                result = await self._try_single_bridge(bridge, timeout=120)  # 2 min per bridge
+                self._current_bridge = bridge
+                logger.info(f"Successfully connected using bridge: {bridge_name}")
+                print(f"  ✓ Connected using: {bridge_name}")
+                return result
+            except RuntimeError as e:
+                last_error = e
+                logger.warning(f"Bridge {bridge_name} failed: {e}")
+                print(f"  ✗ Bridge failed: {bridge_name}")
+                # Cleanup before trying next bridge
+                await self._cleanup_tor()
+                continue
+        
+        # All bridges failed
+        raise RuntimeError(f"All {len(fallback_bridges)} bridges failed to connect. Last error: {last_error}")
+
+    async def _try_single_bridge(self, bridge: Optional[Bridge], timeout: int = 180) -> tuple[str, int]:
+        """
+        Try to start Tor with a specific bridge.
+        
+        Args:
+            bridge: Specific bridge to use, or None for default behavior
+            timeout: Bootstrap timeout in seconds
+            
+        Returns:
+            Tuple of (socks_host, socks_port)
+        """
         # Create temp directory for Tor data
         self._temp_dir = tempfile.TemporaryDirectory(prefix="shadow9_tor_")
         self._data_dir = Path(self._temp_dir.name)
 
-        # Generate torrc with specified port
-        torrc_content = self.pt_manager.generate_torrc(self._data_dir, self.socks_port)
+        # Generate torrc with specified port and specific bridge
+        torrc_content = self.pt_manager.generate_torrc(
+            self._data_dir, 
+            self.socks_port,
+            specific_bridge=bridge
+        )
         
         # Add log file to torrc for bootstrap monitoring
         self._log_file = self._data_dir / "tor.log"
@@ -336,9 +474,14 @@ class TorBridgeConnector:
         torrc_path = self._data_dir / "torrc"
         torrc_path.write_text(torrc_content)
 
+        bridge_name = "default"
+        if bridge:
+            bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+
         logger.info(
             "Starting Tor with bridges",
             bridge_type=self.config.bridge_type.value,
+            bridge=bridge_name,
             socks_port=self.socks_port,
             torrc=str(torrc_path)
         )
@@ -356,9 +499,26 @@ class TorBridgeConnector:
         )
 
         # Wait for Tor to bootstrap
-        await self._wait_for_bootstrap()
+        await self._wait_for_bootstrap(timeout=timeout)
 
         return "127.0.0.1", self.socks_port
+    
+    async def _cleanup_tor(self) -> None:
+        """Cleanup Tor process and temp directory without logging stop message."""
+        if self._tor_process:
+            self._tor_process.terminate()
+            try:
+                self._tor_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._tor_process.kill()
+            self._tor_process = None
+
+        if self._temp_dir:
+            try:
+                self._temp_dir.cleanup()
+            except Exception:
+                pass
+            self._temp_dir = None
 
     async def _wait_for_bootstrap(self, timeout: int = 180) -> None:
         """Wait for Tor to finish bootstrapping by monitoring the log file."""
