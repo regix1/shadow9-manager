@@ -219,11 +219,15 @@ class Socks5Server:
 
             # Connect to target (directly or via upstream proxy based on user preference)
             if self.upstream_proxy and use_tor:
+                # Pass username for Tor circuit isolation (IsolateSOCKSAuth)
+                # Each unique username gets a separate Tor circuit/exit IP
                 target_reader, target_writer = await self._connect_via_proxy(
-                    target_host, target_port
+                    target_host, target_port,
+                    socks_username=username,
+                    socks_password=username  # Password can match username for isolation
                 )
                 logger.debug(
-                    "Routing through Tor",
+                    "Routing through Tor (isolated circuit)",
                     username=username,
                     bridge=conn_info.bridge_type,
                     security=conn_info.security_level
@@ -469,21 +473,59 @@ class Socks5Server:
     async def _connect_via_proxy(
         self,
         target_host: str,
-        target_port: int
+        target_port: int,
+        socks_username: Optional[str] = None,
+        socks_password: Optional[str] = None
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Connect to target via upstream SOCKS5 proxy."""
+        """Connect to target via upstream SOCKS5 proxy.
+        
+        Args:
+            target_host: Target hostname to connect to
+            target_port: Target port to connect to
+            socks_username: Optional SOCKS auth username (for Tor circuit isolation)
+            socks_password: Optional SOCKS auth password (for Tor circuit isolation)
+            
+        When socks_username/password are provided, Tor's IsolateSOCKSAuth feature
+        will assign a separate circuit for each unique username, giving each user
+        their own exit IP.
+        """
         proxy_host, proxy_port = self.upstream_proxy
 
         # Connect to upstream proxy
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
 
-        # SOCKS5 handshake with no auth (for simplicity with Tor)
-        writer.write(struct.pack("!BBB", self.SOCKS_VERSION, 1, Socks5AuthMethod.NO_AUTH))
-        await writer.drain()
+        # Determine auth method
+        if socks_username and socks_password:
+            # Use username/password auth for Tor circuit isolation
+            writer.write(struct.pack("!BBB", self.SOCKS_VERSION, 1, Socks5AuthMethod.USERNAME_PASSWORD))
+            await writer.drain()
 
-        response = await reader.readexactly(2)
-        if response[1] != Socks5AuthMethod.NO_AUTH:
-            raise ConnectionError("Upstream proxy requires authentication")
+            response = await reader.readexactly(2)
+            if response[1] != Socks5AuthMethod.USERNAME_PASSWORD:
+                writer.close()
+                raise ConnectionError("Upstream proxy doesn't support username/password auth")
+
+            # Send auth credentials (RFC 1929)
+            username_bytes = socks_username.encode('utf-8')[:255]
+            password_bytes = socks_password.encode('utf-8')[:255]
+            auth_request = struct.pack("!BB", 0x01, len(username_bytes)) + username_bytes
+            auth_request += struct.pack("!B", len(password_bytes)) + password_bytes
+            writer.write(auth_request)
+            await writer.drain()
+
+            auth_response = await reader.readexactly(2)
+            if auth_response[1] != 0x00:
+                writer.close()
+                raise ConnectionError("Upstream proxy authentication failed")
+        else:
+            # SOCKS5 handshake with no auth (legacy behavior)
+            writer.write(struct.pack("!BBB", self.SOCKS_VERSION, 1, Socks5AuthMethod.NO_AUTH))
+            await writer.drain()
+
+            response = await reader.readexactly(2)
+            if response[1] != Socks5AuthMethod.NO_AUTH:
+                writer.close()
+                raise ConnectionError("Upstream proxy requires authentication")
 
         # Send CONNECT request
         if target_host.endswith('.onion') or not self._is_ip(target_host):
@@ -516,6 +558,7 @@ class Socks5Server:
         # Read response
         response = await reader.readexactly(4)
         if response[1] != Socks5Reply.SUCCEEDED:
+            writer.close()
             raise ConnectionError(f"Upstream proxy connection failed: {response[1]}")
 
         # Skip bound address

@@ -204,8 +204,8 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
         for u in auth_manager.list_users()
     )
 
-    if users_need_tor or cfg.tor.enabled:
-        console.print("[cyan]Connecting to Tor network...[/cyan]")
+    if users_need_tor:
+        console.print("[cyan]Users with Tor enabled detected. Connecting to Tor...[/cyan]")
         tor_config = TorConfig(
             socks_host=cfg.tor.socks_host,
             socks_port=cfg.tor.socks_port,
@@ -218,8 +218,8 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
             circuit_info = tor_connector.circuit_info
             console.print(Panel(
                 f"[bold green]Connected to Tor Network[/bold green]\n\n"
-                f"Exit IP: [cyan]{circuit_info.exit_ip if circuit_info else 'Unknown'}[/cyan]\n"
-                f"Tor SOCKS: [cyan]{cfg.tor.socks_host}:{cfg.tor.socks_port}[/cyan]",
+                f"Tor SOCKS: [cyan]{cfg.tor.socks_host}:{cfg.tor.socks_port}[/cyan]\n"
+                f"Isolation: [cyan]Per-user circuits (IsolateSOCKSAuth)[/cyan]",
                 title="Tor Status",
                 border_style="green"
             ))
@@ -243,8 +243,9 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
 
     # Connection monitoring callback
     async def on_connection(info: ConnectionInfo):
+        route = "[green]Tor[/green]" if info.use_tor else "[yellow]Direct[/yellow]"
         console.print(
-            f"[dim]{info.username}[/dim] -> "
+            f"[dim]{info.username}[/dim] ({route}) -> "
             f"[cyan]{info.target_addr}:{info.target_port}[/cyan]"
         )
 
@@ -269,13 +270,14 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     try:
         await server.start()
 
-        tor_status = "Available" if upstream_proxy else "Not connected"
+        tor_status = "Available (per-user circuits)" if upstream_proxy else "Not connected"
         console.print(Panel(
             f"[bold green]SOCKS5 Server Running[/bold green]\n"
             f"Listen: [cyan]{cfg.server.host}:{cfg.server.port}[/cyan]\n"
             f"Tor:    [cyan]{tor_status}[/cyan]\n"
             f"Auth:   [cyan]Username/Password[/cyan]\n\n"
-            f"[dim]Routing controlled by user settings. Press Ctrl+C to stop.[/dim]",
+            f"[dim]Each user gets isolated Tor circuit. Routing per user settings.[/dim]\n"
+            f"[dim]Press Ctrl+C to stop.[/dim]",
             title="Shadow9 Manager",
             border_style="green"
         ))
