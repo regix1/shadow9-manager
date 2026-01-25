@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Shadow9 Manager - Initial Setup Script
-# This script sets up the environment and installs shadow9 globally
+# This script installs shadow9 system-wide (no virtual environment)
 #
 
 set -e
@@ -44,7 +44,7 @@ run_privileged() {
 
 # Function to detect OS and install system dependencies
 install_system_deps() {
-    echo -e "${CYAN}[1/6]${NC} Installing system dependencies..."
+    echo -e "${CYAN}[1/5]${NC} Installing system dependencies..."
     
     # Detect OS
     if [ -f /etc/os-release ]; then
@@ -65,7 +65,7 @@ install_system_deps() {
         ubuntu|debian|linuxmint|pop)
             echo -e "${CYAN}Detected Debian/Ubuntu-based system${NC}"
             run_privileged apt-get update -qq
-            run_privileged apt-get install -y -qq python3 python3-pip python3-venv python3-dev curl 2>/dev/null
+            run_privileged apt-get install -y -qq python3 python3-pip python3-dev curl 2>/dev/null
             echo -e "${GREEN}[OK] System packages installed${NC}"
             ;;
         fedora)
@@ -101,7 +101,7 @@ install_system_deps() {
             # Try to detect based on ID_LIKE
             if [[ "$OS_LIKE" == *"debian"* ]]; then
                 run_privileged apt-get update -qq
-                run_privileged apt-get install -y -qq python3 python3-pip python3-venv python3-dev curl 2>/dev/null
+                run_privileged apt-get install -y -qq python3 python3-pip python3-dev curl 2>/dev/null
                 echo -e "${GREEN}[OK] System packages installed${NC}"
             elif [[ "$OS_LIKE" == *"rhel"* ]] || [[ "$OS_LIKE" == *"fedora"* ]]; then
                 run_privileged yum install -y -q python3 python3-pip python3-devel curl 2>/dev/null || \
@@ -109,7 +109,7 @@ install_system_deps() {
                 echo -e "${GREEN}[OK] System packages installed${NC}"
             else
                 echo -e "${YELLOW}[WARN] Unknown OS: $OS. Skipping system package installation.${NC}"
-                echo -e "${YELLOW}       Make sure python3, pip, and venv are installed.${NC}"
+                echo -e "${YELLOW}       Make sure python3 and pip are installed.${NC}"
             fi
             ;;
     esac
@@ -119,7 +119,7 @@ install_system_deps() {
 install_system_deps
 
 # Check Python version
-echo -e "\n${CYAN}[2/6]${NC} Checking Python version..."
+echo -e "\n${CYAN}[2/5]${NC} Checking Python version..."
 if ! command -v python3 &> /dev/null; then
     if ! command -v python &> /dev/null; then
         echo -e "${RED}[ERROR] Python 3.10+ is required but not found.${NC}"
@@ -141,29 +141,32 @@ if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" 
 fi
 echo -e "${GREEN}[OK] Python $PYTHON_VERSION found${NC}"
 
-# Create virtual environment
-echo -e "\n${CYAN}[3/6]${NC} Setting up virtual environment..."
-if [ ! -d "venv" ]; then
-    $PYTHON_CMD -m venv venv
-    echo -e "${GREEN}[OK] Virtual environment created${NC}"
-else
-    echo -e "${YELLOW}[INFO] Virtual environment already exists${NC}"
+# Install Python dependencies system-wide
+echo -e "\n${CYAN}[3/5]${NC} Installing Python dependencies system-wide..."
+
+# Use --break-system-packages for newer pip versions that require it
+PIP_ARGS="--break-system-packages"
+if ! pip3 install --help 2>&1 | grep -q "break-system-packages"; then
+    PIP_ARGS=""
 fi
 
-# Activate virtual environment
-source venv/bin/activate
-
-# Install dependencies
-echo -e "\n${CYAN}[4/6]${NC} Installing dependencies..."
-pip install --upgrade pip -q
-pip install -e . -q
-echo -e "${GREEN}[OK] Dependencies installed${NC}"
+# Install from requirements.txt
+if is_root; then
+    pip3 install $PIP_ARGS -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || \
+    pip3 install $PIP_ARGS -r "$SCRIPT_DIR/requirements.txt"
+else
+    # Try user install first, fall back to sudo
+    pip3 install $PIP_ARGS --user -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || \
+    sudo pip3 install $PIP_ARGS -q -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || \
+    sudo pip3 install $PIP_ARGS -r "$SCRIPT_DIR/requirements.txt"
+fi
+echo -e "${GREEN}[OK] Python dependencies installed${NC}"
 
 # Create config directory if needed
 mkdir -p config
 
 # Generate master key (only if not exists)
-echo -e "\n${CYAN}[5/6]${NC} Checking encryption key..."
+echo -e "\n${CYAN}[4/5]${NC} Checking encryption key..."
 
 if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
     # Load existing key
@@ -172,7 +175,7 @@ if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
     echo -e "${YELLOW}[INFO] Using existing master key from .env${NC}"
 else
     # Generate new key
-    MASTER_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+    MASTER_KEY=$($PYTHON_CMD -c "import secrets; print(secrets.token_urlsafe(32))")
 
     # Save to .env file
     cat > .env << EOF
@@ -186,28 +189,40 @@ EOF
 fi
 
 # Install shadow9 globally
-echo -e "\n${CYAN}[6/6]${NC} Installing shadow9 command..."
+echo -e "\n${CYAN}[5/5]${NC} Installing shadow9 command..."
 
 # Determine install location
-if [ -d "$HOME/.local/bin" ]; then
-    INSTALL_DIR="$HOME/.local/bin"
-elif [ -w "/usr/local/bin" ]; then
+if is_root; then
     INSTALL_DIR="/usr/local/bin"
+elif [ -d "$HOME/.local/bin" ]; then
+    INSTALL_DIR="$HOME/.local/bin"
 else
     mkdir -p "$HOME/.local/bin"
     INSTALL_DIR="$HOME/.local/bin"
 fi
 
-# Create wrapper script that uses the venv
+# Create symlink or wrapper script
 WRAPPER="$INSTALL_DIR/shadow9"
-cat > "$WRAPPER" << EOF
+
+if is_root; then
+    # Running as root - create symlink directly
+    ln -sf "$SCRIPT_DIR/shadow9" "$WRAPPER"
+    echo -e "${GREEN}[OK] Linked to $WRAPPER${NC}"
+else
+    # Not root - try symlink first, fall back to wrapper
+    if ln -sf "$SCRIPT_DIR/shadow9" "$WRAPPER" 2>/dev/null; then
+        echo -e "${GREEN}[OK] Linked to $WRAPPER${NC}"
+    else
+        # Create wrapper script
+        cat > "$WRAPPER" << EOF
 #!/usr/bin/env bash
 # Shadow9 - installed from $SCRIPT_DIR
-exec "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/shadow9" "\$@"
+exec "$SCRIPT_DIR/shadow9" "\$@"
 EOF
-chmod +x "$WRAPPER"
-
-echo -e "${GREEN}[OK] Installed to $WRAPPER${NC}"
+        chmod +x "$WRAPPER"
+        echo -e "${GREEN}[OK] Installed to $WRAPPER${NC}"
+    fi
+fi
 
 # Check if install dir is in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -225,13 +240,6 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
             fi
         fi
     done
-fi
-
-# Install tab completion
-if shadow9 --install-completion 2>/dev/null; then
-    echo -e "${GREEN}[OK] Tab completion installed${NC}"
-else
-    echo -e "${YELLOW}[INFO] Run 'shadow9 --install-completion' after restarting terminal${NC}"
 fi
 
 echo -e "${GREEN}"
