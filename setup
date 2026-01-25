@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Shadow9 Manager - Initial Setup Script
-# This script sets up the environment and creates the first user
+# This script sets up the environment and installs shadow9 globally
 #
 
 set -e
@@ -93,171 +93,56 @@ EOF
     chmod 600 .env
 
     echo -e "${GREEN}[OK] Master key generated and saved to .env${NC}"
-    echo -e "${YELLOW}[INFO] IMPORTANT: Keep this key safe! You'll need it to access your credentials.${NC}"
+    echo -e "${YELLOW}[INFO] IMPORTANT: Keep this key safe!${NC}"
 fi
 
-# Setup shell completion
-echo -e "\n${CYAN}[5/6]${NC} Setting up tab completion..."
+# Install shadow9 globally
+echo -e "\n${CYAN}[5/6]${NC} Installing shadow9 command..."
 
-# Detect shell and configure completion
-COMPLETION_INSTALLED=false
-
-# Create completion script that works with both 'shadow9' and './shadow9'
-COMPLETION_SCRIPT="$SCRIPT_DIR/.shadow9-completion.bash"
-cat > "$COMPLETION_SCRIPT" << 'COMPLETION_EOF'
-# Shadow9 tab completion
-_SHADOW9_COMPLETION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-_shadow9_completion() {
-    local IFS=$'\n'
-    local response
-    local shadow9_cmd=""
-    local -a shadow9_args=()
-
-    if [ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9" ]; then
-        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9"
-    elif [ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/python" ]; then
-        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/python"
-        shadow9_args=(-m shadow9)
-    elif command -v shadow9 >/dev/null 2>&1; then
-        shadow9_cmd="$(command -v shadow9)"
-    elif command -v python3 >/dev/null 2>&1; then
-        shadow9_cmd="$(command -v python3)"
-        shadow9_args=(-m shadow9)
-    elif command -v python >/dev/null 2>&1; then
-        shadow9_cmd="$(command -v python)"
-        shadow9_args=(-m shadow9)
-    else
-        return 0
-    fi
-
-    response=$( env COMP_WORDS="${COMP_WORDS[*]}" \
-                    COMP_CWORD=$COMP_CWORD \
-                    _SHADOW9_COMPLETE=bash_complete "$shadow9_cmd" "${shadow9_args[@]}" 2>/dev/null )
-    COMPREPLY=( $response )
-    return 0
-}
-
-# Register completion - use -o nosort to preserve order, no -o default to avoid file fallback
-complete -o nosort -F _shadow9_completion shadow9
-complete -o nosort -F _shadow9_completion ./shadow9
-COMPLETION_EOF
-
-COMPLETION_CMD="source \"$SCRIPT_DIR/.shadow9-completion.bash\""
-
-# Try to add to bashrc (create if missing)
-BASHRC="$HOME/.bashrc"
-if [ ! -f "$BASHRC" ]; then
-    touch "$BASHRC" 2>/dev/null || true
-    echo -e "${YELLOW}[INFO] Created ~/.bashrc for completion setup${NC}"
+# Determine install location
+if [ -d "$HOME/.local/bin" ]; then
+    INSTALL_DIR="$HOME/.local/bin"
+elif [ -w "/usr/local/bin" ]; then
+    INSTALL_DIR="/usr/local/bin"
+else
+    mkdir -p "$HOME/.local/bin"
+    INSTALL_DIR="$HOME/.local/bin"
 fi
 
-if [ -f "$BASHRC" ]; then
-    if ! grep -q ".shadow9-completion.bash" "$BASHRC" 2>/dev/null; then
-        # Remove old completion if present
-        sed -i '/_SHADOW9_COMPLETE/d' "$BASHRC" 2>/dev/null || true
-        sed -i '/Shadow9 tab completion/d' "$BASHRC" 2>/dev/null || true
-        echo "" >> "$BASHRC"
-        echo "# Shadow9 tab completion" >> "$BASHRC"
-        echo "$COMPLETION_CMD" >> "$BASHRC"
-        COMPLETION_INSTALLED=true
-        echo -e "${GREEN}[OK] Tab completion added to ~/.bashrc${NC}"
-    else
-        echo -e "${YELLOW}[INFO] Tab completion already configured in ~/.bashrc${NC}"
-        COMPLETION_INSTALLED=true
-    fi
-fi
+# Create wrapper script that uses the venv
+WRAPPER="$INSTALL_DIR/shadow9"
+cat > "$WRAPPER" << EOF
+#!/usr/bin/env bash
+# Shadow9 - installed from $SCRIPT_DIR
+exec "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/shadow9" "\$@"
+EOF
+chmod +x "$WRAPPER"
 
-# If .bash_profile exists and doesn't source .bashrc, add completion there too
-if [ -f "$HOME/.bash_profile" ] && ! grep -q "bashrc" "$HOME/.bash_profile" 2>/dev/null; then
-    if ! grep -q ".shadow9-completion.bash" "$HOME/.bash_profile" 2>/dev/null; then
-        sed -i '/_SHADOW9_COMPLETE/d' "$HOME/.bash_profile" 2>/dev/null || true
-        sed -i '/Shadow9 tab completion/d' "$HOME/.bash_profile" 2>/dev/null || true
-        echo "" >> "$HOME/.bash_profile"
-        echo "# Shadow9 tab completion" >> "$HOME/.bash_profile"
-        echo "$COMPLETION_CMD" >> "$HOME/.bash_profile"
-        COMPLETION_INSTALLED=true
-        echo -e "${GREEN}[OK] Tab completion added to ~/.bash_profile${NC}"
-    else
-        echo -e "${YELLOW}[INFO] Tab completion already configured in ~/.bash_profile${NC}"
-        COMPLETION_INSTALLED=true
-    fi
-fi
+echo -e "${GREEN}[OK] Installed to $WRAPPER${NC}"
 
-# Try to add to zshrc if zsh is present
-if [ -f "$HOME/.zshrc" ]; then
-    # Create zsh completion script
-    ZSH_COMPLETION_SCRIPT="$SCRIPT_DIR/.shadow9-completion.zsh"
-    cat > "$ZSH_COMPLETION_SCRIPT" << 'ZSH_COMPLETION_EOF'
-# Shadow9 tab completion for zsh
-_SHADOW9_COMPLETION_DIR="${${(%):-%N}:A:h}"
-
-_shadow9_completion() {
-    local -a completions
-    local -a completions_with_descriptions
-    local -a response
-    local shadow9_cmd=""
-    local -a shadow9_args
-
-    if [[ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9" ]]; then
-        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/shadow9"
-    elif [[ -x "$_SHADOW9_COMPLETION_DIR/venv/bin/python" ]]; then
-        shadow9_cmd="$_SHADOW9_COMPLETION_DIR/venv/bin/python"
-        shadow9_args=(-m shadow9)
-    elif command -v shadow9 >/dev/null 2>&1; then
-        shadow9_cmd="$(command -v shadow9)"
-    elif command -v python3 >/dev/null 2>&1; then
-        shadow9_cmd="$(command -v python3)"
-        shadow9_args=(-m shadow9)
-    elif command -v python >/dev/null 2>&1; then
-        shadow9_cmd="$(command -v python)"
-        shadow9_args=(-m shadow9)
-    else
-        return 1
-    fi
-
-    response=("${(@f)$(env COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1)) _SHADOW9_COMPLETE=zsh_complete "$shadow9_cmd" "${shadow9_args[@]}")}")
-
-    for key descr in ${(kv)response}; do
-        if [[ "$descr" == "_" ]]; then
-            completions+=("$key")
-        else
-            completions_with_descriptions+=("$key":"$descr")
+# Check if install dir is in PATH
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    echo -e "${YELLOW}[INFO] Add this to your shell config:${NC}"
+    echo -e "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    
+    # Try to add to shell config
+    for RC_FILE in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        if [ -f "$RC_FILE" ]; then
+            if ! grep -q "$INSTALL_DIR" "$RC_FILE" 2>/dev/null; then
+                echo "" >> "$RC_FILE"
+                echo "# Added by shadow9 setup" >> "$RC_FILE"
+                echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$RC_FILE"
+                echo -e "${GREEN}[OK] Added to $(basename $RC_FILE)${NC}"
+            fi
         fi
     done
-
-    if [ -n "$completions_with_descriptions" ]; then
-        _describe -V unsorted completions_with_descriptions -U
-    fi
-
-    if [ -n "$completions" ]; then
-        compadd -U -V unsorted -a completions
-    fi
-}
-
-compdef _shadow9_completion shadow9
-compdef _shadow9_completion ./shadow9
-ZSH_COMPLETION_EOF
-
-    ZSH_COMPLETION_CMD="source \"$SCRIPT_DIR/.shadow9-completion.zsh\""
-    if ! grep -q ".shadow9-completion.zsh" "$HOME/.zshrc" 2>/dev/null; then
-        # Remove old completion if present
-        sed -i '/_SHADOW9_COMPLETE/d' "$HOME/.zshrc" 2>/dev/null || true
-        sed -i '/Shadow9 tab completion/d' "$HOME/.zshrc" 2>/dev/null || true
-        echo "" >> "$HOME/.zshrc"
-        echo "# Shadow9 tab completion" >> "$HOME/.zshrc"
-        echo "$ZSH_COMPLETION_CMD" >> "$HOME/.zshrc"
-        COMPLETION_INSTALLED=true
-        echo -e "${GREEN}[OK] Tab completion added to ~/.zshrc${NC}"
-    else
-        echo -e "${YELLOW}[INFO] Tab completion already configured in ~/.zshrc${NC}"
-        COMPLETION_INSTALLED=true
-    fi
 fi
 
-if [ "$COMPLETION_INSTALLED" = false ]; then
-    echo -e "${YELLOW}[INFO] Could not auto-configure completion.${NC}"
-    echo -e "  Add to your shell config: source \"$COMPLETION_SCRIPT\""
+# Install tab completion
+if shadow9 --install-completion 2>/dev/null; then
+    echo -e "${GREEN}[OK] Tab completion installed${NC}"
+else
+    echo -e "${YELLOW}[INFO] Run 'shadow9 --install-completion' after restarting terminal${NC}"
 fi
 
 # Create first user (only if no users exist)
@@ -279,27 +164,24 @@ from shadow9.auth import AuthManager
 creds_file = Path('config/credentials.enc')
 
 try:
-    # Initialize auth manager with master key
     auth = AuthManager(
         credentials_file=creds_file,
         master_key=os.environ.get('SHADOW9_MASTER_KEY')
     )
 
-    # Check if users already exist
     existing_users = auth.list_users()
     if existing_users:
-        print(f\"[INFO] Found {len(existing_users)} existing user(s): {', '.join(existing_users)}\")
-        print('[INFO] Skipping user creation. Use ./shadow9 user add <username> to add more.')
+        print(f'[INFO] Found {len(existing_users)} existing user(s): {\", \".join(existing_users)}')
+        print('[INFO] Skipping user creation. Use: shadow9 user add <username>')
     else:
-        # Generate secure credentials
         username, password = auth.generate_credentials()
         auth.add_user(username, password, use_tor=True)
-        print(f'''
+        print('''
 ============================================================
                     Your Credentials
 ------------------------------------------------------------
-  Username: {username}
-  Password: {password}
+  Username: ''' + username + '''
+  Password: ''' + password + '''
 ------------------------------------------------------------
   [!] SAVE THESE NOW! They will not be shown again.
 ============================================================
@@ -307,24 +189,22 @@ try:
 
 except Exception as e:
     if 'InvalidToken' in str(type(e).__name__) or 'InvalidToken' in str(e) or creds_file.exists():
-        print('[WARN] Credentials file is corrupted or key mismatch.')
-        print('[>] Removing corrupted credentials and creating fresh...')
+        print('[WARN] Credentials file corrupted. Creating fresh...')
         if creds_file.exists():
             creds_file.unlink()
 
-        # Reinitialize and create user
         auth = AuthManager(
             credentials_file=creds_file,
             master_key=os.environ.get('SHADOW9_MASTER_KEY')
         )
         username, password = auth.generate_credentials()
         auth.add_user(username, password, use_tor=True)
-        print(f'''
+        print('''
 ============================================================
                     Your Credentials
 ------------------------------------------------------------
-  Username: {username}
-  Password: {password}
+  Username: ''' + username + '''
+  Password: ''' + password + '''
 ------------------------------------------------------------
   [!] SAVE THESE NOW! They will not be shown again.
 ============================================================
@@ -333,27 +213,22 @@ except Exception as e:
         raise
 "
 
-# Reload shell config to enable completion immediately
-if [ -f "$HOME/.bashrc" ]; then
-    source "$HOME/.bashrc" 2>/dev/null || true
-fi
-
 echo -e "${GREEN}"
 echo "============================================================"
 echo "                    Setup Complete!                         "
 echo "------------------------------------------------------------"
-echo "  Start the server:                                         "
-echo "     ./shadow9 serve                                        "
+echo "  Start the server (from anywhere):                         "
+echo "     shadow9 serve                                          "
 echo "                                                            "
 echo "  Configure your app to use SOCKS5 proxy:                   "
 echo "     Host: 127.0.0.1                                        "
 echo "     Port: 1080                                             "
 echo "     Auth: Use the credentials above                        "
 echo "                                                            "
-echo "  Tab completion is enabled. Try:                           "
-echo "     ./shadow9 [TAB][TAB]                                   "
+echo "  Tab completion: restart your terminal, then try:          "
+echo "     shadow9 [TAB][TAB]                                     "
 echo "                                                            "
 echo "  For more options:                                         "
-echo "     ./shadow9 --help                                       "
+echo "     shadow9 --help                                         "
 echo "============================================================"
 echo -e "${NC}"
