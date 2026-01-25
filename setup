@@ -169,15 +169,32 @@ echo -e "${GREEN}[OK] Shadow9 package installed${NC}"
 # Create config directory if needed
 mkdir -p config
 
-# Generate master key (only if not exists)
+# Generate master key
 echo -e "\n${CYAN}[4/5]${NC} Checking encryption key..."
 
+GENERATE_NEW_KEY=false
+
 if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
-    # Load existing key
-    source .env
-    MASTER_KEY="$SHADOW9_MASTER_KEY"
-    echo -e "${YELLOW}[INFO] Using existing master key from .env${NC}"
+    # Key exists, ask if user wants to regenerate
+    echo -e "${YELLOW}[INFO] Existing master key found in .env${NC}"
+    echo -e "${RED}WARNING: Regenerating the key will make existing credentials unreadable!${NC}"
+    read -p "Would you like to generate a new master key? (y/n): " REGEN_KEY
+    if [[ "$REGEN_KEY" =~ ^[Yy]$ ]]; then
+        GENERATE_NEW_KEY=true
+        # Backup old .env
+        cp .env .env.backup 2>/dev/null
+        echo -e "${YELLOW}[INFO] Old .env backed up to .env.backup${NC}"
+    else
+        # Load existing key
+        source .env
+        MASTER_KEY="$SHADOW9_MASTER_KEY"
+        echo -e "${GREEN}[OK] Using existing master key${NC}"
+    fi
 else
+    GENERATE_NEW_KEY=true
+fi
+
+if [ "$GENERATE_NEW_KEY" = true ]; then
     # Generate new key
     MASTER_KEY=$($PYTHON_CMD -c "import secrets; print(secrets.token_urlsafe(32))")
 
