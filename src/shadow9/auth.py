@@ -249,7 +249,8 @@ class AuthManager:
         security_level: str = "basic",
         allowed_ports: Optional[list[int]] = None,
         rate_limit: Optional[int] = None,
-        bind_port: Optional[int] = None
+        bind_port: Optional[int] = None,
+        logging_enabled: bool = True
     ) -> bool:
         """
         Add a new user with the given credentials.
@@ -263,6 +264,7 @@ class AuthManager:
             allowed_ports: List of allowed destination ports (None = all)
             rate_limit: Max requests per minute (None = server default)
             bind_port: Custom port for this user (None = shared server port)
+            logging_enabled: Whether to log activity for this user (privacy setting)
 
         Returns:
             True if user was added, False if username exists
@@ -298,6 +300,7 @@ class AuthManager:
             allowed_ports=allowed_ports,
             rate_limit=rate_limit,
             bind_port=bind_port,
+            logging_enabled=logging_enabled,
         )
 
         self._save_credentials()
@@ -341,7 +344,9 @@ class AuthManager:
         cred = self._credentials[username]
 
         if not cred.enabled:
-            logger.warning("Authentication failed: user disabled", username=username)
+            # Respect logging preference even for failed auth
+            if getattr(cred, 'logging_enabled', True):
+                logger.warning("Authentication failed: user disabled", username=username)
             return False
 
         try:
@@ -356,11 +361,15 @@ class AuthManager:
             cred.last_used = datetime.utcnow().isoformat()
             self._save_credentials_async()
 
-            logger.info("Authentication successful", username=username)
+            # Only log if user allows logging
+            if getattr(cred, 'logging_enabled', True):
+                logger.info("Authentication successful", username=username)
             return True
 
         except VerifyMismatchError:
-            logger.warning("Authentication failed: wrong password", username=username)
+            # Respect logging preference for failed auth attempts
+            if getattr(cred, 'logging_enabled', True):
+                logger.warning("Authentication failed: wrong password", username=username)
             return False
         except InvalidHash:
             logger.error("Invalid hash format in credentials", username=username)

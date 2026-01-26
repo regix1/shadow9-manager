@@ -251,6 +251,12 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
 
     # Connection monitoring callback
     async def on_connection(info: ConnectionInfo):
+        # Respect user's logging preference
+        if info.username:
+            logging_enabled = auth_manager.get_user_logging_enabled(info.username)
+            if logging_enabled is False:
+                return  # Skip logging for users with logging disabled
+        
         if info.use_tor:
             bridge = info.bridge_type or "none"
             route = f"[green]Tor/{bridge}[/green]"

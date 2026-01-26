@@ -104,6 +104,7 @@ def register_user_commands(app: typer.Typer):
         ports: Annotated[Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")] = None,
         rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
         bind_port: Annotated[Optional[int], typer.Option("--bind-port", help="Custom port for this user (dedicated listener)")] = None,
+        logging: Annotated[Optional[bool], typer.Option("--logging/--no-logging", help="Enable or disable activity logging")] = None,
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
         """Generate a user with optional custom username/password.
@@ -196,6 +197,16 @@ def register_user_commands(app: typer.Typer):
                             "3": SecurityChoice.moderate, "4": SecurityChoice.paranoid}
             security = security_map.get(security_choice, SecurityChoice.basic)
 
+        # Prompt for activity logging preference if not specified
+        if logging is None:
+            console.print("\n[bold]Activity Logging:[/bold]")
+            console.print("  [dim]Controls whether the server logs this user's activity.[/dim]")
+            console.print("  [dim]Disabling prevents recording of connections, IPs, and traffic data.[/dim]\n")
+            logging = typer.confirm(
+                "Enable activity logging?",
+                default=True
+            )
+
         # Parse ports
         allowed_ports = None
         if ports:
@@ -229,7 +240,8 @@ def register_user_commands(app: typer.Typer):
                 security_level=security.value,
                 allowed_ports=allowed_ports,
                 rate_limit=rate_limit,
-                bind_port=bind_port
+                bind_port=bind_port,
+                logging_enabled=logging
             )
 
             # Build info string
@@ -240,6 +252,8 @@ def register_user_commands(app: typer.Typer):
                 f"Routing: [cyan]{routing}[/cyan]",
                 f"Security: [cyan]{security.value}[/cyan]",
             ]
+            if not logging:
+                info_lines.append("Logging: [yellow]Disabled[/yellow] (no activity tracking)")
             if bind_port:
                 info_lines.append(f"Bind Port: [cyan]{bind_port}[/cyan] (dedicated listener)")
             if allowed_ports:
