@@ -101,6 +101,11 @@ def run_user_modify_wizard(config_path: str = "config/config.yaml", preselected_
             if change:
                 changes.append(change)
                 info["enabled"] = auth_manager.get_user_enabled(username)
+        elif action == "logging":
+            change = _modify_logging(auth_manager, username, info)
+            if change:
+                changes.append(change)
+                info["logging_enabled"] = auth_manager.get_user_logging_enabled(username)
     
     # Show summary
     if changes:
@@ -176,6 +181,13 @@ def _show_current_settings(info: dict) -> None:
     security = info.get("security_level", "basic")
     table.add_row("Security", security.upper())
     
+    # Logging
+    logging_enabled = info.get("logging_enabled", True)
+    if logging_enabled:
+        table.add_row("Logging", "[green]Enabled[/green]")
+    else:
+        table.add_row("Logging", "[yellow]Disabled[/yellow] (no activity tracking)")
+    
     # Ports
     allowed_ports = info.get("allowed_ports")
     if allowed_ports:
@@ -202,10 +214,11 @@ def _prompt_modification_menu() -> str:
     console.print("  [cyan]4.[/cyan] Port restrictions")
     console.print("  [cyan]5.[/cyan] Rate limiting")
     console.print("  [cyan]6.[/cyan] Enable/Disable account")
-    console.print("  [cyan]7.[/cyan] [green]Done - exit wizard[/green]")
+    console.print("  [cyan]7.[/cyan] Activity logging")
+    console.print("  [cyan]8.[/cyan] [green]Done - exit wizard[/green]")
     console.print()
     
-    choice = typer.prompt("  Select option [1-7]", default="7")
+    choice = typer.prompt("  Select option [1-8]", default="8")
     
     menu_map = {
         "1": "routing",
@@ -214,7 +227,8 @@ def _prompt_modification_menu() -> str:
         "4": "ports",
         "5": "rate_limit",
         "6": "status",
-        "7": "done",
+        "7": "logging",
+        "8": "done",
     }
     return menu_map.get(choice, "done")
 
@@ -436,6 +450,39 @@ def _modify_status(auth_manager: AuthManager, username: str, info: dict) -> Opti
             auth_manager.set_user_enabled(username, True)
             console.print("  [green]Account enabled[/green]")
             return "Status: Disabled → Enabled"
+    
+    console.print("  [dim]No change[/dim]")
+    return None
+
+
+def _modify_logging(auth_manager: AuthManager, username: str, info: dict) -> Optional[str]:
+    """Modify activity logging setting (privacy feature)."""
+    current = info.get("logging_enabled", True)
+    current_display = "Enabled" if current else "Disabled"
+    
+    console.print(f"\n[bold]Modify Activity Logging[/bold] [dim](current: {current_display})[/dim]\n")
+    
+    if current:
+        console.print("  Activity logging is currently [green]enabled[/green].")
+        console.print("  Disabling will prevent the server from recording:")
+        console.print("    • Connection times and targets")
+        console.print("    • IP addresses and traffic data")
+        console.print("    • Any activity for this user\n")
+        console.print("  [dim]This is a server-side privacy guarantee.[/dim]\n")
+        disable = typer.confirm("  Disable activity logging for this user?", default=False)
+        if disable:
+            auth_manager.set_user_logging_enabled(username, False)
+            console.print("  [yellow]Activity logging disabled[/yellow]")
+            return "Logging: Enabled → Disabled (no activity tracking)"
+    else:
+        console.print("  Activity logging is currently [yellow]disabled[/yellow].")
+        console.print("  No connection data is being recorded for this user.")
+        console.print("  Enabling will allow normal logging of activity.\n")
+        enable = typer.confirm("  Enable activity logging for this user?", default=False)
+        if enable:
+            auth_manager.set_user_logging_enabled(username, True)
+            console.print("  [green]Activity logging enabled[/green]")
+            return "Logging: Disabled → Enabled"
     
     console.print("  [dim]No change[/dim]")
     return None

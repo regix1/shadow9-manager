@@ -18,6 +18,7 @@ import structlog
 from .auth import AuthManager
 from .security import SecurityLevel, get_security_preset, DPIBypass
 from .bridges import TorBridgeConnector, BridgeConfig, BridgeType
+from .logging_utils import UserAwareLogger
 
 logger = structlog.get_logger(__name__)
 
@@ -139,6 +140,28 @@ class Socks5Server:
         self._bridge_lock = asyncio.Lock()
         self._dynamic_connectors: list[TorBridgeConnector] = []
         self._next_bridge_port = bridge_base_port
+
+        # User-aware logger for respecting per-user logging preferences
+        self._user_logger = UserAwareLogger(auth_manager) if auth_manager else None
+
+    def _should_log_user(self, username: Optional[str]) -> bool:
+        """Check if logging is enabled for a user."""
+        if username is None or self.auth_manager is None:
+            return True
+        logging_enabled = self.auth_manager.get_user_logging_enabled(username)
+        return logging_enabled if logging_enabled is not None else True
+
+    def _log_if_allowed(
+        self, level: str, event: str, username: Optional[str] = None, **kwargs
+    ) -> None:
+        """Log a message only if the user allows logging."""
+        if not self._should_log_user(username):
+            return
+        log_method = getattr(logger, level)
+        if username:
+            log_method(event, username=username, **kwargs)
+        else:
+            log_method(event, **kwargs)
 
     def _make_user_handler(self, allowed_user: str):
         """Create a client handler that only allows a specific user."""
@@ -269,8 +292,12 @@ class Socks5Server:
         """
         client_addr = writer.get_extra_info('peername')
         conn_id = f"{client_addr[0]}:{client_addr[1]}"
+        username: Optional[str] = None
 
-        logger.debug("New connection", client=conn_id)
+        # Only log new connection if no user restriction (can't filter yet)
+        # For user-specific listeners, we defer logging until we know the user
+        if allowed_user is None:
+            logger.debug("New connection", client=conn_id)
 
         try:
             # Set buffer limits
@@ -287,10 +314,9 @@ class Socks5Server:
 
             # Check if this listener is restricted to a specific user
             if allowed_user is not None and username != allowed_user:
-                logger.warning(
-                    "User not allowed on this port",
-                    username=username,
-                    allowed_user=allowed_user
+                self._log_if_allowed(
+                    "warning", "User not allowed on this port",
+                    username=username, allowed_user=allowed_user
                 )
                 return
 
@@ -313,11 +339,9 @@ class Socks5Server:
             # Check port restrictions for this user
             allowed_ports = user_settings.get("allowed_ports")
             if allowed_ports and target_port not in allowed_ports:
-                logger.warning(
-                    "Port not allowed for user",
-                    username=username,
-                    port=target_port,
-                    allowed=allowed_ports
+                self._log_if_allowed(
+                    "warning", "Port not allowed for user",
+                    username=username, port=target_port, allowed=allowed_ports
                 )
                 await self._send_reply(writer, Socks5Reply.NOT_ALLOWED)
                 return
@@ -366,8 +390,8 @@ class Socks5Server:
                     ),
                     timeout=connect_timeout
                 )
-                logger.debug(
-                    "Routing through Tor (isolated circuit)",
+                self._log_if_allowed(
+                    "debug", "Routing through Tor (isolated circuit)",
                     username=username,
                     bridge=conn_info.bridge_type,
                     security=conn_info.security_level
@@ -378,15 +402,13 @@ class Socks5Server:
                     timeout=self.CONNECTION_TIMEOUT
                 )
                 if use_tor:
-                    logger.warning(
-                        "Tor requested but no proxy available for bridge type",
-                        username=username,
-                        bridge=bridge_type
+                    self._log_if_allowed(
+                        "warning", "Tor requested but no proxy available for bridge type",
+                        username=username, bridge=bridge_type
                     )
-                logger.debug(
-                    "Direct connection",
-                    username=username,
-                    security=conn_info.security_level
+                self._log_if_allowed(
+                    "debug", "Direct connection",
+                    username=username, security=conn_info.security_level
                 )
 
             # Send success reply
@@ -402,20 +424,19 @@ class Socks5Server:
                 security_config = get_security_preset(SecurityLevel(conn_info.security_level))
                 if security_config.dpi_bypass.enabled:
                     dpi_bypass = DPIBypass(security_config.dpi_bypass)
-                    logger.debug(
-                        "DPI bypass enabled",
-                        username=username,
-                        security=conn_info.security_level
+                    self._log_if_allowed(
+                        "debug", "DPI bypass enabled",
+                        username=username, security=conn_info.security_level
                     )
 
             # Relay data between client and target
             await self._relay(reader, writer, target_reader, target_writer, conn_info, dpi_bypass)
 
         except asyncio.TimeoutError:
-            logger.warning("Connection timeout", client=conn_id)
+            self._log_if_allowed("warning", "Connection timeout", username=username, client=conn_id)
             await self._send_reply(writer, Socks5Reply.TTL_EXPIRED)
         except ConnectionRefusedError:
-            logger.warning("Connection refused by target", client=conn_id)
+            self._log_if_allowed("warning", "Connection refused by target", username=username, client=conn_id)
             await self._send_reply(writer, Socks5Reply.CONNECTION_REFUSED)
         except OSError as e:
             if "Network is unreachable" in str(e):
@@ -424,9 +445,9 @@ class Socks5Server:
                 await self._send_reply(writer, Socks5Reply.HOST_UNREACHABLE)
             else:
                 await self._send_reply(writer, Socks5Reply.GENERAL_FAILURE)
-            logger.error("Connection error", client=conn_id, error=str(e))
+            self._log_if_allowed("error", "Connection error", username=username, client=conn_id, error=str(e))
         except Exception as e:
-            logger.error("Unexpected error", client=conn_id, error=str(e))
+            self._log_if_allowed("error", "Unexpected error", username=username, client=conn_id, error=str(e))
             await self._send_reply(writer, Socks5Reply.GENERAL_FAILURE)
         finally:
             if conn_id in self._connections:
@@ -517,7 +538,9 @@ class Socks5Server:
             await self._send_auth_response(writer, True)
             return username
         else:
-            logger.warning("Authentication failed", username=username)
+            # Only log failed auth if user doesn't exist or allows logging
+            # (security: always log attempts for unknown users)
+            self._log_if_allowed("warning", "Authentication failed", username=username)
             await self._send_auth_response(writer, False)
             return None
 
@@ -600,7 +623,7 @@ class Socks5Server:
             await self._send_reply(writer, Socks5Reply.GENERAL_FAILURE)
             return None
 
-        logger.info("Connection request", target=f"{target_host}:{target_port}")
+        # Target info logged in _handle_client after user filtering check
         return target_host, target_port
 
     async def _send_reply(
@@ -890,8 +913,10 @@ class Socks5Server:
         # Run both relay tasks concurrently
         await asyncio.gather(relay_to_target(), relay_to_client(), return_exceptions=True)
 
-        logger.info(
-            "Connection closed",
+        # Only log connection details if user allows logging
+        self._log_if_allowed(
+            "info", "Connection closed",
+            username=conn_info.username,
             target=f"{conn_info.target_addr}:{conn_info.target_port}",
             sent=conn_info.bytes_sent,
             received=conn_info.bytes_received

@@ -488,6 +488,7 @@ def register_user_commands(app: typer.Typer):
         ports: Annotated[Optional[str], typer.Option("--ports", help="Allowed ports (comma-separated or 'all')")] = None,
         rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute (0 for default)")] = None,
         bind_port: Annotated[Optional[int], typer.Option("--bind-port", help="Custom port (0 to use shared port)")] = None,
+        logging: Annotated[Optional[bool], typer.Option("--logging/--no-logging", help="Enable or disable activity logging for this user")] = None,
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
         """Modify settings for an existing user.
@@ -497,7 +498,7 @@ def register_user_commands(app: typer.Typer):
         # Check if any modification flags were provided
         has_flags = any([use_tor is not None, bridge is not None, enabled is not None,
                          security is not None, ports is not None, rate_limit is not None,
-                         bind_port is not None])
+                         bind_port is not None, logging is not None])
         
         # Launch interactive wizard if no username or no flags
         if username is None or (username is not None and not has_flags):
@@ -580,6 +581,14 @@ def register_user_commands(app: typer.Typer):
                 auth_manager.set_user_bind_port(username, bind_port)
                 changes.append(f"Bind Port: {bind_port} (dedicated listener)")
 
+        # Update logging preference
+        if logging is not None:
+            auth_manager.set_user_logging_enabled(username, logging)
+            if logging:
+                changes.append("Logging: Enabled")
+            else:
+                changes.append("Logging: Disabled (no activity tracking)")
+
         if changes:
             console.print(f"[green]User '{username}' updated:[/green]")
             for change in changes:
@@ -587,7 +596,7 @@ def register_user_commands(app: typer.Typer):
             _offer_service_restart("Changes will apply after restart.")
         else:
             console.print("[yellow]No changes specified.[/yellow]")
-            console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit, --bind-port[/dim]")
+            console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit, --bind-port, --logging/--no-logging[/dim]")
 
     @user_app.command("enable")
     def user_enable(

@@ -49,6 +49,9 @@ class Credential:
     # Per-user bind address (optional)
     bind_port: Optional[int] = None  # None = use shared server port
 
+    # Privacy settings
+    logging_enabled: bool = True  # When False, no user activity is logged  # None = use shared server port
+
 
 class AuthManager:
     """
@@ -507,6 +510,7 @@ class AuthManager:
             "allowed_ports": getattr(cred, 'allowed_ports', None),
             "rate_limit": getattr(cred, 'rate_limit', None),
             "bind_port": getattr(cred, 'bind_port', None),
+            "logging_enabled": getattr(cred, 'logging_enabled', True),
         }
 
     def set_user_enabled(self, username: str, enabled: bool) -> bool:
@@ -714,6 +718,44 @@ class AuthManager:
         self._credentials[username].bind_port = bind_port
         self._save_credentials()
         logger.info("Updated bind port", username=username, bind_port=bind_port)
+        return True
+
+    def get_user_logging_enabled(self, username: str) -> Optional[bool]:
+        """
+        Check if logging is enabled for a user.
+
+        Args:
+            username: The username to check
+
+        Returns:
+            True if logging enabled, False if disabled, None if user not found
+        """
+        if username not in self._credentials:
+            return None
+        return getattr(self._credentials[username], 'logging_enabled', True)
+
+    def set_user_logging_enabled(self, username: str, enabled: bool) -> bool:
+        """
+        Enable or disable logging for a user.
+
+        When logging is disabled, no activity data (IPs, connections, targets)
+        will be recorded for this user - a server-side privacy guarantee.
+
+        Args:
+            username: The username to update
+            enabled: Whether logging should be enabled for this user
+
+        Returns:
+            True if updated, False if user not found
+        """
+        if username not in self._credentials:
+            return False
+
+        self._credentials[username].logging_enabled = enabled
+        self._save_credentials()
+        # Only log this change if logging is being enabled (respect the setting)
+        if enabled:
+            logger.info("Updated logging status", username=username, logging_enabled=enabled)
         return True
 
     def get_users_with_custom_ports(self) -> dict[str, int]:

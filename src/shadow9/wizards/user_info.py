@@ -84,6 +84,13 @@ def display_user_info(auth_manager: AuthManager, username: str) -> None:
 
     table.add_row("Security", info.get("security_level", "basic").upper())
 
+    # Display logging status (privacy setting)
+    logging_enabled = info.get("logging_enabled", True)
+    if logging_enabled:
+        table.add_row("Logging", "[green]Enabled[/green]")
+    else:
+        table.add_row("Logging", "[yellow]Disabled[/yellow] (no activity tracking)")
+
     # Display allowed ports
     allowed_ports = info.get("allowed_ports")
     if allowed_ports:
