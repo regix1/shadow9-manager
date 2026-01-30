@@ -75,3 +75,4 @@ config/.salt
 *.pem
 *.key
 secrets/
+nul
