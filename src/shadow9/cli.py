@@ -48,6 +48,7 @@ from .commands import (
     register_util_commands,
     register_api_commands,
 )
+from .menu import run_interactive_menu
 
 console = Console()
 
@@ -57,7 +58,7 @@ app = typer.Typer(
     help="Shadow9 Manager - Secure SOCKS5 Proxy with Tor Support",
     add_completion=True,
     rich_markup_mode="rich",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 
 
@@ -67,8 +68,9 @@ def version_callback(value: bool):
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: Annotated[bool, typer.Option("--version", callback=version_callback, is_eager=True, help="Show version and exit.")] = False,
 ):
     """
@@ -77,7 +79,15 @@ def main(
     A security-focused SOCKS5 proxy server that supports Tor network
     connectivity for accessing .onion addresses.
     """
-    pass
+    # If no command given, launch interactive menu
+    if ctx.invoked_subcommand is None:
+        run_interactive_menu()
+
+
+@app.command("menu")
+def menu_command():
+    """Launch the interactive menu."""
+    run_interactive_menu()
 
 
 # Register all commands from submodules

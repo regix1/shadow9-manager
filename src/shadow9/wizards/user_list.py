@@ -14,56 +14,69 @@ from .user_info import display_user_info
 console = Console()
 
 
-def run_user_list_wizard(auth_manager: AuthManager, config_path: str) -> None:
+def run_user_list_wizard(auth_manager: AuthManager, config_path: str) -> bool | None:
     """
     Interactive user list with actions.
     
     Args:
         auth_manager: The authentication manager
         config_path: Path to the configuration file
+    
+    Returns:
+        True on success, False on error, None on cancel.
     """
-    while True:
-        users = auth_manager.list_users()
-        
-        if not users:
-            console.print("[yellow]No users configured[/yellow]")
-            return
-        
-        console.print("\n[bold cyan]Users[/bold cyan]")
-        console.print("[dim]Select a user to perform actions[/dim]\n")
-        
-        # Display users with status
-        for i, username in enumerate(users, 1):
-            use_tor = auth_manager.get_user_tor_preference(username)
-            enabled = auth_manager.get_user_enabled(username)
-            security = auth_manager.get_user_security_level(username)
+    try:
+        while True:
+            users = auth_manager.list_users()
             
-            routing = "[green]Tor[/green]" if use_tor else "[yellow]Direct[/yellow]"
-            status = "" if enabled else " [red](disabled)[/red]"
+            if not users:
+                console.print("[yellow]No users configured[/yellow]")
+                return True
             
-            console.print(f"  [cyan]{i}.[/cyan] {username} ({routing}) [dim]{security}{status}[/dim]")
+            console.print("\n[bold cyan]Users[/bold cyan]")
+            console.print("[dim]Select a user to perform actions[/dim]\n")
+            
+            # Display users with status
+            for i, username in enumerate(users, 1):
+                use_tor = auth_manager.get_user_tor_preference(username)
+                enabled = auth_manager.get_user_enabled(username)
+                security = auth_manager.get_user_security_level(username)
+                
+                routing = "[green]Tor[/green]" if use_tor else "[yellow]Direct[/yellow]"
+                status = "" if enabled else " [red](disabled)[/red]"
+                
+                console.print(f"  [cyan]{i}.[/cyan] {username} ({routing}) [dim]{security}{status}[/dim]")
+            
+            console.print(f"\n  [dim]Enter 1-{len(users)} to select, 'n' to add new, 'q' to quit[/dim]")
+            
+            choice = typer.prompt("Select", default="q")
+            
+            if choice.lower() == 'q':
+                return True
+            
+            if choice.lower() == 'n':
+                from .user_new import run_user_wizard
+                run_user_wizard(config_path)
+                continue
+            
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(users):
+                    username = users[idx]
+                    _user_action_menu(auth_manager, username, config_path)
+                else:
+                    console.print(f"  [red]Please enter a number between 1 and {len(users)}[/red]")
+            except ValueError:
+                console.print("  [red]Invalid selection[/red]")
         
-        console.print(f"\n  [dim]Enter 1-{len(users)} to select, 'n' to add new, 'q' to quit[/dim]")
-        
-        choice = typer.prompt("Select", default="q")
-        
-        if choice.lower() == 'q':
-            return
-        
-        if choice.lower() == 'n':
-            from .user_new import run_user_wizard
-            run_user_wizard(config_path)
-            continue
-        
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(users):
-                username = users[idx]
-                _user_action_menu(auth_manager, username, config_path)
-            else:
-                console.print(f"  [red]Please enter a number between 1 and {len(users)}[/red]")
-        except ValueError:
-            console.print("  [red]Invalid selection[/red]")
+        return True
+    
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        return None
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        return False
 
 
 def _user_action_menu(auth_manager: AuthManager, username: str, config_path: str) -> None:

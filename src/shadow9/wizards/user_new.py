@@ -18,7 +18,7 @@ from ..paths import load_master_key
 console = Console()
 
 
-def run_user_wizard(config_path: str = "config/config.yaml") -> None:
+def run_user_wizard(config_path: str = "config/config.yaml") -> bool | None:
     """
     Interactive wizard to create a new user.
     
@@ -30,53 +30,64 @@ def run_user_wizard(config_path: str = "config/config.yaml") -> None:
     5. Security level
     6. Port restrictions (optional)
     7. Rate limiting (optional)
+    
+    Returns:
+        True on success, False on error, None on cancel.
     """
-    console.print(Panel(
-        "[bold cyan]New User Setup[/bold cyan]\n\n"
-        "This wizard will guide you through creating a new proxy user.",
-        border_style="cyan"
-    ))
+    try:
+        console.print(Panel(
+            "[bold cyan]New User Setup[/bold cyan]\n\n"
+            "This wizard will guide you through creating a new proxy user.",
+            border_style="cyan"
+        ))
+        
+        cfg = Config.load(Path(config_path)) if Path(config_path).exists() else Config()
+        
+        master_key = load_master_key()
+        
+        auth_manager = AuthManager(
+            credentials_file=cfg.get_credentials_file(),
+            master_key=master_key
+        )
+        
+        # Step 1: Username
+        username = _prompt_username(auth_manager)
+        
+        # Step 2: Password
+        password = _prompt_password(auth_manager)
+        
+        # Step 3: Routing
+        use_tor = _prompt_routing()
+        
+        # Step 4: Bridge (if Tor enabled)
+        bridge_type = _prompt_bridge() if use_tor else "none"
+        
+        # Step 5: Security level
+        security_level = _prompt_security()
+        
+        # Step 6: Port restrictions (optional)
+        allowed_ports = _prompt_ports()
+        
+        # Step 7: Rate limiting (optional)
+        rate_limit = _prompt_rate_limit()
+        
+        # Summary and confirmation
+        _show_summary(username, password, use_tor, bridge_type, security_level, allowed_ports, rate_limit)
+        
+        if not typer.confirm("\nCreate this user?", default=True):
+            console.print("[yellow]Cancelled[/yellow]")
+            return None
+        
+        # Create the user
+        return _create_user(auth_manager, username, password, use_tor, bridge_type, 
+                     security_level, allowed_ports, rate_limit)
     
-    cfg = Config.load(Path(config_path)) if Path(config_path).exists() else Config()
-    
-    master_key = load_master_key()
-    
-    auth_manager = AuthManager(
-        credentials_file=cfg.get_credentials_file(),
-        master_key=master_key
-    )
-    
-    # Step 1: Username
-    username = _prompt_username(auth_manager)
-    
-    # Step 2: Password
-    password = _prompt_password(auth_manager)
-    
-    # Step 3: Routing
-    use_tor = _prompt_routing()
-    
-    # Step 4: Bridge (if Tor enabled)
-    bridge_type = _prompt_bridge() if use_tor else "none"
-    
-    # Step 5: Security level
-    security_level = _prompt_security()
-    
-    # Step 6: Port restrictions (optional)
-    allowed_ports = _prompt_ports()
-    
-    # Step 7: Rate limiting (optional)
-    rate_limit = _prompt_rate_limit()
-    
-    # Summary and confirmation
-    _show_summary(username, password, use_tor, bridge_type, security_level, allowed_ports, rate_limit)
-    
-    if not typer.confirm("\nCreate this user?", default=True):
-        console.print("[yellow]Cancelled[/yellow]")
-        raise typer.Abort()
-    
-    # Create the user
-    _create_user(auth_manager, username, password, use_tor, bridge_type, 
-                 security_level, allowed_ports, rate_limit)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        return None
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        return False
 
 
 def _prompt_username(auth_manager: AuthManager) -> str:
@@ -228,8 +239,13 @@ def _show_summary(username: str, password: str, use_tor: bool, bridge_type: str,
 
 def _create_user(auth_manager: AuthManager, username: str, password: str,
                  use_tor: bool, bridge_type: str, security_level: str,
-                 allowed_ports: Optional[List[int]], rate_limit: Optional[int]) -> None:
-    """Create the user with the specified settings."""
+                 allowed_ports: Optional[List[int]], rate_limit: Optional[int]) -> bool:
+    """
+    Create the user with the specified settings.
+    
+    Returns:
+        True on success, False on error.
+    """
     try:
         auth_manager.add_user(
             username, password,
@@ -248,7 +264,8 @@ def _create_user(auth_manager: AuthManager, username: str, password: str,
             title="Success",
             border_style="green"
         ))
+        return True
         
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        return False

@@ -21,7 +21,7 @@ DEFAULT_API_PORT = 8080
 DEFAULT_CONFIG_PATH = "config/api.yaml"
 
 
-def run_api_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
+def run_api_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> dict | None:
     """
     Interactive wizard to configure API settings.
     
@@ -35,50 +35,60 @@ def run_api_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
         config_path: Path where the API config will be saved
         
     Returns:
-        Dictionary containing the configured API settings
+        Dictionary containing the configured API settings on success,
+        None on cancel or error.
     """
-    console.print(Panel(
-        "[bold cyan]API Configuration[/bold cyan]\n\n"
-        "This wizard will guide you through configuring the REST API.",
-        border_style="cyan"
-    ))
-    
-    # Load existing config if present
-    existing_config = _load_existing_config(config_path)
-    
-    # Step 1: API Key
-    api_key = _prompt_api_key(existing_config)
-    
-    # Step 2: API Host
-    api_host = _prompt_api_host(existing_config)
-    
-    # Step 3: API Port
-    api_port = _prompt_api_port(existing_config)
-    
-    # Step 4: Enable on startup
-    enable_on_startup = _prompt_enable_on_startup(existing_config)
-    
-    # Build config
-    config = {
-        "api": {
-            "key": api_key,
-            "host": api_host,
-            "port": api_port,
-            "enable_on_startup": enable_on_startup,
+    try:
+        console.print(Panel(
+            "[bold cyan]API Configuration[/bold cyan]\n\n"
+            "This wizard will guide you through configuring the REST API.",
+            border_style="cyan"
+        ))
+        
+        # Load existing config if present
+        existing_config = _load_existing_config(config_path)
+        
+        # Step 1: API Key
+        api_key = _prompt_api_key(existing_config)
+        
+        # Step 2: API Host
+        api_host = _prompt_api_host(existing_config)
+        
+        # Step 3: API Port
+        api_port = _prompt_api_port(existing_config)
+        
+        # Step 4: Enable on startup
+        enable_on_startup = _prompt_enable_on_startup(existing_config)
+        
+        # Build config
+        config = {
+            "api": {
+                "key": api_key,
+                "host": api_host,
+                "port": api_port,
+                "enable_on_startup": enable_on_startup,
+            }
         }
-    }
+        
+        # Show summary and confirm
+        _show_summary(config)
+        
+        if not typer.confirm("\nSave this configuration?", default=True):
+            console.print("[yellow]Cancelled[/yellow]")
+            return None
+        
+        # Save configuration
+        if not _save_config(config, config_path):
+            return None
+        
+        return config
     
-    # Show summary and confirm
-    _show_summary(config)
-    
-    if not typer.confirm("\nSave this configuration?", default=True):
-        console.print("[yellow]Cancelled[/yellow]")
-        raise typer.Abort()
-    
-    # Save configuration
-    _save_config(config, config_path)
-    
-    return config
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        return None
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        return None
 
 
 def _load_existing_config(config_path: str) -> Optional[dict]:
@@ -213,8 +223,13 @@ def _show_summary(config: dict) -> None:
     console.print(table)
 
 
-def _save_config(config: dict, config_path: str) -> None:
-    """Save the API configuration to a YAML file."""
+def _save_config(config: dict, config_path: str) -> bool:
+    """
+    Save the API configuration to a YAML file.
+    
+    Returns:
+        True on success, False on error.
+    """
     path = Path(config_path)
     
     # Ensure parent directory exists
@@ -232,9 +247,10 @@ def _save_config(config: dict, config_path: str) -> None:
             title="Success",
             border_style="green"
         ))
+        return True
     except IOError as e:
         console.print(f"[red]Error saving configuration: {e}[/red]")
-        raise typer.Exit(1)
+        return False
 
 
 def display_api_config(config_path: str = DEFAULT_CONFIG_PATH) -> None:

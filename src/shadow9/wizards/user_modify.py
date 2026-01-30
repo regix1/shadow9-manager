@@ -19,7 +19,7 @@ from ..paths import load_master_key
 console = Console()
 
 
-def run_user_modify_wizard(config_path: str = "config/config.yaml", preselected_username: str = None) -> None:
+def run_user_modify_wizard(config_path: str = "config/config.yaml", preselected_username: str = None) -> bool | None:
     """
     Interactive wizard to modify an existing user.
     
@@ -29,95 +29,108 @@ def run_user_modify_wizard(config_path: str = "config/config.yaml", preselected_
     3. Choose what to modify
     4. Walk through selected option(s)
     5. Show summary and confirm changes
+    
+    Returns:
+        True on success, False on error, None on cancel.
     """
-    cfg = Config.load(Path(config_path)) if Path(config_path).exists() else Config()
-    
-    master_key = load_master_key()
-    
-    auth_manager = AuthManager(
-        credentials_file=cfg.get_credentials_file(),
-        master_key=master_key
-    )
-    
-    users = auth_manager.list_users()
-    
-    if not users:
-        console.print("[yellow]No users configured. Use 'shadow9 user new' to create one.[/yellow]")
-        raise typer.Exit(0)
-    
-    # Step 1: Select user
-    if preselected_username:
-        if preselected_username not in users:
-            console.print(f"[red]User '{preselected_username}' not found[/red]")
-            raise typer.Exit(1)
-        username = preselected_username
-    else:
-        username = _select_user(auth_manager, users)
-    
-    # Get current user info
-    info = auth_manager.get_user_info(username)
-    if not info:
-        console.print(f"[red]Could not retrieve info for '{username}'[/red]")
-        raise typer.Exit(1)
-    
-    # Show current settings
-    _show_current_settings(info)
-    
-    # Main modification loop
-    changes = []
-    while True:
-        action = _prompt_modification_menu()
+    try:
+        cfg = Config.load(Path(config_path)) if Path(config_path).exists() else Config()
         
-        if action == "done":
-            break
-        elif action == "routing":
-            change = _modify_routing(auth_manager, username, info)
-            if change:
-                changes.append(change)
-                # Update local info
-                info["use_tor"] = auth_manager.get_user_tor_preference(username)
-        elif action == "bridge":
-            change = _modify_bridge(auth_manager, username, info)
-            if change:
-                changes.append(change)
-                info["bridge_type"] = auth_manager.get_user_bridge_type(username)
-        elif action == "security":
-            change = _modify_security(auth_manager, username, info)
-            if change:
-                changes.append(change)
-                info["security_level"] = auth_manager.get_user_security_level(username)
-        elif action == "ports":
-            change = _modify_ports(auth_manager, username, info)
-            if change:
-                changes.append(change)
-                info["allowed_ports"] = auth_manager.get_user_allowed_ports(username)
-        elif action == "rate_limit":
-            change = _modify_rate_limit(auth_manager, username, info)
-            if change:
-                changes.append(change)
-                info["rate_limit"] = auth_manager.get_user_rate_limit(username)
-        elif action == "status":
-            change = _modify_status(auth_manager, username, info)
-            if change:
-                changes.append(change)
-                info["enabled"] = auth_manager.get_user_enabled(username)
-        elif action == "logging":
-            change = _modify_logging(auth_manager, username, info)
-            if change:
-                changes.append(change)
-                info["logging_enabled"] = auth_manager.get_user_logging_enabled(username)
+        master_key = load_master_key()
+        
+        auth_manager = AuthManager(
+            credentials_file=cfg.get_credentials_file(),
+            master_key=master_key
+        )
+        
+        users = auth_manager.list_users()
+        
+        if not users:
+            console.print("[yellow]No users configured. Use 'shadow9 user new' to create one.[/yellow]")
+            return True
+        
+        # Step 1: Select user
+        if preselected_username:
+            if preselected_username not in users:
+                console.print(f"[red]User '{preselected_username}' not found[/red]")
+                return False
+            username = preselected_username
+        else:
+            username = _select_user(auth_manager, users)
+        
+        # Get current user info
+        info = auth_manager.get_user_info(username)
+        if not info:
+            console.print(f"[red]Could not retrieve info for '{username}'[/red]")
+            return False
+        
+        # Show current settings
+        _show_current_settings(info)
+        
+        # Main modification loop
+        changes = []
+        while True:
+            action = _prompt_modification_menu()
+            
+            if action == "done":
+                break
+            elif action == "routing":
+                change = _modify_routing(auth_manager, username, info)
+                if change:
+                    changes.append(change)
+                    # Update local info
+                    info["use_tor"] = auth_manager.get_user_tor_preference(username)
+            elif action == "bridge":
+                change = _modify_bridge(auth_manager, username, info)
+                if change:
+                    changes.append(change)
+                    info["bridge_type"] = auth_manager.get_user_bridge_type(username)
+            elif action == "security":
+                change = _modify_security(auth_manager, username, info)
+                if change:
+                    changes.append(change)
+                    info["security_level"] = auth_manager.get_user_security_level(username)
+            elif action == "ports":
+                change = _modify_ports(auth_manager, username, info)
+                if change:
+                    changes.append(change)
+                    info["allowed_ports"] = auth_manager.get_user_allowed_ports(username)
+            elif action == "rate_limit":
+                change = _modify_rate_limit(auth_manager, username, info)
+                if change:
+                    changes.append(change)
+                    info["rate_limit"] = auth_manager.get_user_rate_limit(username)
+            elif action == "status":
+                change = _modify_status(auth_manager, username, info)
+                if change:
+                    changes.append(change)
+                    info["enabled"] = auth_manager.get_user_enabled(username)
+            elif action == "logging":
+                change = _modify_logging(auth_manager, username, info)
+                if change:
+                    changes.append(change)
+                    info["logging_enabled"] = auth_manager.get_user_logging_enabled(username)
+        
+        # Show summary
+        if changes:
+            console.print(Panel(
+                "[bold green]Changes applied:[/bold green]\n\n" +
+                "\n".join(f"  • {change}" for change in changes),
+                title="Summary",
+                border_style="green"
+            ))
+            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+        else:
+            console.print("[yellow]No changes were made.[/yellow]")
+        
+        return True
     
-    # Show summary
-    if changes:
-        console.print(Panel(
-            "[bold green]Changes applied:[/bold green]\n\n" +
-            "\n".join(f"  • {change}" for change in changes),
-            title="Summary",
-            border_style="green"
-        ))
-        console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
-    else:
-        console.print("[yellow]No changes were made.[/yellow]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        return None
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        return False
 
 
 def _select_user(auth_manager: AuthManager, users: List[str]) -> str:

@@ -111,6 +111,26 @@ def register_user_commands(app: typer.Typer):
         
         If username or password not provided, secure random values are generated.
         """
+        try:
+            _user_generate_impl(username, password, use_tor, bridge, security, ports, rate_limit, bind_port, logging, config)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+        except typer.Abort:
+            pass  # User cancelled via prompt
+
+    def _user_generate_impl(
+        username: Optional[str],
+        password: Optional[str],
+        use_tor: Optional[bool],
+        bridge: Optional[BridgeChoice],
+        security: Optional[SecurityChoice],
+        ports: Optional[str],
+        rate_limit: Optional[int],
+        bind_port: Optional[int],
+        logging: Optional[bool],
+        config: str,
+    ):
+        """Implementation of user_generate command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         # Prompt for username if not specified
@@ -307,6 +327,20 @@ def register_user_commands(app: typer.Typer):
         all_users: Annotated[bool, typer.Option("--all", help="Remove all users")] = False,
     ):
         """Remove a user (interactive menu if no username provided)."""
+        try:
+            _user_remove_impl(username, config, yes, all_users)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+        except typer.Abort:
+            pass  # User cancelled via prompt
+
+    def _user_remove_impl(
+        username: Optional[str],
+        config: str,
+        yes: bool,
+        all_users: bool,
+    ):
+        """Implementation of user_remove command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         master_key = load_master_key()
@@ -408,6 +442,15 @@ def register_user_commands(app: typer.Typer):
         interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Interactive mode with actions")] = False,
     ):
         """List all users (use -i for interactive mode with actions)."""
+        try:
+            _user_list_impl(config, interactive)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+        except typer.Abort:
+            pass  # User cancelled via prompt
+
+    def _user_list_impl(config: str, interactive: bool):
+        """Implementation of user_list command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         master_key = load_master_key()
@@ -447,6 +490,15 @@ def register_user_commands(app: typer.Typer):
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
         """Show detailed information about a user."""
+        try:
+            _user_info_impl(username, config)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+        except typer.Abort:
+            pass  # User cancelled via prompt
+
+    def _user_info_impl(username: Optional[str], config: str):
+        """Implementation of user_info command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         master_key = load_master_key()
@@ -462,7 +514,7 @@ def register_user_commands(app: typer.Typer):
             
             if not users:
                 console.print("[yellow]No users configured[/yellow]")
-                raise typer.Exit(0)
+                return
             
             while True:
                 console.print("\n[bold cyan]Select a user to view:[/bold cyan]\n")
@@ -509,6 +561,26 @@ def register_user_commands(app: typer.Typer):
 
         Run without arguments for interactive mode, or specify username and flags for direct modification.
         """
+        try:
+            _user_modify_impl(username, use_tor, bridge, enabled, security, ports, rate_limit, bind_port, logging, config)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+        except typer.Abort:
+            pass  # User cancelled via prompt
+
+    def _user_modify_impl(
+        username: Optional[str],
+        use_tor: Optional[bool],
+        bridge: Optional[BridgeChoice],
+        enabled: Optional[bool],
+        security: Optional[SecurityChoice],
+        ports: Optional[str],
+        rate_limit: Optional[int],
+        bind_port: Optional[int],
+        logging: Optional[bool],
+        config: str,
+    ):
+        """Implementation of user_modify command."""
         # Check if any modification flags were provided
         has_flags = any([use_tor is not None, bridge is not None, enabled is not None,
                          security is not None, ports is not None, rate_limit is not None,
@@ -618,6 +690,15 @@ def register_user_commands(app: typer.Typer):
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
         """Enable a user account."""
+        try:
+            _user_enable_impl(username, config)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+        except typer.Abort:
+            pass  # User cancelled via prompt
+
+    def _user_enable_impl(username: Optional[str], config: str):
+        """Implementation of user_enable command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         master_key = load_master_key()
@@ -690,6 +771,15 @@ def register_user_commands(app: typer.Typer):
         config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
     ):
         """Disable a user account (prevents login)."""
+        try:
+            _user_disable_impl(username, config)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+        except typer.Abort:
+            pass  # User cancelled via prompt
+
+    def _user_disable_impl(username: Optional[str], config: str):
+        """Implementation of user_disable command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         master_key = load_master_key()

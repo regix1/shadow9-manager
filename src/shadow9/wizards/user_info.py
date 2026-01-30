@@ -14,44 +14,57 @@ from ..auth import AuthManager
 console = Console()
 
 
-def run_user_info_wizard(auth_manager: AuthManager) -> None:
+def run_user_info_wizard(auth_manager: AuthManager) -> bool | None:
     """
     Interactive wizard to view user information.
     
     Args:
         auth_manager: The authentication manager
+    
+    Returns:
+        True on success, False on error, None on cancel.
     """
-    users = auth_manager.list_users()
+    try:
+        users = auth_manager.list_users()
+        
+        if not users:
+            console.print("[yellow]No users configured[/yellow]")
+            return True
+        
+        while True:
+            console.print("\n[bold cyan]Select a user to view:[/bold cyan]\n")
+            for i, user in enumerate(users, 1):
+                use_tor = auth_manager.get_user_tor_preference(user)
+                routing = "[green]Tor[/green]" if use_tor else "[yellow]Direct[/yellow]"
+                console.print(f"  [cyan]{i}[/cyan]. {user} ({routing})")
+            
+            console.print(f"\n  [dim]Enter number 1-{len(users)}, or 'q' to quit[/dim]")
+            
+            choice = typer.prompt("  Select user", default="q")
+            
+            if choice.lower() == 'q':
+                return True
+            
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(users):
+                    display_user_info(auth_manager, users[idx])
+                    
+                    if not typer.confirm("\nView another user?", default=False):
+                        return True
+                else:
+                    console.print(f"  [red]Please enter a number between 1 and {len(users)}[/red]")
+            except ValueError:
+                console.print("  [red]Please enter a valid number[/red]")
+        
+        return True
     
-    if not users:
-        console.print("[yellow]No users configured[/yellow]")
-        return
-    
-    while True:
-        console.print("\n[bold cyan]Select a user to view:[/bold cyan]\n")
-        for i, user in enumerate(users, 1):
-            use_tor = auth_manager.get_user_tor_preference(user)
-            routing = "[green]Tor[/green]" if use_tor else "[yellow]Direct[/yellow]"
-            console.print(f"  [cyan]{i}[/cyan]. {user} ({routing})")
-        
-        console.print(f"\n  [dim]Enter number 1-{len(users)}, or 'q' to quit[/dim]")
-        
-        choice = typer.prompt("  Select user", default="q")
-        
-        if choice.lower() == 'q':
-            return
-        
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(users):
-                display_user_info(auth_manager, users[idx])
-                
-                if not typer.confirm("\nView another user?", default=False):
-                    return
-            else:
-                console.print(f"  [red]Please enter a number between 1 and {len(users)}[/red]")
-        except ValueError:
-            console.print("  [red]Please enter a valid number[/red]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        return None
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        return False
 
 
 def display_user_info(auth_manager: AuthManager, username: str) -> None:

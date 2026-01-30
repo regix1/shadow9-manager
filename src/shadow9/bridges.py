@@ -12,10 +12,12 @@ Bridge configurations are in bridge_list.py
 """
 
 import asyncio
+import json
 import subprocess
 import shutil
 import tempfile
 import platform
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
 from dataclasses import dataclass, field
@@ -36,6 +38,66 @@ logger = structlog.get_logger(__name__)
 # This cache persists for the lifetime of the process, so subsequent users
 # don't need to re-run speedtests. Cleared on service restart.
 _bridge_speedtest_cache: dict[str, list[tuple["Bridge", float | None]]] = {}
+
+# Persistent bridge cache configuration
+BRIDGE_CACHE_FILE = Path.home() / ".shadow9" / "bridge_cache.json"
+CACHE_MAX_AGE_DAYS = 7
+CACHE_BRIDGE_TIMEOUT_SECONDS = 5.0
+
+
+def _get_bridge_name(bridge: "Bridge") -> str:
+    """Get a displayable name for a bridge from its params."""
+    return bridge.params.get("front", bridge.params.get("url", "unknown"))
+
+
+def _load_bridge_cache(bridge_type: str) -> dict | None:
+    """Load cached bridge data from file."""
+    try:
+        if not BRIDGE_CACHE_FILE.exists():
+            return None
+        with open(BRIDGE_CACHE_FILE) as f:
+            cache = json.load(f)
+        if bridge_type not in cache:
+            return None
+        entry = cache[bridge_type]
+        # Check if cache is expired (7 days)
+        cached_time = datetime.fromisoformat(entry["timestamp"])
+        age = datetime.now() - cached_time
+        if age > timedelta(days=CACHE_MAX_AGE_DAYS):
+            logger.info("Bridge cache expired", bridge_type=bridge_type, age_days=age.days)
+            return None
+        return entry
+    except Exception as e:
+        logger.warning("Failed to load bridge cache", error=str(e))
+        return None
+
+
+def _save_bridge_cache(
+    bridge_type: str,
+    bridge_name: str,
+    speed: float,
+    sorted_results: list[tuple["Bridge", float | None]],
+) -> None:
+    """Save successful bridge to cache file."""
+    try:
+        BRIDGE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cache = {}
+        if BRIDGE_CACHE_FILE.exists():
+            with open(BRIDGE_CACHE_FILE) as f:
+                cache = json.load(f)
+        cache[bridge_type] = {
+            "bridge_name": bridge_name,
+            "speed": speed,
+            "timestamp": datetime.now().isoformat(),
+            "sorted_results": [
+                (_get_bridge_name(b), s) for b, s in sorted_results if s is not None
+            ],
+        }
+        with open(BRIDGE_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+        logger.info("Saved bridge cache", bridge_type=bridge_type, bridge=bridge_name)
+    except Exception as e:
+        logger.warning("Failed to save bridge cache", error=str(e))
 
 
 @dataclass
@@ -263,9 +325,10 @@ class TorBridgeConnector:
         Start a Tor process configured with bridges.
         
         For snowflake bridges, this will:
-        1. Run a quick speed test on all bridges (measure time to reach 15%)
-        2. Sort bridges by speed (fastest first)
-        3. Try to fully connect using the fastest bridges first
+        1. Try the cached bridge first (if valid and responds within 5s)
+        2. If no cache or cached bridge fails, run a quick speed test on all bridges
+        3. Sort bridges by speed (fastest first)
+        4. Try to fully connect using the fastest bridges first
 
         Returns:
             Tuple of (socks_host, socks_port)
@@ -285,16 +348,48 @@ class TorBridgeConnector:
             # No fallback list, use default behavior
             return await self._try_single_bridge(None)
         
-        # Phase 1: Speed test all bridges (with caching)
+        # Phase 0: Try persistent cached bridge first
         cache_key = self.config.bridge_type.value
         
+        cached = _load_bridge_cache(cache_key)
+        if cached:
+            cached_name = cached["bridge_name"]
+            # Find the bridge object for this name
+            cached_bridge = next(
+                (b for b in fallback_bridges if _get_bridge_name(b) == cached_name),
+                None,
+            )
+            if cached_bridge:
+                print(f"\n  Testing cached bridge: {cached_name}...")
+                test_speed, test_error = await self._quick_bridge_test(
+                    cached_bridge, timeout=CACHE_BRIDGE_TIMEOUT_SECONDS
+                )
+                if test_speed is not None and test_speed <= CACHE_BRIDGE_TIMEOUT_SECONDS:
+                    print(f"  ✓ Cached bridge works ({test_speed:.1f}s)")
+                    logger.info("Using cached bridge", bridge=cached_name, speed=test_speed)
+                    # Try full connection with this bridge
+                    try:
+                        result = await self._try_single_bridge(cached_bridge, timeout=180)
+                        self._current_bridge = cached_bridge
+                        print(f"  ✓ Connected using cached bridge: {cached_name}")
+                        return result
+                    except RuntimeError as e:
+                        logger.warning(f"Cached bridge {cached_name} failed full connection: {e}")
+                        print(f"  ✗ Cached bridge failed full connection, retesting all...")
+                        await self._cleanup_tor()
+                else:
+                    reason = test_error if test_error else f"too slow ({test_speed:.1f}s > {CACHE_BRIDGE_TIMEOUT_SECONDS}s)"
+                    print(f"  ✗ Cached bridge failed: {reason}")
+                    logger.info("Cached bridge failed, will retest all", bridge=cached_name, reason=reason)
+        
+        # Phase 1: Speed test all bridges (with in-memory caching)
         if cache_key in _bridge_speedtest_cache:
             # Use cached speedtest results
             sorted_bridges = _bridge_speedtest_cache[cache_key]
             print(f"\n  Using cached speedtest results for {len(sorted_bridges)} bridges...")
             print("\n  Cached speed test results:")
             for bridge, speed in sorted_bridges:
-                bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+                bridge_name = _get_bridge_name(bridge)
                 if speed is not None:
                     print(f"    {bridge_name}: {speed:.1f}s to 15%")
                 else:
@@ -313,7 +408,7 @@ class TorBridgeConnector:
             # Show speed test results
             print("\n  Speed test results:")
             for bridge, speed in sorted_bridges:
-                bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+                bridge_name = _get_bridge_name(bridge)
                 if speed is not None:
                     print(f"    {bridge_name}: {speed:.1f}s to 15%")
                 else:
@@ -338,7 +433,7 @@ class TorBridgeConnector:
         # Phase 2: Try to fully connect using sorted bridges (fastest first)
         last_error = None
         for i, (bridge, speed) in enumerate(working_bridges):
-            bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
+            bridge_name = _get_bridge_name(bridge)
             logger.info(
                 f"Connecting with bridge {i+1}/{len(working_bridges)}: {bridge_name} ({speed:.1f}s)",
                 bridge_type=self.config.bridge_type.value
@@ -350,6 +445,10 @@ class TorBridgeConnector:
                 self._current_bridge = bridge
                 logger.info(f"Successfully connected using bridge: {bridge_name}")
                 print(f"  ✓ Connected using: {bridge_name}")
+                
+                # Save successful bridge to persistent cache
+                _save_bridge_cache(cache_key, bridge_name, speed, sorted_bridges)
+                
                 return result
             except RuntimeError as e:
                 last_error = e

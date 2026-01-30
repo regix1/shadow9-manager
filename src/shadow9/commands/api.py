@@ -89,7 +89,12 @@ def setup(
     - Host and port settings
     - Startup options
     """
-    run_api_setup_wizard(config_path)
+    try:
+        run_api_setup_wizard(config_path)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+    except typer.Abort:
+        pass  # User cancelled via prompt
 
 
 @api_app.command("start")
@@ -110,6 +115,16 @@ def start(
         shadow9 api start --host 0.0.0.0 --port 9000
     """
     try:
+        _start_impl(config_path, host, port, reload)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Server stopped[/yellow]")
+    except typer.Abort:
+        pass  # User cancelled via prompt
+
+
+def _start_impl(config_path: str, host: Optional[str], port: Optional[int], reload: bool) -> None:
+    """Implementation of start command."""
+    try:
         import uvicorn
     except ImportError:
         console.print("[red]FastAPI not installed. Run: pip install fastapi uvicorn[/red]")
@@ -122,7 +137,7 @@ def start(
         console.print("[yellow]No API configuration found.[/yellow]")
         console.print(f"[dim]Run 'shadow9 api setup' to configure the API.[/dim]")
         if not typer.confirm("Start with defaults?", default=False):
-            raise typer.Exit(1)
+            return
         api_host = host or "127.0.0.1"
         api_port = port or 8080
         api_key = None
@@ -175,7 +190,7 @@ def status(
     if not config or "api" not in config:
         console.print("[yellow]No API configuration found.[/yellow]")
         console.print(f"[dim]Run 'shadow9 api setup' to configure the API.[/dim]")
-        raise typer.Exit(0)
+        return
 
     api_config = config["api"]
     api_host = api_config.get("host", "127.0.0.1")
@@ -233,6 +248,16 @@ def key(
         shadow9 api key --show    # Show full key
         shadow9 api key -r        # Regenerate key
     """
+    try:
+        _key_impl(config_path, regenerate, show)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+    except typer.Abort:
+        pass  # User cancelled via prompt
+
+
+def _key_impl(config_path: str, regenerate: bool, show: bool) -> None:
+    """Implementation of key command."""
     config = _load_api_config(config_path)
 
     if regenerate:
@@ -261,14 +286,14 @@ def key(
     if not config or "api" not in config:
         console.print("[yellow]No API configuration found.[/yellow]")
         console.print(f"[dim]Run 'shadow9 api setup' to configure an API key.[/dim]")
-        raise typer.Exit(0)
+        return
 
     api_key = config["api"].get("key", "")
 
     if not api_key:
         console.print("[yellow]No API key configured.[/yellow]")
         console.print("[dim]Use --regenerate to generate a new key.[/dim]")
-        raise typer.Exit(0)
+        return
 
     if show:
         console.print(f"[cyan]{api_key}[/cyan]")
