@@ -40,7 +40,15 @@ logger = structlog.get_logger(__name__)
 _bridge_speedtest_cache: dict[str, list[tuple["Bridge", float | None]]] = {}
 
 # Persistent bridge cache configuration
-BRIDGE_CACHE_FILE = Path.home() / ".shadow9" / "bridge_cache.json"
+# Use centralized paths module for bridge cache location
+# Fallback to /tmp if primary location fails
+def _get_bridge_cache_file() -> Path:
+    """Get the bridge cache file path with fallback support."""
+    from .paths import get_bridge_cache_file
+    return get_bridge_cache_file()
+
+# Fallback cache location if primary fails (e.g., read-only filesystem)
+FALLBACK_BRIDGE_CACHE_FILE = Path("/tmp/shadow9_bridge_cache.json")
 CACHE_MAX_AGE_DAYS = 7
 CACHE_BRIDGE_TIMEOUT_SECONDS = 5.0
 
@@ -52,24 +60,31 @@ def _get_bridge_name(bridge: "Bridge") -> str:
 
 def _load_bridge_cache(bridge_type: str) -> dict | None:
     """Load cached bridge data from file."""
-    try:
-        if not BRIDGE_CACHE_FILE.exists():
-            return None
-        with open(BRIDGE_CACHE_FILE) as f:
-            cache = json.load(f)
-        if bridge_type not in cache:
-            return None
-        entry = cache[bridge_type]
-        # Check if cache is expired (7 days)
-        cached_time = datetime.fromisoformat(entry["timestamp"])
-        age = datetime.now() - cached_time
-        if age > timedelta(days=CACHE_MAX_AGE_DAYS):
-            logger.info("Bridge cache expired", bridge_type=bridge_type, age_days=age.days)
-            return None
-        return entry
-    except Exception as e:
-        logger.warning("Failed to load bridge cache", error=str(e))
-        return None
+    # Try primary location first, then fallback
+    cache_files = [_get_bridge_cache_file(), FALLBACK_BRIDGE_CACHE_FILE]
+    
+    for cache_file in cache_files:
+        try:
+            if not cache_file.exists():
+                continue
+            with open(cache_file) as f:
+                cache = json.load(f)
+            if bridge_type not in cache:
+                continue
+            entry = cache[bridge_type]
+            # Check if cache is expired (7 days)
+            cached_time = datetime.fromisoformat(entry["timestamp"])
+            age = datetime.now() - cached_time
+            if age > timedelta(days=CACHE_MAX_AGE_DAYS):
+                logger.info("Bridge cache expired", bridge_type=bridge_type, age_days=age.days)
+                continue
+            logger.debug("Loaded bridge cache", source=str(cache_file), bridge_type=bridge_type)
+            return entry
+        except Exception as e:
+            logger.debug("Failed to load bridge cache from location", path=str(cache_file), error=str(e))
+            continue
+    
+    return None
 
 
 def _save_bridge_cache(
@@ -78,26 +93,44 @@ def _save_bridge_cache(
     speed: float,
     sorted_results: list[tuple["Bridge", float | None]],
 ) -> None:
-    """Save successful bridge to cache file."""
-    try:
-        BRIDGE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        cache = {}
-        if BRIDGE_CACHE_FILE.exists():
-            with open(BRIDGE_CACHE_FILE) as f:
-                cache = json.load(f)
-        cache[bridge_type] = {
-            "bridge_name": bridge_name,
-            "speed": speed,
-            "timestamp": datetime.now().isoformat(),
-            "sorted_results": [
-                (_get_bridge_name(b), s) for b, s in sorted_results if s is not None
-            ],
-        }
-        with open(BRIDGE_CACHE_FILE, "w") as f:
-            json.dump(cache, f, indent=2)
-        logger.info("Saved bridge cache", bridge_type=bridge_type, bridge=bridge_name)
-    except Exception as e:
-        logger.warning("Failed to save bridge cache", error=str(e))
+    """Save successful bridge to cache file with fallback support."""
+    cache_data = {
+        "bridge_name": bridge_name,
+        "speed": speed,
+        "timestamp": datetime.now().isoformat(),
+        "sorted_results": [
+            (_get_bridge_name(b), s) for b, s in sorted_results if s is not None
+        ],
+    }
+    
+    # Try primary location first, then fallback
+    cache_files = [_get_bridge_cache_file(), FALLBACK_BRIDGE_CACHE_FILE]
+    
+    for cache_file in cache_files:
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache = {}
+            if cache_file.exists():
+                with open(cache_file) as f:
+                    cache = json.load(f)
+            cache[bridge_type] = cache_data
+            with open(cache_file, "w") as f:
+                json.dump(cache, f, indent=2)
+            logger.info("Saved bridge cache", bridge_type=bridge_type, bridge=bridge_name, location=str(cache_file))
+            return  # Success, no need to try fallback
+        except PermissionError as e:
+            logger.debug("Permission denied for cache location, trying fallback", path=str(cache_file))
+            continue
+        except OSError as e:
+            # Catch read-only filesystem errors (errno 30) and other OS errors
+            logger.debug("OS error saving cache, trying fallback", path=str(cache_file), error=str(e))
+            continue
+        except Exception as e:
+            logger.warning("Unexpected error saving bridge cache", path=str(cache_file), error=str(e))
+            continue
+    
+    # All locations failed
+    logger.warning("Failed to save bridge cache to any location")
 
 
 @dataclass

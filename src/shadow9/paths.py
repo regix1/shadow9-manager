@@ -151,6 +151,14 @@ class Shadow9Paths:
     def config_file(self) -> Path:
         """Get the main config.yaml file path."""
         return self.config_dir / self.CONFIG_FILE
+
+    # Bridge cache file name
+    BRIDGE_CACHE_FILE = "bridge_cache.json"
+
+    @property
+    def bridge_cache_file(self) -> Path:
+        """Get the bridge cache file path (in config directory)."""
+        return self.config_dir / self.BRIDGE_CACHE_FILE
     
     def get_user_dir(self, username: str) -> Path:
         """
@@ -348,6 +356,11 @@ def get_credentials_file() -> Path:
 def get_config_dir() -> Path:
     """Get the config directory path."""
     return get_paths().config_dir
+
+
+def get_bridge_cache_file() -> Path:
+    """Get the bridge cache file path."""
+    return get_paths().bridge_cache_file
 
 
 def get_users_dir() -> Path:
