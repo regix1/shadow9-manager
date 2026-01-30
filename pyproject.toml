@@ -25,16 +25,27 @@ classifiers = [
 ]
 
 dependencies = [
+    # Core async networking
     "aiohttp>=3.9.0",
     "aiohttp-socks>=0.8.4",
     "PySocks>=1.7.1",
+    # Security and encryption
     "cryptography>=41.0.0",
     "argon2-cffi>=23.1.0",
+    # Configuration
     "pyyaml>=6.0.1",
     "python-dotenv>=1.0.0",
+    # CLI
     "typer>=0.9.0",
     "rich>=13.7.0",
+    # Logging
     "structlog>=24.1.0",
+    # REST API (FastAPI)
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    # Strong typing (Pydantic v2)
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +58,7 @@ dev = [
 
 [project.scripts]
 shadow9 = "shadow9.cli:cli"
+shadow9-api = "shadow9.api.app:run_server"
 
 [tool.setuptools.packages.find]
 where = ["src"]

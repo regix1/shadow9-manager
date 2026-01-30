@@ -76,3 +76,4 @@ config/.salt
 *.key
 secrets/
 nul
+.claude-flow/agents/store.json

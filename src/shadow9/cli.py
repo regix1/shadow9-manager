@@ -46,6 +46,7 @@ from .commands import (
     register_user_commands,
     register_service_commands,
     register_util_commands,
+    register_api_commands,
 )
 
 console = Console()
@@ -84,6 +85,7 @@ register_server_commands(app)
 register_user_commands(app)
 register_service_commands(app)
 register_util_commands(app)
+register_api_commands(app)
 
 
 # Entry point for the CLI

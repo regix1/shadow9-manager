@@ -111,6 +111,53 @@ def register_server_commands(app: typer.Typer):
                 except Exception as e:
                     console.print(f"[red]Error stopping server: {e}[/red]")
 
+    @app.command()
+    def api(
+        host: Annotated[str, typer.Option("--host", "-h", help="Host to bind to")] = "127.0.0.1",
+        port: Annotated[int, typer.Option("--port", "-p", help="Port to listen on")] = 8080,
+        reload: Annotated[bool, typer.Option("--reload", "-r", help="Enable auto-reload")] = False,
+    ):
+        """Start the REST API server.
+
+        The API provides programmatic access to user management and server control.
+        Requires SHADOW9_API_KEY environment variable for authentication.
+        
+        Example:
+            shadow9 api --host 0.0.0.0 --port 8080
+            
+        API docs will be available at http://localhost:8080/api/docs
+        """
+        try:
+            import uvicorn
+        except ImportError:
+            console.print("[red]FastAPI not installed. Run: pip install fastapi uvicorn[/red]")
+            raise typer.Exit(1)
+        
+        # Check for API key
+        import os
+        if not os.getenv("SHADOW9_API_KEY"):
+            console.print("[yellow]Warning: SHADOW9_API_KEY not set.[/yellow]")
+            console.print("[dim]API endpoints will reject requests until the key is configured.[/dim]")
+            console.print("[dim]Set it with: export SHADOW9_API_KEY=your-secret-key[/dim]\n")
+        
+        console.print(Panel(
+            f"[bold green]Shadow9 REST API[/bold green]\n\n"
+            f"Server:    [cyan]http://{host}:{port}[/cyan]\n"
+            f"API Docs:  [cyan]http://{host}:{port}/api/docs[/cyan]\n"
+            f"OpenAPI:   [cyan]http://{host}:{port}/api/openapi.json[/cyan]\n\n"
+            f"[dim]Press Ctrl+C to stop.[/dim]",
+            title="API Server",
+            border_style="green"
+        ))
+        
+        uvicorn.run(
+            "shadow9.api.app:app",
+            host=host,
+            port=port,
+            reload=reload,
+            log_level="info"
+        )
+
 
 async def _serve(config_path: str, host: Optional[str], port: Optional[int]):
     """Async implementation of serve command."""
