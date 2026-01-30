@@ -413,7 +413,13 @@ class TorBridgeConnector:
                         print(f"  ✗ Cached bridge failed full connection, retesting all...")
                         await self._cleanup_tor()
                 else:
-                    reason = test_error if test_error else f"too slow ({test_speed:.1f}s > {CACHE_BRIDGE_TIMEOUT_SECONDS}s)"
+                    # Handle None test_speed separately to avoid format string error
+                    if test_error:
+                        reason = test_error
+                    elif test_speed is None:
+                        reason = "connection failed"
+                    else:
+                        reason = f"too slow ({test_speed:.1f}s > {CACHE_BRIDGE_TIMEOUT_SECONDS}s)"
                     print(f"  ✗ Cached bridge failed: {reason}")
                     logger.info("Cached bridge failed, will retest all", bridge=cached_name, reason=reason)
         
