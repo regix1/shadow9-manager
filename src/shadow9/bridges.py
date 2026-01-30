@@ -395,7 +395,9 @@ class TorBridgeConnector:
             if cached_bridge:
                 print(f"\n  Testing cached bridge: {cached_name}...")
                 test_speed, test_error = await self._quick_bridge_test(
-                    cached_bridge, timeout=CACHE_BRIDGE_TIMEOUT_SECONDS
+                    cached_bridge,
+                    timeout=CACHE_BRIDGE_TIMEOUT_SECONDS,
+                    target_progress=15
                 )
                 if test_speed is not None and test_speed <= CACHE_BRIDGE_TIMEOUT_SECONDS:
                     print(f"  ✓ Cached bridge works ({test_speed:.1f}s)")
