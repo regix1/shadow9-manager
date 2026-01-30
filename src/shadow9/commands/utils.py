@@ -11,15 +11,14 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
 from ..config import generate_default_config
 from ..tor_connector import TorConnector, TorConfig
 from ..wizards import run_init_wizard, show_config_summary, show_master_key
-
-console = Console()
+from ..ui import console, header, dependency_table
+from ..ui import success as ui_success, warning as ui_warning, error as ui_error, info as ui_info
 
 
 def register_util_commands(app: typer.Typer):
@@ -128,13 +127,9 @@ def register_util_commands(app: typer.Typer):
             console.print(table)
             return
 
-        console.print(Panel(
-            "[bold cyan]Shadow9 Proxy Setup[/bold cyan]\n\n"
-            "Installing Tor and bridge transports for\n"
-            "anonymous SOCKS5 proxy routing.\n\n"
-            "[dim]sudo may be required[/dim]",
-            title="Proxy Setup",
-            border_style="cyan"
+        console.print(header(
+            "Shadow9 Proxy Setup",
+            "Installing Tor and bridge transports for\nanonymous SOCKS5 proxy routing.\n\n[dim]sudo may be required[/dim]"
         ))
 
         if not typer.confirm("\nProceed with installation?", default=True):
@@ -208,36 +203,33 @@ def register_util_commands(app: typer.Typer):
         """Show proxy status and Tor connectivity."""
         from ..setup import check_setup
 
-        console.print("[cyan]Shadow9 Proxy Status[/cyan]\n")
+        console.print("\n[bold cyan]Shadow9 Proxy Status[/bold cyan]\n")
 
         # Check dependencies
         dep_status = check_setup()
 
-        table = Table(title="Proxy Components")
-        table.add_column("Component", style="cyan")
-        table.add_column("Status")
-        table.add_column("Description", style="dim")
+        # Build dependency list for table
+        deps_list = [
+            {
+                "name": name,
+                "installed": dep_info["installed"],
+                "required": dep_info["required"],
+                "description": dep_info["description"],
+            }
+            for name, dep_info in dep_status.items()
+        ]
 
-        for name, info in dep_status.items():
-            if info["installed"]:
-                status_text = "[green][OK] Ready[/green]"
-            elif info["required"]:
-                status_text = "[red][X] Missing[/red]"
-            else:
-                status_text = "[yellow][?] Optional[/yellow]"
-
-            table.add_row(name, status_text, info["description"])
-
-        console.print(table)
+        console.print(dependency_table(deps_list, title="Proxy Components"))
 
         # Check Tor connectivity
-        console.print("\n[cyan]Tor Connection:[/cyan]")
+        console.print("\n[bold cyan]Tor Connection[/bold cyan]")
         tor_config = TorConnector.detect_tor_service()
         if tor_config:
-            console.print(f"  [green][OK][/green] Tor on port {tor_config.socks_port}")
+            ui_success(f"Tor running on port {tor_config.socks_port}")
         else:
-            console.print("  [red][X][/red] Tor not running")
+            ui_error("Tor not running")
             console.print("  [dim]Run 'shadow9 setup' to install Tor[/dim]")
+        console.print()
 
     @app.command()
     def update():

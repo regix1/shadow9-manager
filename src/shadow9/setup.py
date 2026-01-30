@@ -18,14 +18,19 @@ from enum import Enum
 
 import structlog
 
-logger = structlog.get_logger(__name__)
+from .ui import (
+    SetupUI,
+    console,
+    success,
+    error,
+    warning,
+    info,
+    muted,
+    dependency_table,
+    completion_panel,
+)
 
-# ANSI colors (matching bash setup script)
-CYAN = '\033[0;36m'
-GREEN = '\033[0;32m'
-YELLOW = '\033[1;33m'
-RED = '\033[0;31m'
-NC = '\033[0m'  # No color
+logger = structlog.get_logger(__name__)
 
 
 class OS(Enum):
@@ -133,6 +138,7 @@ class SystemSetup:
         self.verbose = verbose
         self.os_type = self._detect_os()
         self.is_root = os.geteuid() == 0 if hasattr(os, 'geteuid') else False
+        self.ui: SetupUI | None = None
 
     def _detect_os(self) -> OS:
         """Detect the operating system and distribution."""
@@ -175,18 +181,20 @@ class SystemSetup:
 
         return OS.LINUX_OTHER
 
-    def _log(self, message: str, level: str = "info"):
-        """Log a message with colors matching bash setup script."""
-        if self.verbose:
-            prefixes = {
-                "info": f"{CYAN}[INFO]{NC} ",
-                "success": f"{GREEN}[OK]{NC} ",
-                "warning": f"{YELLOW}[WARN]{NC} ",
-                "error": f"{RED}[ERROR]{NC} ",
-                "step": f"{CYAN}[>]{NC} ",
-            }
-            prefix = prefixes.get(level, "")
-            print(f"{prefix}{message}")
+    def _log(self, message: str, level: str = "info") -> None:
+        """Log a message with Rich styling."""
+        if not self.verbose:
+            return
+
+        log_funcs = {
+            "info": info,
+            "success": success,
+            "warning": warning,
+            "error": error,
+            "step": info,
+        }
+        log_func = log_funcs.get(level, info)
+        log_func(message)
 
     def _run_command(self, command: str, check: bool = True) -> Tuple[bool, str]:
         """Run a shell command."""
@@ -198,9 +206,9 @@ class SystemSetup:
                 text=True,
                 timeout=300  # 5 minute timeout
             )
-            success = result.returncode == 0
+            success_result = result.returncode == 0
             output = result.stdout + result.stderr
-            return success, output
+            return success_result, output
         except subprocess.TimeoutExpired:
             return False, "Command timed out"
         except Exception as e:
@@ -209,7 +217,7 @@ class SystemSetup:
     def _compare_versions(self, v1: str, v2: str) -> int:
         """
         Compare two version strings.
-        
+
         Returns:
             -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
         """
@@ -220,15 +228,15 @@ class SystemSetup:
             if match:
                 return [int(x) for x in match.group(1).split('.')]
             return [0]
-        
+
         parts1 = parse_version(v1)
         parts2 = parse_version(v2)
-        
+
         # Pad shorter version with zeros
         max_len = max(len(parts1), len(parts2))
         parts1.extend([0] * (max_len - len(parts1)))
         parts2.extend([0] * (max_len - len(parts2)))
-        
+
         for p1, p2 in zip(parts1, parts2):
             if p1 < p2:
                 return -1
@@ -239,25 +247,25 @@ class SystemSetup:
     def check_dependency(self, dep: Dependency) -> tuple[bool, bool]:
         """
         Check if a dependency is installed and meets version requirements.
-        
+
         Returns:
             Tuple of (is_installed, meets_version_requirement)
         """
         # First check if binary is in PATH
         if not shutil.which(dep.binary_name):
             # Try running the check command
-            success, _ = self._run_command(dep.check_command)
-            if not success:
+            success_result, _ = self._run_command(dep.check_command)
+            if not success_result:
                 return False, False
-        
+
         # Binary exists, check version if required
         if dep.min_version and dep.version_command:
-            success, output = self._run_command(dep.version_command)
-            if success and output.strip():
+            success_result, output = self._run_command(dep.version_command)
+            if success_result and output.strip():
                 installed_version = output.strip()
                 if self._compare_versions(installed_version, dep.min_version) < 0:
                     return True, False  # Installed but outdated
-        
+
         return True, True
 
     def install_dependency(self, dep: Dependency) -> bool:
@@ -274,13 +282,13 @@ class SystemSetup:
         self._log(f"Installing {dep.name}...", "step")
 
         for cmd in commands:
-            self._log(f"Running: {cmd}", "info")
-            success, output = self._run_command(cmd)
+            muted(f"Running: {cmd}", indent=4)
+            success_result, output = self._run_command(cmd)
 
-            if not success:
+            if not success_result:
                 self._log(f"Failed to run: {cmd}", "error")
                 if self.verbose:
-                    print(output)
+                    console.print(f"[dim]{output}[/dim]")
                 return False
 
         # Verify installation
@@ -306,7 +314,7 @@ class SystemSetup:
     def install_all_dependencies(self, include_optional: bool = True) -> bool:
         """Install all dependencies."""
         self._log(f"Detected OS: {self.os_type.value}", "info")
-        self._log("Checking and installing dependencies...\n", "step")
+        self._log("Checking and installing dependencies...", "step")
 
         all_success = True
 
@@ -315,20 +323,20 @@ class SystemSetup:
                 continue
 
             is_installed, meets_version = self.check_dependency(dep)
-            
+
             if is_installed and meets_version:
                 self._log(f"{dep.name} is already installed", "success")
             elif is_installed and not meets_version:
                 self._log(f"{dep.name} is installed but outdated (need {dep.min_version}+)", "warning")
                 self._log(f"Upgrading {dep.name} from official repository...", "step")
-                success = self.install_dependency(dep)
-                if not success and dep.required:
+                success_result = self.install_dependency(dep)
+                if not success_result and dep.required:
                     all_success = False
             else:
                 self._log(f"{dep.name} is not installed", "warning")
                 if dep.required or include_optional:
-                    success = self.install_dependency(dep)
-                    if not success and dep.required:
+                    success_result = self.install_dependency(dep)
+                    if not success_result and dep.required:
                         all_success = False
 
         return all_success
@@ -368,11 +376,10 @@ class SystemSetup:
             modifications_needed.append("ControlPort 9051")
 
         if modifications_needed:
-            self._log(f"Adding to {torrc_path}: {modifications_needed}", "info")
-            # Would need sudo to write - just inform user
+            muted(f"Config location: {torrc_path}", indent=4)
             self._log(
                 f"Please add the following to {torrc_path}:\n" +
-                "\n".join(modifications_needed),
+                "\n".join(f"    {m}" for m in modifications_needed),
                 "warning"
             )
 
@@ -384,23 +391,23 @@ class SystemSetup:
 
         # Try systemctl first (most modern Linux)
         if shutil.which("systemctl"):
-            success, _ = self._run_command("sudo systemctl enable tor")
-            success, _ = self._run_command("sudo systemctl start tor")
-            if success:
+            success_result, _ = self._run_command("sudo systemctl enable tor")
+            success_result, _ = self._run_command("sudo systemctl start tor")
+            if success_result:
                 self._log("Tor service started with systemd", "success")
                 return True
 
         # Try service command
         if shutil.which("service"):
-            success, _ = self._run_command("sudo service tor start")
-            if success:
+            success_result, _ = self._run_command("sudo service tor start")
+            if success_result:
                 self._log("Tor service started", "success")
                 return True
 
         # Try brew services on macOS
         if self.os_type == OS.MACOS:
-            success, _ = self._run_command("brew services start tor")
-            if success:
+            success_result, _ = self._run_command("brew services start tor")
+            if success_result:
                 self._log("Tor service started with Homebrew", "success")
                 return True
 
@@ -416,50 +423,68 @@ class SystemSetup:
         3. Start Tor service
         4. Verify everything works
         """
-        print(f"\n{CYAN}{'=' * 60}")
-        print("           Shadow9 Proxy Setup")
-        print(f"{'=' * 60}{NC}\n")
+        # Initialize UI
+        self.ui = SetupUI(
+            title="Shadow9 Proxy Setup",
+            subtitle="Installing Tor and bridge transports for\nanonymous SOCKS5 proxy routing.",
+            total_steps=4,
+        )
+        self.ui.show_header()
 
         # Check if running as root/sudo for Linux
         if self.os_type in [OS.LINUX_DEBIAN, OS.LINUX_FEDORA, OS.LINUX_ARCH, OS.LINUX_ALPINE]:
             if not self.is_root and os.geteuid() != 0:
-                self._log("Some operations require sudo. You may be prompted for password.", "warning")
+                warning("Some operations require sudo. You may be prompted for password.")
 
         # Step 1: Install dependencies
-        print(f"\n{CYAN}[1/4]{NC} Installing Dependencies")
+        self.ui.start_step("Installing Dependencies")
         if not self.install_all_dependencies(include_optional):
             self._log("Some required dependencies failed to install", "error")
             return False
 
         # Step 2: Configure Tor
-        print(f"\n{CYAN}[2/4]{NC} Configuring Tor")
+        self.ui.start_step("Configuring Tor")
         self.configure_tor()
 
         # Step 3: Start Tor
-        print(f"\n{CYAN}[3/4]{NC} Starting Tor Service")
+        self.ui.start_step("Starting Tor Service")
         self.start_tor_service()
 
         # Step 4: Verify
-        print(f"\n{CYAN}[4/4]{NC} Verification")
+        self.ui.start_step("Verification")
         status = self.check_all_dependencies()
 
         all_good = True
-        for name, info in status.items():
-            if info["installed"]:
-                print(f"  {GREEN}[OK]{NC} {name}")
-            elif not info["required"]:
-                print(f"  {YELLOW}[WARN]{NC} {name} (optional)")
-            else:
-                print(f"  {RED}[ERROR]{NC} {name} (required)")
+        deps_list = []
+        for name, dep_info in status.items():
+            deps_list.append({
+                "name": name,
+                "installed": dep_info["installed"],
+                "required": dep_info["required"],
+                "description": dep_info["description"],
+            })
+            if not dep_info["installed"] and dep_info["required"]:
                 all_good = False
 
-        print(f"\n{CYAN}{'=' * 60}{NC}")
+        console.print()
+        console.print(dependency_table(deps_list, title="Proxy Components"))
+
+        # Show completion
+        commands = [
+            ("shadow9 serve", "Start the SOCKS5 proxy server"),
+            ("shadow9 user generate", "Create user credentials"),
+            ("shadow9 status", "Check proxy status"),
+            ("shadow9 --help", "View all available commands"),
+        ]
+
         if all_good:
-            print(f"{GREEN}[OK]{NC} Proxy setup complete!")
-            print(f"\n  shadow9 serve    # Start the proxy server")
+            self.ui.show_completion(commands, success_state=True, title="Proxy Setup Complete!")
         else:
-            print(f"{YELLOW}[WARN]{NC} Setup completed with warnings")
-        print(f"{CYAN}{'=' * 60}{NC}\n")
+            self.ui.show_completion(
+                commands,
+                success_state=False,
+                title="Setup Completed with Warnings",
+            )
 
         return all_good
 
