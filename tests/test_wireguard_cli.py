@@ -8,6 +8,7 @@ the test wants, which is how the hub-key comparison in `wg join` gets tested wit
 
 import json
 import re
+import subprocess
 import sys
 import types
 from collections.abc import Iterator
@@ -36,6 +37,48 @@ TUNNEL_NETWORK = "10.9.0.0/24"
 ROUTABLE_ENDPOINT = "93.184.216.34:51820"
 
 
+class _Host(wg_commands.Host):
+    """Record checked commands without changing the machine running the tests."""
+
+    def __init__(
+        self,
+        *,
+        windows: bool = False,
+        root: bool = True,
+        binaries: set[str] | None = None,
+        returncodes: dict[tuple[str, ...], int] | None = None,
+    ) -> None:
+        self.windows = windows
+        self.root = root
+        self.binaries = binaries if binaries is not None else set()
+        self.returncodes = returncodes if returncodes is not None else {}
+        self.commands: list[tuple[str, ...]] = []
+        self.timeouts: list[int] = []
+
+    def is_windows(self) -> bool:
+        return self.windows
+
+    def is_root(self) -> bool:
+        return self.root
+
+    def which(self, name: str) -> str | None:
+        return name if name in self.binaries else None
+
+    def run(
+        self, command: list[str], timeout: int = wg_commands.COMMAND_TIMEOUT
+    ) -> subprocess.CompletedProcess[str]:
+        parts = tuple(command)
+        self.commands.append(parts)
+        self.timeouts.append(timeout)
+        returncode = self.returncodes.get(parts, 0)
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout="",
+            stderr="permission denied" if returncode else "",
+        )
+
+
 @pytest.fixture
 def hub_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Point the whole install at tmp_path, so nothing is written anywhere else."""
@@ -52,6 +95,7 @@ def hub_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setattr(AuthManager, "ARGON2_TIME_COST", 1)
     monkeypatch.setattr(AuthManager, "ARGON2_MEMORY_COST", 64)
     monkeypatch.setattr(AuthManager, "ARGON2_PARALLELISM", 1)
+    monkeypatch.setattr(wg_commands, "_host", _Host(windows=True))
 
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     yield tmp_path
@@ -126,6 +170,146 @@ class TestInit:
         assert "UDP 51820" in _flat(output)
         assert "Keep TCP 8080, the admin API port, closed to the internet" in _flat(output)
         assert "requires iptables" in _flat(output)
+
+    def test_no_apply_runs_no_host_commands(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host = _Host(root=True, binaries={"wg-quick", "systemctl", "sysctl", "iptables"})
+        monkeypatch.setattr(wg_commands, "_host", host)
+
+        output = _flat(_init_hub(runner, cli_app, hub_root, "--no-apply"))
+
+        assert host.commands == []
+        assert "Host activation was skipped by --no-apply" in output
+        assert "Interface up: no" in output
+
+    def test_not_root_reports_each_command_and_continues(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _wireguard_dir(hub_root) / "wg0.conf"
+        host = _Host(
+            root=False,
+            binaries={"wg-quick", "systemctl", "sysctl", "iptables"},
+            returncodes={("wg-quick", "up", str(config)): 1},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard")
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+
+        output = _flat(_init_hub(runner, cli_app, hub_root))
+
+        assert "sudo wg-quick up" in output
+        assert "sudo ln -s" in output
+        assert "sudo systemctl enable wg-quick@wg0" in output
+        assert "sudo sysctl -w net.ipv4.ip_forward=1" in output
+        assert "sudo iptables -C FORWARD -i wg0 -o wg0 -j ACCEPT" in output
+        assert "FORWARD rule present: no" in output
+        assert len(host.commands) == 1
+        assert host.timeouts == [wg_commands.COMMAND_TIMEOUT]
+
+    def test_missing_wg_quick_prints_the_manual_start_command(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host = _Host(root=False)
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard")
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+
+        output = _flat(_init_hub(runner, cli_app, hub_root))
+
+        assert "wg-quick was not found" in output
+        assert "Install wireguard-tools, then: sudo wg-quick up" in output
+        assert host.commands == []
+
+    def test_an_existing_boot_config_is_left_alone(
+        self,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        target = system_dir / "wg0.conf"
+        target.parent.mkdir(parents=True)
+        target.write_text("hand written\n", encoding="utf-8")
+        host = _Host(root=True, binaries={"wg-quick", "systemctl", "sysctl", "iptables"})
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+
+        result = wg_commands._activate_hub(_wireguard_dir(hub_root) / "wg0.conf", 4, host)
+
+        assert not result.boot.ready
+        assert target.read_text(encoding="utf-8") == "hand written\n"
+        assert not any(command[0] == "systemctl" for command in host.commands)
+
+    def test_an_existing_forward_rule_is_not_added_again(
+        self,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        (system_dir / "wg0.conf").write_text("hand written\n", encoding="utf-8")
+        host = _Host(root=True, binaries={"wg-quick", "systemctl", "sysctl", "iptables"})
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+
+        result = wg_commands._activate_hub(_wireguard_dir(hub_root) / "wg0.conf", 4, host)
+
+        check = ("iptables", "-C", "FORWARD", "-i", "wg0", "-o", "wg0", "-j", "ACCEPT")
+        assert result.forward_rule.ready
+        assert check in host.commands
+        assert not any(command[:2] == ("iptables", "-A") for command in host.commands)
+
+    def test_ipv6_uses_the_ipv6_forwarding_tools(
+        self,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        (system_dir / "wg0.conf").write_text("hand written\n", encoding="utf-8")
+        host = _Host(root=True, binaries={"wg-quick", "sysctl", "ip6tables"})
+        forwarding_config = hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+        monkeypatch.setattr(wg_commands, "FORWARDING_CONFIG", forwarding_config)
+
+        wg_commands._activate_hub(_wireguard_dir(hub_root) / "wg0.conf", 6, host)
+
+        assert ("sysctl", "-w", "net.ipv6.conf.all.forwarding=1") in host.commands
+        assert any(command[:2] == ("ip6tables", "-C") for command in host.commands)
+        assert forwarding_config.read_text(encoding="utf-8") == (
+            "net.ipv6.conf.all.forwarding=1\n"
+        )
+
+    def test_windows_runs_no_linux_commands(self, hub_root: Path) -> None:
+        host = _Host(windows=True, root=False)
+
+        result = wg_commands._activate_hub(_wireguard_dir(hub_root) / "wg0.conf", 4, host)
+
+        assert not any(
+            step.ready
+            for step in (result.interface, result.boot, result.forwarding, result.forward_rule)
+        )
+        assert host.commands == []
 
     def test_the_hub_takes_the_first_address_in_the_tunnel_network(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path
@@ -1046,9 +1230,24 @@ class TestTheWizard:
     """Criterion 35: hub setup without reading any flags."""
 
     def test_the_wizard_sets_the_hub_up_from_answers(
-        self, runner: CliRunner, cli_app: Typer, hub_root: Path
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         answers = "\n".join([ROUTABLE_ENDPOINT, "10.9.0.0/24", "51820", "n", "y"]) + "\n"
+        config = _wireguard_dir(hub_root) / "wg0.conf"
+        host = _Host(
+            root=False,
+            binaries={"wg-quick"},
+            returncodes={("wg-quick", "up", str(config)): 1},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard")
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
 
         result = runner.invoke(
             cli_app, ["wg", "setup", "--config", _config_file(hub_root)], input=answers
@@ -1058,6 +1257,8 @@ class TestTheWizard:
         assert (_wireguard_dir(hub_root) / "hub.key").exists()
         assert (_wireguard_dir(hub_root) / "wg0.conf").exists()
         assert ROUTABLE_ENDPOINT in Path(_config_file(hub_root)).read_text()
+        assert ("wg-quick", "up", str(config)) in host.commands
+        assert "Hub activation" in _flat(result.output)
 
     def test_the_wizard_refuses_an_endpoint_it_cannot_use(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path

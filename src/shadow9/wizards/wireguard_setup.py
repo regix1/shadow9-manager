@@ -98,6 +98,7 @@ def run_wireguard_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> Option
         api_url=None,
         token_hours=DEFAULT_TOKEN_HOURS,
         force=True,
+        no_apply=False,
         config=config_path,
     )
 

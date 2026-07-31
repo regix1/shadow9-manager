@@ -4,8 +4,8 @@ One hub, any number of spokes. A **node** is a machine that joins itself, and wi
 route it becomes a site gateway for a whole LAN. A **device** is something that cannot
 run shadow9, like a phone, and gets a config file and a QR code.
 
-Everything below is done as the operator. shadow9 writes configuration; with one
-exception it does not bring interfaces up, so the commands that need root are called out.
+Everything below is done as the operator. Hub setup tries each root-level host change and
+prints the exact command when it cannot make one. Node setup still applies its own config.
 
 ---
 
@@ -49,33 +49,49 @@ Other options worth knowing:
 | `--port` | A different UDP port. |
 | `--masquerade-interface eth0` | Only needed if full-tunnel devices should reach the internet. |
 | `--token-hours` | How long the printed join token lasts. Default 24. |
+| `--no-apply` | Write the key and config without changing the host or starting the tunnel. |
 
 `shadow9 wg setup` walks the same thing with prompts.
 
-It writes the hub key, renders the hub config, and prints a join command with a token in
-it. **It does not start anything.**
+`wg init` and `wg setup` write the hub key, render the config, and then try four independent
+host changes:
 
-## 2. Start the tunnel
+1. Bring `wg0` up with `wg-quick`.
+2. Link shadow9's config into `/etc/wireguard` and enable `wg-quick@wg0` for reboot.
+3. Turn on IP forwarding and record it in `/etc/sysctl.d/99-shadow9.conf`.
+4. Check for the `wg0`-to-`wg0` FORWARD rule and add it only when it is absent.
 
-This step is yours. `wg init` says the hub is ready, meaning the configuration is
-written, not that the interface is up.
+The forwarding key and firewall command follow the tunnel network: IPv4 uses
+`net.ipv4.ip_forward` and `iptables`; IPv6 uses `net.ipv6.conf.all.forwarding` and
+`ip6tables`. The command finishes with a four-line summary. One failed step does not stop
+the other three.
+
+## 2. If activation needs manual work
+
+No root access, Windows, a host without systemd, or a missing command are normal outcomes.
+`wg init` says what it could not do and prints the command to run. The commands below are
+the same fallback in one place.
 
 shadow9 renders the config under its own install root, at
-`config/wireguard/wg0.conf`, which `init` prints. `wg-quick` takes a full path, so a
-one-off start is:
+`config/wireguard/wg0.conf`, which `init` prints. Replace the example path below with that
+printed path:
 
 ```
 sudo wg-quick up /opt/shadow9/config/wireguard/wg0.conf     # the path init printed
 ```
 
-To have it start at boot, link it where `wg-quick@.service` looks. A link rather than a
-copy, so that regenerating configs keeps the started interface in step with what
-shadow9 wrote:
+To have it start at boot, link it where `wg-quick@.service` looks. The link keeps a
+regenerated shadow9 config in step with the file the service reads:
 
 ```
+sudo mkdir -p /etc/wireguard
 sudo ln -s /opt/shadow9/config/wireguard/wg0.conf /etc/wireguard/wg0.conf
-sudo systemctl enable --now wg-quick@wg0
+sudo systemctl enable wg-quick@wg0
 ```
+
+If `/etc/wireguard/wg0.conf` already exists, shadow9 leaves it alone. Inspect that file
+before moving or removing it. You can still start shadow9's config by its full path with
+the `wg-quick up` command above.
 
 `wg-quick` reads the file when the interface comes up, so after a change that rewrites
 the hub config, restart it:
@@ -89,11 +105,13 @@ For traffic to pass **between** two spokes, the hub has to forward it:
 ```
 sudo sysctl -w net.ipv4.ip_forward=1
 echo 'net.ipv4.ip_forward=1' | sudo tee /etc/sysctl.d/99-shadow9.conf
-sudo iptables -A FORWARD -i wg0 -o wg0 -j ACCEPT
+sudo iptables -C FORWARD -i wg0 -o wg0 -j ACCEPT || \
+  sudo iptables -A FORWARD -i wg0 -o wg0 -j ACCEPT
 ```
 
 Both are needed. Either one missing and the tunnels come up while spoke-to-spoke
-traffic silently goes nowhere.
+traffic silently goes nowhere. For an IPv6 tunnel, use
+`net.ipv6.conf.all.forwarding=1` and `ip6tables` instead.
 
 ## 3. Open two ports
 
