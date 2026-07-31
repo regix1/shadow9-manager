@@ -5,10 +5,9 @@ name: Node packages
 # apk. Both come from the one recipe in packaging/openwrt, because the format is
 # a property of the SDK rather than of the recipe.
 #
-# Publishing a release attaches every package and binary to it as a direct
-# download. Build artifacts are only used to hand files between jobs and for
-# looking at a run that did not come from a release; GitHub always serves those
-# as a zip, which is why the release assets exist.
+# This workflow only builds and leaves the results as artifacts, which GitHub
+# always serves as a zip. The Release workflow calls this one and attaches the
+# same files to a release, where they download directly.
 
 on:
   push:
@@ -23,14 +22,8 @@ on:
       - 'node/**'
       - 'packaging/openwrt/**'
       - 'contracts/enrollment/**'
-  release:
-    types: [published]
+  workflow_call:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Attach the packages to this existing release tag'
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -213,42 +206,3 @@ jobs:
           name: package-${{ steps.tag.outputs.tag }}
           path: out/
           if-no-files-found: error
-
-  publish:
-    name: Attach to the release
-    needs: [binaries, packages]
-    if: github.event_name == 'release' || inputs.tag != ''
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Gather every built file
-        uses: actions/download-artifact@v4
-        with:
-          path: downloaded
-
-      # download-artifact gives one directory per artifact. Releases want a flat
-      # set of files, and the names are already unique across every target.
-      - name: Flatten and checksum
-        run: |
-          mkdir -p release
-          find downloaded -type f \( -name '*.ipk' -o -name '*.apk' -o -name 'shadow9-node-linux-*' \) \
-            -exec cp {} release/ \;
-          if [ -z "$(ls -A release)" ]; then
-            echo "nothing was built to publish" >&2
-            exit 1
-          fi
-          ( cd release && sha256sum * > SHA256SUMS )
-          cat release/SHA256SUMS
-
-      - name: Upload
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
-          if [ -z "$tag" ]; then
-            echo "no release tag to attach to" >&2
-            exit 1
-          fi
-          gh release upload "$tag" release/* --clobber --repo "$GITHUB_REPOSITORY"
-          echo "attached $(ls release | wc -l) files to $tag"

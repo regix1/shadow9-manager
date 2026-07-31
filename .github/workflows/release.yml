@@ -1,0 +1,129 @@
+name: Release
+
+# Run this from the Actions tab to cut a release. It builds the node client for
+# every target, creates the tag and the release, and attaches each package and
+# binary as a direct download rather than a zip.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, for example 0.1.0'
+        required: true
+        type: string
+      draft:
+        description: 'Create it as a draft so you can look before it is public'
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: 'Mark it as a pre-release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  # Reuses the CI workflow rather than repeating the six-target matrix, so a
+  # release is built exactly the way every push is built.
+  build:
+    uses: ./.github/workflows/node-packages.yml
+
+  publish:
+    name: Create the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the tag
+        id: version
+        run: |
+          raw='${{ inputs.version }}'
+          # Accept 0.1.0 or v0.1.0 and settle on one spelling.
+          bare="${raw#v}"
+          if ! printf '%s' "$bare" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
+            echo "'$raw' is not a version like 0.1.0" >&2
+            exit 1
+          fi
+          echo "tag=v$bare" >> "$GITHUB_OUTPUT"
+          echo "bare=$bare" >> "$GITHUB_OUTPUT"
+
+      # The package version lives in the OpenWrt recipe, and the binary reports
+      # its own. A tag that disagrees with them ships files that describe
+      # themselves differently to the release they came from, so say so loudly
+      # rather than failing: a patch release of the same package is legitimate.
+      - name: Compare against the packaged version
+        run: |
+          recipe=$(grep -oP '^PKG_VERSION:=\K.*' packaging/openwrt/Makefile || true)
+          echo "release tag:     ${{ steps.version.outputs.bare }}"
+          echo "PKG_VERSION:     ${recipe:-not found}"
+          if [ "$recipe" != "${{ steps.version.outputs.bare }}" ]; then
+            {
+              echo "### Version mismatch"
+              echo ""
+              echo "Releasing \`${{ steps.version.outputs.bare }}\` but the packages are built as"
+              echo "\`${recipe:-unknown}\`, taken from \`PKG_VERSION\` in \`packaging/openwrt/Makefile\`."
+              echo "The attached files will be named after \`${recipe:-unknown}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Gather every built file
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+
+      # download-artifact gives one directory per artifact. A release wants a
+      # flat set, and the names are already unique across every target.
+      - name: Flatten and checksum
+        run: |
+          mkdir -p release
+          find downloaded -type f \( -name '*.ipk' -o -name '*.apk' -o -name 'shadow9-node-linux-*' \) \
+            -exec cp {} release/ \;
+          if [ -z "$(ls -A release)" ]; then
+            echo "the build produced nothing to release" >&2
+            exit 1
+          fi
+          ( cd release && sha256sum * > SHA256SUMS )
+          echo "### Files in this release" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat release/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the release and attach the files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          notes=$(cat <<'EOF'
+          OpenWrt node client for the shadow9 WireGuard hub.
+
+          | Router | File |
+          |---|---|
+          | OpenWrt 24.10.x | the `.ipk` matching your architecture, installed with `opkg install` |
+          | OpenWrt 25.12.x | the `.apk` matching your target, installed with `apk add --allow-untrusted` |
+
+          `shadow9-node-linux-*` are the raw binaries for installing without a package.
+          `SHA256SUMS` covers every other file here.
+
+          Setup is in `docs/SETUP.md`.
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG exists, replacing its files"
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* \
+              --title "$TAG" \
+              --notes "$notes" \
+              --target "$GITHUB_SHA" \
+              ${{ inputs.draft && '--draft' || '' }} \
+              ${{ inputs.prerelease && '--prerelease' || '' }}
+          fi
+          echo "attached $(ls release | wc -l) files to $TAG"
+          gh release view "$TAG" --json url -q .url >> "$GITHUB_STEP_SUMMARY"
