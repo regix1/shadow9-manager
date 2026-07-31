@@ -267,6 +267,11 @@ shadow9 wg init --endpoint 203.0.113.10:51820
 shadow9 wg device add phone
 ```
 
+`wg init` writes the configuration but does not start the tunnel. See
+[docs/SETUP.md](docs/SETUP.md) for the whole process, including bringing the interface
+up, the forwarding rules two spokes need to reach each other, and joining an OpenWrt
+router as a site gateway.
+
 Open these two ports in the host firewall and in the cloud firewall or security group:
 
 - TCP 8081 by default, or `wireguard.enrollment_port`, for enrollment, refresh, and node downloads.
