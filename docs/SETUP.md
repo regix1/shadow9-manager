@@ -142,11 +142,34 @@ to take effect.
 
 ## 5. Add a router as a site gateway
 
-Install the package, matching your release and architecture:
+Install the package, matching your release and architecture. **Download it first rather
+than passing the URL to the package manager.** `opkg` builds its temporary filename from
+the last path segment of the URL including the query string, and a GitHub release asset
+redirects to a signed URL carrying roughly 900 characters of query, which overruns the
+255-byte filename limit and fails with "Filename too long".
+
+OpenWrt 24.10.x, `.ipk` named for the package architecture
+(`x86_64`, `aarch64_generic`, `mipsel_24kc`):
 
 ```
-opkg install ./shadow9-node_0.1.0-r1_x86_64.ipk                  # 24.10.x
-apk add --allow-untrusted ./shadow9-node-0.1.0-r1_x86-64.apk     # 25.12.x
+wget -O /tmp/shadow9-node.ipk \
+  https://github.com/regix1/shadow9-manager/releases/download/v0.1.0/shadow9-node_0.1.0-r1_x86_64.ipk
+opkg install /tmp/shadow9-node.ipk
+```
+
+OpenWrt 25.12.x, `.apk` named for the target (`x86-64`, `armsr-armv8`, `ramips-mt7621`),
+because OpenWrt does not put the architecture in an apk filename:
+
+```
+wget -O /tmp/shadow9-node.apk \
+  https://github.com/regix1/shadow9-manager/releases/download/v0.1.0/shadow9-node-0.1.0-r1_x86-64.apk
+apk add --allow-untrusted /tmp/shadow9-node.apk
+```
+
+`SHA256SUMS` on the release covers every file. To check what arrived:
+
+```
+sha256sum /tmp/shadow9-node.ipk
 ```
 
 Then join, using the token the hub printed:
