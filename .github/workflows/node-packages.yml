@@ -1,0 +1,201 @@
+name: Node packages
+
+# Builds the OpenWrt node client and packages it for both of OpenWrt's package
+# formats. 24.10 and earlier use .ipk with opkg; 25.12 and later use .apk with
+# apk. Both come from the one recipe in packaging/openwrt, because the format is
+# a property of the SDK rather than of the recipe.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'node/**'
+      - 'packaging/openwrt/**'
+      - 'contracts/enrollment/**'
+      - '.github/workflows/node-packages.yml'
+  pull_request:
+    paths:
+      - 'node/**'
+      - 'packaging/openwrt/**'
+      - 'contracts/enrollment/**'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  # Bump these to move to a newer point release. The SDK file name also carries
+  # a gcc version that changes between releases, so it is discovered rather than
+  # written down here.
+  RELEASE_IPK: 24.10.8
+  RELEASE_APK: 25.12.5
+
+jobs:
+  binaries:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: node/go.mod
+          cache: false
+
+      - name: Vet
+        run: go vet ./...
+        working-directory: node
+
+      - name: Test
+        run: go test -count=1 ./...
+        working-directory: node
+
+      - name: Build every target
+        run: make dist
+        working-directory: node
+
+      # make dist regenerates SHA256SUMS as a build product, so a mismatch here
+      # means the checksum file and the binaries disagree, which is the thing
+      # the router is told to compare.
+      - name: Checksums match the binaries
+        run: sha256sum -c SHA256SUMS
+        working-directory: node/dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-binaries
+          path: node/dist/
+          if-no-files-found: error
+
+  packages:
+    name: ${{ matrix.release }} ${{ matrix.target }}
+    needs: binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { release: '24.10.8', target: 'x86/64',        goarch: amd64  }
+          - { release: '24.10.8', target: 'armsr/armv8',   goarch: arm64  }
+          - { release: '24.10.8', target: 'ramips/mt7621', goarch: mipsle }
+          - { release: '25.12.5', target: 'x86/64',        goarch: amd64  }
+          - { release: '25.12.5', target: 'armsr/armv8',   goarch: arm64  }
+          - { release: '25.12.5', target: 'ramips/mt7621', goarch: mipsle }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-binaries
+          path: node/dist
+
+      # The SDK's own prerequisite check refuses to run without these two, and
+      # says so only after unpacking.
+      - name: Install SDK prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip libncurses-dev zstd
+
+      - name: Name this build
+        id: tag
+        run: echo "tag=${{ matrix.release }}-$(echo '${{ matrix.target }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Find the SDK
+        id: sdk
+        run: |
+          base="https://downloads.openwrt.org/releases/${{ matrix.release }}/targets/${{ matrix.target }}"
+          name=$(curl -sSf "$base/" | grep -o 'openwrt-sdk-[^"]*\.tar\.zst' | head -1)
+          if [ -z "$name" ]; then
+            echo "no SDK found under $base" >&2
+            exit 1
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "url=$base/$name" >> "$GITHUB_OUTPUT"
+          echo "dir=${name%.tar.zst}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the SDK
+        id: sdkcache
+        uses: actions/cache@v4
+        with:
+          path: sdk.tar.zst
+          key: sdk-${{ steps.sdk.outputs.name }}
+
+      - name: Download the SDK
+        if: steps.sdkcache.outputs.cache-hit != 'true'
+        run: curl -sSfL -o sdk.tar.zst "${{ steps.sdk.outputs.url }}"
+
+      - name: Unpack the SDK
+        run: tar --zstd -xf sdk.tar.zst
+
+      - name: Add the package
+        run: |
+          sdk="${{ steps.sdk.outputs.dir }}"
+          mkdir -p "$sdk/package/shadow9-node"
+          cp -r packaging/openwrt/. "$sdk/package/shadow9-node/"
+          cp node/dist/shadow9-node-linux-* "$sdk/package/shadow9-node/files/"
+
+      - name: Feeds
+        working-directory: ${{ steps.sdk.outputs.dir }}
+        run: |
+          # Feeds are cloned pinned to a commit, which leaves a detached HEAD
+          # that a later git pull cannot update. The indexes are what matter.
+          ./scripts/feeds update base packages luci || true
+          ./scripts/feeds install luci-proto-wireguard wireguard-tools ca-bundle || true
+
+      - name: Configure
+        working-directory: ${{ steps.sdk.outputs.dir }}
+        run: |
+          # The Go binary is already stripped by its own linker flags and built
+          # reproducibly. Letting OpenWrt's sstrip run again drops the ELF
+          # section headers, which makes the packaged binary differ from the one
+          # node/dist publishes checksums for.
+          touch .config
+          sed -i '/^CONFIG_USE_SSTRIP=/d; /^CONFIG_USE_STRIP=/d; /^CONFIG_NO_STRIP=/d; /^CONFIG_PACKAGE_shadow9-node=/d' .config
+          printf 'CONFIG_NO_STRIP=y\nCONFIG_PACKAGE_shadow9-node=m\n' >> .config
+          make defconfig
+
+      - name: Build
+        working-directory: ${{ steps.sdk.outputs.dir }}
+        run: make package/shadow9-node/compile -j"$(nproc)"
+
+      # Catches a reintroduced strip, and catches the recipe packaging the wrong
+      # architecture's binary, which its ARCH mapping is supposed to prevent.
+      - name: Packaged binary matches the published one
+        run: |
+          sdk="${{ steps.sdk.outputs.dir }}"
+          staged=$(find "$sdk/build_dir" -path '*/shadow9-node/usr/sbin/shadow9-node' | head -1)
+          if [ -z "$staged" ]; then
+            echo "no staged binary found under $sdk/build_dir" >&2
+            exit 1
+          fi
+          published="node/dist/shadow9-node-linux-${{ matrix.goarch }}"
+          if ! cmp -s "$staged" "$published"; then
+            echo "the packaged binary differs from $published" >&2
+            ls -l "$staged" "$published" >&2
+            exit 1
+          fi
+          echo "packaged binary is byte-identical to $published"
+
+      - name: Collect
+        id: collect
+        run: |
+          sdk="${{ steps.sdk.outputs.dir }}"
+          mkdir -p out
+          find "$sdk/bin" -type f \( -name 'shadow9-node*.ipk' -o -name 'shadow9-node*.apk' \) -exec cp {} out/ \;
+          if [ -z "$(ls -A out)" ]; then
+            echo "no package was produced" >&2
+            exit 1
+          fi
+          ( cd out && sha256sum * > SHA256SUMS )
+          cat out/SHA256SUMS
+
+      # The .apk file name carries no architecture, unlike .ipk, so the artifact
+      # name is what keeps the six builds apart.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shadow9-node-${{ steps.tag.outputs.tag }}
+          path: out/
+          if-no-files-found: error
