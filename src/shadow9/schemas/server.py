@@ -9,42 +9,33 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ServerStatusResponse(BaseModel):
     """Response schema for server status."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
-    running: bool = Field(..., description="Server is running")
+
+    running: bool = Field(
+        ..., description="Something is accepting connections at the configured address"
+    )
     host: str = Field(..., description="Bind address")
     port: int = Field(..., description="Bind port")
-    active_connections: int = Field(default=0, description="Active connections")
+    active_connections: Optional[int] = Field(
+        default=None, description="Active connections, null when not observable from this process"
+    )
     total_users: int = Field(default=0, description="Registered users")
     tor_enabled: bool = Field(default=False, description="Tor routing enabled")
-    uptime_seconds: Optional[float] = Field(default=None, description="Uptime in seconds")
+    uptime_seconds: Optional[float] = Field(
+        default=None, description="Uptime in seconds, null when not observable from this process"
+    )
 
 
 class ServerConfigUpdate(BaseModel):
     """Schema for updating server configuration."""
-    
-    host: Optional[str] = Field(
-        default=None,
-        description="Server bind address"
-    )
-    port: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=65535,
-        description="Server bind port"
-    )
+
+    host: Optional[str] = Field(default=None, description="Server bind address")
+    port: Optional[int] = Field(default=None, ge=1, le=65535, description="Server bind port")
     max_connections: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Maximum concurrent connections"
+        default=None, ge=1, description="Maximum concurrent connections"
     )
-    tor_enabled: Optional[bool] = Field(
-        default=None,
-        description="Enable Tor routing"
-    )
+    tor_enabled: Optional[bool] = Field(default=None, description="Enable Tor routing")
     log_level: Optional[str] = Field(
-        default=None,
-        pattern=r'^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$',
-        description="Logging level"
+        default=None, pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$", description="Logging level"
     )

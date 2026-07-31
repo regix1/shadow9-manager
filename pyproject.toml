@@ -26,23 +26,24 @@ classifiers = [
 
 dependencies = [
     # Core async networking
-    "aiohttp>=3.9.0",
+    "aiohttp>=3.14.1",
     "aiohttp-socks>=0.8.4",
-    "PySocks>=1.7.1",
     # Security and encryption
-    "cryptography>=41.0.0",
+    "cryptography>=48.0.1",
     "argon2-cffi>=23.1.0",
     # Configuration
     "pyyaml>=6.0.1",
-    "python-dotenv>=1.0.0",
     # CLI
     "typer>=0.9.0",
     "rich>=13.7.0",
     # Logging
     "structlog>=24.1.0",
     # REST API (FastAPI)
-    "fastapi>=0.109.0",
+    # the floor is set by starlette, which fastapi pins and nothing else declares
+    "fastapi>=0.115.0",
     "uvicorn[standard]>=0.27.0",
+    # uvicorn asks only for h11>=0.8; this floor keeps the chunked-encoding parser fix
+    "h11>=0.16.0",
     # Strong typing (Pydantic v2)
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
@@ -52,6 +53,8 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    # fastapi.testclient.TestClient is built on httpx
+    "httpx>=0.26.0",
     "black>=24.0.0",
     "mypy>=1.8.0",
 ]
@@ -71,3 +74,30 @@ target-version = ['py310', 'py311', 'py312']
 python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
+
+[tool.pytest.ini_options]
+# src/ layout: this is what makes `import shadow9` work without an editable install
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI reads dependencies from call expressions in parameter defaults
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Security",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# _load_env() populates os.environ before the package imports read it
+"src/shadow9/cli.py" = ["E402"]

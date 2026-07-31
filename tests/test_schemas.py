@@ -3,12 +3,11 @@ Tests for API request/response schemas.
 """
 
 import pytest
-from datetime import datetime
 from pydantic import ValidationError
 
 from shadow9.schemas.user import UserCreate, UserUpdate, UserResponse
 from shadow9.schemas.common import SuccessResponse, ErrorResponse, PaginationParams
-from shadow9.models.user import BridgeType, SecurityLevel
+from shadow9.models.user import BridgeType, SecurityLevel, utc_now
 
 
 class TestUserSchemas:
@@ -30,22 +29,22 @@ class TestUserSchemas:
         with pytest.raises(ValidationError) as exc_info:
             UserCreate(username="test", password="Short1!")
         assert "at least 12 characters" in str(exc_info.value)
-        
+
         # No uppercase
         with pytest.raises(ValidationError) as exc_info:
             UserCreate(username="test", password="password123!!")
         assert "uppercase" in str(exc_info.value)
-        
+
         # No lowercase
         with pytest.raises(ValidationError) as exc_info:
             UserCreate(username="test", password="PASSWORD123!!")
         assert "lowercase" in str(exc_info.value)
-        
+
         # No digit
         with pytest.raises(ValidationError) as exc_info:
             UserCreate(username="test", password="PasswordOnly!!")
         assert "digit" in str(exc_info.value)
-        
+
         # No special character
         with pytest.raises(ValidationError) as exc_info:
             UserCreate(username="test", password="Password12345")
@@ -78,7 +77,7 @@ class TestUserSchemas:
         assert data.use_tor is False
         assert data.password is None
         assert data.bridge_type is None
-        
+
         # Update multiple fields
         data = UserUpdate(
             bridge_type=BridgeType.SNOWFLAKE,
@@ -92,7 +91,7 @@ class TestUserSchemas:
         # Valid password
         data = UserUpdate(password="NewSecurePass123!")
         assert data.password == "NewSecurePass123!"
-        
+
         # Invalid password
         with pytest.raises(ValidationError):
             UserUpdate(password="weak")
@@ -109,7 +108,7 @@ class TestUserSchemas:
             bind_port=None,
             logging_enabled=True,
             enabled=True,
-            created_at=datetime.utcnow(),
+            created_at=utc_now(),
             last_used=None,
         )
         assert response.username == "test_user"
@@ -128,18 +127,12 @@ class TestCommonSchemas:
 
     def test_success_response_with_data(self):
         """Test SuccessResponse with data."""
-        response = SuccessResponse(
-            message="User created",
-            data={"id": 123}
-        )
+        response = SuccessResponse(message="User created", data={"id": 123})
         assert response.data == {"id": 123}
 
     def test_error_response(self):
         """Test ErrorResponse schema."""
-        response = ErrorResponse(
-            error="NOT_FOUND",
-            message="User not found"
-        )
+        response = ErrorResponse(error="NOT_FOUND", message="User not found")
         assert response.success is False
         assert response.error == "NOT_FOUND"
 
@@ -154,11 +147,11 @@ class TestCommonSchemas:
         # Negative skip
         with pytest.raises(ValidationError):
             PaginationParams(skip=-1)
-        
+
         # Zero limit
         with pytest.raises(ValidationError):
             PaginationParams(limit=0)
-        
+
         # Limit too high
         with pytest.raises(ValidationError):
             PaginationParams(limit=5000)

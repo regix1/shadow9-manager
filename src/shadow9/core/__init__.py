@@ -14,7 +14,7 @@ from .config import (
     ApiSettings,
     get_settings,
 )
-from .logging import setup_logging, get_logger
+from .logging import get_logger
 from .api_config import (
     load_api_config,
     save_api_config,
@@ -35,7 +35,6 @@ __all__ = [
     "ApiSettings",
     "get_settings",
     # Logging
-    "setup_logging",
     "get_logger",
     # API Config
     "load_api_config",

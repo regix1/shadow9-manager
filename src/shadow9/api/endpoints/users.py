@@ -30,16 +30,16 @@ router = APIRouter(prefix="/users", tags=["users"])
         201: {"description": "User created successfully"},
         400: {"description": "Invalid input or user already exists"},
         401: {"description": "Invalid API key"},
-    }
+    },
 )
 async def create_user(
     user_data: UserCreate,
     service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    _admin: str = Depends(get_current_admin),
 ) -> UserResponse:
     """
     Create a new user account.
-    
+
     - **username**: Unique username (3-64 chars, alphanumeric/underscore/hyphen)
     - **password**: Strong password (min 12 chars, mixed case, digit, special)
     - **use_tor**: Route traffic through Tor (default: true)
@@ -53,10 +53,7 @@ async def create_user(
     try:
         return await service.create(user_data)
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
 
 # READ - List
@@ -67,21 +64,21 @@ async def create_user(
     responses={
         200: {"description": "List of users"},
         401: {"description": "Invalid API key"},
-    }
+    },
 )
 async def list_users(
     skip: int = Query(0, ge=0, description="Number of users to skip"),
     limit: int = Query(100, ge=1, le=1000, description="Maximum users to return"),
     enabled_only: bool = Query(False, description="Only return enabled users"),
     service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    _admin: str = Depends(get_current_admin),
 ) -> UserListResponse:
     """
     List all registered users with pagination.
     """
     users = await service.list(skip=skip, limit=limit, enabled_only=enabled_only)
-    total = await service.count()
-    
+    total = await service.count(enabled_only=enabled_only)
+
     return UserListResponse(users=users, total=total)
 
 
@@ -94,24 +91,23 @@ async def list_users(
         200: {"description": "User details"},
         401: {"description": "Invalid API key"},
         404: {"description": "User not found"},
-    }
+    },
 )
 async def get_user(
     username: str,
     service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    _admin: str = Depends(get_current_admin),
 ) -> UserResponse:
     """
     Get detailed information about a specific user.
     """
     user = await service.get(username)
-    
+
     if user is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User not found: {username}"
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"User not found: {username}"
         )
-    
+
     return user
 
 
@@ -125,33 +121,29 @@ async def get_user(
         400: {"description": "Invalid input"},
         401: {"description": "Invalid API key"},
         404: {"description": "User not found"},
-    }
+    },
 )
 async def update_user(
     username: str,
     user_data: UserUpdate,
     service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    _admin: str = Depends(get_current_admin),
 ) -> UserResponse:
     """
     Update a user's properties (partial update).
-    
+
     Only provided fields will be updated. All fields are optional.
     """
     try:
         user = await service.update(username, user_data)
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
     if user is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User not found: {username}"
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"User not found: {username}"
         )
-    
+
     return user
 
 
@@ -164,22 +156,21 @@ async def update_user(
         204: {"description": "User deleted"},
         401: {"description": "Invalid API key"},
         404: {"description": "User not found"},
-    }
+    },
 )
 async def delete_user(
     username: str,
     service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    _admin: str = Depends(get_current_admin),
 ) -> None:
     """
     Delete a user account permanently.
     """
     deleted = await service.delete(username)
-    
+
     if not deleted:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User not found: {username}"
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"User not found: {username}"
         )
 
 
@@ -192,24 +183,23 @@ async def delete_user(
         200: {"description": "User enabled"},
         401: {"description": "Invalid API key"},
         404: {"description": "User not found"},
-    }
+    },
 )
 async def enable_user(
     username: str,
     service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    _admin: str = Depends(get_current_admin),
 ) -> SuccessResponse:
     """
     Enable a disabled user account.
     """
     enabled = await service.enable(username)
-    
+
     if not enabled:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User not found: {username}"
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"User not found: {username}"
         )
-    
+
     return SuccessResponse(message=f"User '{username}' enabled")
 
 
@@ -221,24 +211,23 @@ async def enable_user(
         200: {"description": "User disabled"},
         401: {"description": "Invalid API key"},
         404: {"description": "User not found"},
-    }
+    },
 )
 async def disable_user(
     username: str,
     service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    _admin: str = Depends(get_current_admin),
 ) -> SuccessResponse:
     """
     Disable a user account (prevents authentication).
     """
     disabled = await service.disable(username)
-    
+
     if not disabled:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User not found: {username}"
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"User not found: {username}"
         )
-    
+
     return SuccessResponse(message=f"User '{username}' disabled")
 
 
@@ -250,22 +239,21 @@ async def disable_user(
     responses={
         200: {"description": "Generated credentials"},
         401: {"description": "Invalid API key"},
-    }
+    },
 )
 async def generate_credentials(
-    service: UserService = Depends(get_user_service),
-    _admin: str = Depends(get_current_admin)
+    service: UserService = Depends(get_user_service), _admin: str = Depends(get_current_admin)
 ) -> dict:
     """
     Generate secure random username and password.
-    
+
     The generated credentials are not automatically created.
     Use POST /users to create the user with these credentials.
     """
     username, password = await service.generate_credentials()
-    
+
     return {
         "username": username,
         "password": password,
-        "note": "Use POST /users to create the user with these credentials"
+        "note": "Use POST /users to create the user with these credentials",
     }

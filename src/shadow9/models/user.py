@@ -4,15 +4,41 @@ User domain models with strong typing using Pydantic.
 These models provide runtime validation and type safety for user-related data.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+def utc_now() -> datetime:
+    """The current time, carrying UTC rather than leaving the zone to be guessed."""
+    return datetime.now(timezone.utc)
+
+
+def _stored_time(value: datetime) -> str:
+    """
+    Render a time the way the credentials file has always held it.
+
+    The store's timestamps are naive UTC and an existing install's file is full of
+    them, so writing an offset here would change every string in that file. The zone
+    is dropped on the way out and put back by `_loaded_time` on the way in, which
+    keeps the bytes on disk identical while the models stay zone-aware.
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat()
+
+
+def _loaded_time(value: str) -> datetime:
+    """Read a stored timestamp back, reading a missing zone as the UTC it always was."""
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
 class SecurityLevel(str, Enum):
     """Security/evasion levels for traffic analysis protection."""
+
     NONE = "none"
     BASIC = "basic"
     MODERATE = "moderate"
@@ -21,6 +47,7 @@ class SecurityLevel(str, Enum):
 
 class BridgeType(str, Enum):
     """Tor bridge types for bypassing censorship."""
+
     NONE = "none"
     OBFS4 = "obfs4"
     SNOWFLAKE = "snowflake"
@@ -28,56 +55,45 @@ class BridgeType(str, Enum):
 
 class UserBase(BaseModel):
     """Base user model with common fields."""
-    
+
     model_config = ConfigDict(
         from_attributes=True,
         str_strip_whitespace=True,
     )
-    
+
     username: str = Field(
         ...,
         min_length=3,
         max_length=64,
-        pattern=r'^[a-zA-Z0-9_-]+$',
-        description="Unique username (alphanumeric, underscore, hyphen)"
+        pattern=r"^[a-zA-Z0-9_-]+$",
+        description="Unique username (alphanumeric, underscore, hyphen)",
     )
-    use_tor: bool = Field(
-        default=True,
-        description="Whether to route traffic through Tor"
-    )
+    use_tor: bool = Field(default=True, description="Whether to route traffic through Tor")
     bridge_type: BridgeType = Field(
-        default=BridgeType.NONE,
-        description="Tor bridge type for censorship circumvention"
+        default=BridgeType.NONE, description="Tor bridge type for censorship circumvention"
     )
     security_level: SecurityLevel = Field(
         default=SecurityLevel.BASIC,
-        description="Security/evasion level for traffic analysis protection"
+        description="Security/evasion level for traffic analysis protection",
     )
     allowed_ports: Optional[list[int]] = Field(
-        default=None,
-        description="List of allowed destination ports (None = all ports)"
+        default=None, description="List of allowed destination ports (None = all ports)"
     )
     rate_limit: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Max requests per minute (None = server default)"
+        default=None, ge=1, description="Max requests per minute (None = server default)"
     )
     bind_port: Optional[int] = Field(
         default=None,
         ge=1,
         le=65535,
-        description="Custom bind port for this user (None = shared server port)"
+        description="Custom bind port for this user (None = shared server port)",
     )
     logging_enabled: bool = Field(
-        default=True,
-        description="Whether to log activity for this user (privacy setting)"
+        default=True, description="Whether to log activity for this user (privacy setting)"
     )
-    enabled: bool = Field(
-        default=True,
-        description="Whether the user account is enabled"
-    )
+    enabled: bool = Field(default=True, description="Whether the user account is enabled")
 
-    @field_validator('allowed_ports')
+    @field_validator("allowed_ports")
     @classmethod
     def validate_ports(cls, v: Optional[list[int]]) -> Optional[list[int]]:
         """Validate all ports are in valid range."""
@@ -90,49 +106,50 @@ class UserBase(BaseModel):
 
 class User(UserBase):
     """Full user model including timestamps."""
-    
+
     created_at: datetime = Field(
-        default_factory=datetime.utcnow,
-        description="When the user was created"
+        default_factory=utc_now, description="When the user was created"
     )
-    last_used: Optional[datetime] = Field(
-        default=None,
-        description="Last authentication time"
-    )
+    last_used: Optional[datetime] = Field(default=None, description="Last authentication time")
 
 
 class Credential(User):
     """
     User credential model including password hash.
-    
+
     This extends User with sensitive authentication data.
     Should not be exposed via API responses.
     """
-    
-    password_hash: str = Field(
-        ...,
-        description="Argon2id password hash"
-    )
-    
+
+    password_hash: str = Field(..., description="Argon2id password hash")
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         data = self.model_dump()
         # Convert datetime to ISO string for JSON compatibility
-        if data.get('created_at'):
-            data['created_at'] = data['created_at'].isoformat()
-        if data.get('last_used'):
-            data['last_used'] = data['last_used'].isoformat()
+        if data.get("created_at"):
+            data["created_at"] = _stored_time(data["created_at"])
+        if data.get("last_used"):
+            data["last_used"] = _stored_time(data["last_used"])
         # Convert enums to values
-        data['bridge_type'] = data['bridge_type'].value if isinstance(data['bridge_type'], BridgeType) else data['bridge_type']
-        data['security_level'] = data['security_level'].value if isinstance(data['security_level'], SecurityLevel) else data['security_level']
+        data["bridge_type"] = (
+            data["bridge_type"].value
+            if isinstance(data["bridge_type"], BridgeType)
+            else data["bridge_type"]
+        )
+        data["security_level"] = (
+            data["security_level"].value
+            if isinstance(data["security_level"], SecurityLevel)
+            else data["security_level"]
+        )
         return data
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "Credential":
         """Create from dictionary (handles legacy date formats)."""
         # Handle ISO string dates
-        if isinstance(data.get('created_at'), str):
-            data['created_at'] = datetime.fromisoformat(data['created_at'])
-        if isinstance(data.get('last_used'), str) and data['last_used']:
-            data['last_used'] = datetime.fromisoformat(data['last_used'])
+        if isinstance(data.get("created_at"), str):
+            data["created_at"] = _loaded_time(data["created_at"])
+        if isinstance(data.get("last_used"), str) and data["last_used"]:
+            data["last_used"] = _loaded_time(data["last_used"])
         return cls(**data)

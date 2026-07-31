@@ -23,18 +23,18 @@ def run_user_remove_wizard(
 ) -> bool:
     """
     Interactive wizard to remove users.
-    
+
     Args:
         auth_manager: The authentication manager
         username: Optional specific username to remove
         yes: Skip confirmation prompts
         all_users: Remove all users
-        
+
     Returns:
         True if removal was successful, False otherwise
     """
     users = auth_manager.list_users()
-    
+
     if not users:
         console.print("[yellow]No users configured[/yellow]")
         return False
@@ -46,7 +46,7 @@ def run_user_remove_wizard(
             confirm = typer.confirm("Are you sure?", default=False)
             if not confirm:
                 return False
-        
+
         paths = get_paths()
         for user in users:
             auth_manager.remove_user(user)
@@ -58,29 +58,29 @@ def run_user_remove_wizard(
     # Interactive mode if no username provided
     if username is None:
         console.print("\n[bold]Select user(s) to remove:[/bold]\n")
-        
+
         # Show numbered list
         for i, user in enumerate(users, 1):
             use_tor = auth_manager.get_user_tor_preference(user)
             routing = "Tor" if use_tor else "Direct"
             console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
-        
+
         console.print("  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
         console.print("  [cyan]Q.[/cyan] Cancel\n")
-        
+
         choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
-        
+
         if choice.upper() == "Q":
             console.print("[yellow]Cancelled[/yellow]")
             return False
-        
+
         if choice.upper() == "A":
             if not yes:
                 console.print(f"\n[bold red]This will remove ALL {len(users)} users![/bold red]")
                 confirm = typer.confirm("Are you sure?", default=False)
                 if not confirm:
                     return False
-            
+
             paths = get_paths()
             for user in users:
                 auth_manager.remove_user(user)
@@ -88,7 +88,7 @@ def run_user_remove_wizard(
                 console.print(f"[dim]Removed: {user}[/dim]")
             console.print(f"[green]All {len(users)} users removed[/green]")
             return True
-        
+
         # Handle number selection
         try:
             idx = int(choice) - 1

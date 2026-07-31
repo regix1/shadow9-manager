@@ -11,30 +11,33 @@ import os
 from pathlib import Path
 from typing import Annotated
 
+
 # Load .env file from common locations
 def _load_env():
     """Load environment variables from .env file."""
     env_locations = [
         Path.cwd() / ".env",  # Current directory
-        Path(__file__).parent.parent.parent.parent / ".env",  # Project root (when installed editable)
+        Path(__file__).parent.parent.parent.parent
+        / ".env",  # Project root (when installed editable)
         Path.home() / ".shadow9" / ".env",  # User config directory
         Path("/etc/shadow9/.env"),  # System config (Linux)
     ]
-    
+
     for env_file in env_locations:
         if env_file.exists():
             try:
                 with open(env_file) as f:
                     for line in f:
                         line = line.strip()
-                        if line and not line.startswith('#') and '=' in line:
-                            key, _, value = line.partition('=')
+                        if line and not line.startswith("#") and "=" in line:
+                            key, _, value = line.partition("=")
                             # Don't override existing env vars
                             if key.strip() not in os.environ:
                                 os.environ[key.strip()] = value.strip()
                 break  # Stop after first found .env
             except Exception:
                 pass
+
 
 _load_env()
 
@@ -71,7 +74,12 @@ def version_callback(value: bool):
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    version: Annotated[bool, typer.Option("--version", callback=version_callback, is_eager=True, help="Show version and exit.")] = False,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version", callback=version_callback, is_eager=True, help="Show version and exit."
+        ),
+    ] = False,
 ):
     """
     Shadow9 Manager - Secure SOCKS5 Proxy with Tor Support

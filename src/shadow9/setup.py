@@ -27,7 +27,6 @@ from .ui import (
     info,
     muted,
     dependency_table,
-    completion_panel,
 )
 
 logger = structlog.get_logger(__name__)
@@ -35,11 +34,12 @@ logger = structlog.get_logger(__name__)
 
 class OS(Enum):
     """Supported operating systems."""
-    LINUX_DEBIAN = "debian"      # Debian, Ubuntu, Mint, etc.
-    LINUX_FEDORA = "fedora"      # Fedora, RHEL, CentOS
-    LINUX_ARCH = "arch"          # Arch, Manjaro
-    LINUX_ALPINE = "alpine"      # Alpine Linux
-    LINUX_OTHER = "linux"        # Generic Linux
+
+    LINUX_DEBIAN = "debian"  # Debian, Ubuntu, Mint, etc.
+    LINUX_FEDORA = "fedora"  # Fedora, RHEL, CentOS
+    LINUX_ARCH = "arch"  # Arch, Manjaro
+    LINUX_ALPINE = "alpine"  # Alpine Linux
+    LINUX_OTHER = "linux"  # Generic Linux
     MACOS = "macos"
     WINDOWS = "windows"
     UNKNOWN = "unknown"
@@ -48,14 +48,15 @@ class OS(Enum):
 @dataclass
 class Dependency:
     """Represents a system dependency."""
+
     name: str
-    check_command: str           # Command to check if installed
-    install_commands: dict       # OS -> install command(s)
-    binary_name: str             # Name of binary to check in PATH
+    check_command: str  # Command to check if installed
+    install_commands: dict  # OS -> install command(s)
+    binary_name: str  # Name of binary to check in PATH
     required: bool = True
     description: str = ""
-    min_version: str = ""        # Minimum required version (e.g., "0.4.8")
-    version_command: str = ""    # Command to get version string
+    min_version: str = ""  # Minimum required version (e.g., "0.4.8")
+    version_command: str = ""  # Command to get version string
 
 
 # Commands to add official Tor Project repository (for latest Tor version)
@@ -66,7 +67,7 @@ TOR_REPO_SETUP_DEBIAN = [
     # Add Tor Project signing key
     "wget -qO- https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc | sudo gpg --dearmor -o /usr/share/keyrings/tor-archive-keyring.gpg --yes",
     # Add Tor Project repository (auto-detect distro codename)
-    "echo \"deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org $(lsb_release -cs) main\" | sudo tee /etc/apt/sources.list.d/tor.list",
+    'echo "deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/tor.list',
     "sudo apt-get update",
     "sudo apt-get install -y tor deb.torproject.org-keyring",
 ]
@@ -92,7 +93,7 @@ DEPENDENCIES = [
             OS.LINUX_ALPINE: ["sudo apk add tor"],
             OS.MACOS: ["brew install tor"],
             OS.WINDOWS: [],  # Manual install required
-        }
+        },
     ),
     Dependency(
         name="obfs4proxy",
@@ -107,7 +108,7 @@ DEPENDENCIES = [
             OS.LINUX_ALPINE: ["sudo apk add obfs4proxy"],
             OS.MACOS: ["brew install obfs4proxy"],
             OS.WINDOWS: [],
-        }
+        },
     ),
     Dependency(
         name="snowflake-client",
@@ -122,7 +123,7 @@ DEPENDENCIES = [
             OS.LINUX_ALPINE: [],
             OS.MACOS: ["brew install snowflake"],
             OS.WINDOWS: [],
-        }
+        },
     ),
 ]
 
@@ -137,7 +138,7 @@ class SystemSetup:
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
         self.os_type = self._detect_os()
-        self.is_root = os.geteuid() == 0 if hasattr(os, 'geteuid') else False
+        self.is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
         self.ui: SetupUI | None = None
 
     def _detect_os(self) -> OS:
@@ -204,7 +205,7 @@ class SystemSetup:
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=300  # 5 minute timeout
+                timeout=300,  # 5 minute timeout
             )
             success_result = result.returncode == 0
             output = result.stdout + result.stderr
@@ -221,12 +222,14 @@ class SystemSetup:
         Returns:
             -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
         """
+
         def parse_version(v: str) -> list:
             # Extract just the version numbers, ignore any suffix
             import re
-            match = re.match(r'(\d+(?:\.\d+)*)', v)
+
+            match = re.match(r"(\d+(?:\.\d+)*)", v)
             if match:
-                return [int(x) for x in match.group(1).split('.')]
+                return [int(x) for x in match.group(1).split(".")]
             return [0]
 
         parts1 = parse_version(v1)
@@ -327,7 +330,9 @@ class SystemSetup:
             if is_installed and meets_version:
                 self._log(f"{dep.name} is already installed", "success")
             elif is_installed and not meets_version:
-                self._log(f"{dep.name} is installed but outdated (need {dep.min_version}+)", "warning")
+                self._log(
+                    f"{dep.name} is installed but outdated (need {dep.min_version}+)", "warning"
+                )
                 self._log(f"Upgrading {dep.name} from official repository...", "step")
                 success_result = self.install_dependency(dep)
                 if not success_result and dep.required:
@@ -378,9 +383,9 @@ class SystemSetup:
         if modifications_needed:
             muted(f"Config location: {torrc_path}", indent=4)
             self._log(
-                f"Please add the following to {torrc_path}:\n" +
-                "\n".join(f"    {m}" for m in modifications_needed),
-                "warning"
+                f"Please add the following to {torrc_path}:\n"
+                + "\n".join(f"    {m}" for m in modifications_needed),
+                "warning",
             )
 
         return True
@@ -457,12 +462,14 @@ class SystemSetup:
         all_good = True
         deps_list = []
         for name, dep_info in status.items():
-            deps_list.append({
-                "name": name,
-                "installed": dep_info["installed"],
-                "required": dep_info["required"],
-                "description": dep_info["description"],
-            })
+            deps_list.append(
+                {
+                    "name": name,
+                    "installed": dep_info["installed"],
+                    "required": dep_info["required"],
+                    "description": dep_info["description"],
+                }
+            )
             if not dep_info["installed"] and dep_info["required"]:
                 all_good = False
 
@@ -487,7 +494,6 @@ class SystemSetup:
             )
 
         return all_good
-
 
 
 def run_setup(verbose: bool = True, include_optional: bool = True) -> bool:

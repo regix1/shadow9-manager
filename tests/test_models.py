@@ -3,7 +3,7 @@ Tests for Pydantic domain models.
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from shadow9.models.user import (
@@ -12,11 +12,11 @@ from shadow9.models.user import (
     UserBase,
     User,
     Credential,
+    utc_now,
 )
 from shadow9.models.server import (
     Socks5AuthMethod,
     Socks5Command,
-    Socks5AddressType,
     Socks5Reply,
     ConnectionInfo,
     ServerStatus,
@@ -69,15 +69,15 @@ class TestUserModels:
         # Too short
         with pytest.raises(ValidationError):
             UserBase(username="ab")
-        
+
         # Too long
         with pytest.raises(ValidationError):
             UserBase(username="a" * 65)
-        
+
         # Invalid characters
         with pytest.raises(ValidationError):
             UserBase(username="user@name")
-        
+
         # Valid usernames
         UserBase(username="abc")  # minimum length
         UserBase(username="user_name")
@@ -89,10 +89,10 @@ class TestUserModels:
         # Invalid bind port
         with pytest.raises(ValidationError):
             UserBase(username="test", bind_port=0)
-        
+
         with pytest.raises(ValidationError):
             UserBase(username="test", bind_port=70000)
-        
+
         # Valid bind port
         user = UserBase(username="test", bind_port=8080)
         assert user.bind_port == 8080
@@ -102,7 +102,7 @@ class TestUserModels:
         # Invalid port in list
         with pytest.raises(ValidationError):
             UserBase(username="test", allowed_ports=[80, 70000])
-        
+
         # Valid ports
         user = UserBase(username="test", allowed_ports=[80, 443, 8080])
         assert user.allowed_ports == [80, 443, 8080]
@@ -111,14 +111,14 @@ class TestUserModels:
         """Test User model with timestamps."""
         user = User(
             username="test_user",
-            created_at=datetime.utcnow(),
+            created_at=utc_now(),
         )
         assert user.created_at is not None
         assert user.last_used is None
 
     def test_credential_model(self):
         """Test Credential model."""
-        now = datetime.utcnow()
+        now = utc_now()
         cred = Credential(
             username="test_user",
             password_hash="$argon2id$v=19$...",
@@ -137,7 +137,7 @@ class TestUserModels:
             security_level=SecurityLevel.PARANOID,
         )
         data = cred.to_dict()
-        
+
         assert data["username"] == "test_user"
         assert data["password_hash"] == "hash123"
         assert data["bridge_type"] == "obfs4"
@@ -154,10 +154,34 @@ class TestUserModels:
             "created_at": "2024-01-15T10:30:00",
         }
         cred = Credential.from_dict(data)
-        
+
         assert cred.username == "test_user"
         assert cred.bridge_type == BridgeType.OBFS4
         assert cred.created_at.year == 2024
+
+    def test_credential_to_dict_writes_the_stored_timestamp_shape(self):
+        """A zone-aware time is written the way the credentials file already holds it."""
+        cred = Credential(
+            username="test_user",
+            password_hash="hash123",
+            created_at=datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc),
+        )
+        data = cred.to_dict()
+
+        assert data["created_at"] == "2024-01-15T10:30:00"
+        assert Credential.from_dict(dict(data)).created_at == cred.created_at
+
+    def test_credential_from_dict_reads_a_stored_timestamp_as_utc(self):
+        """A stored timestamp carries no offset, and has always meant UTC."""
+        cred = Credential.from_dict(
+            {
+                "username": "test_user",
+                "password_hash": "hash123",
+                "created_at": "2024-01-15T10:30:00",
+            }
+        )
+
+        assert cred.created_at == datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc)
 
 
 class TestServerModels:

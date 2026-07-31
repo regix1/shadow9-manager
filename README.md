@@ -16,6 +16,7 @@ A multi-user SOCKS5 proxy server with Tor routing, pluggable transport support, 
 - [Security Features](#security-features)
 - [Performance](#performance)
 - [Troubleshooting](#troubleshooting)
+- [Breaking Changes](#breaking-changes)
 - [Development](#development)
 - [License](#license)
 
@@ -67,6 +68,7 @@ Shadow9 routes SOCKS5 traffic through the Tor network with per-user settings. Ea
 - **Rate limiting** — per-user request limits
 - **Port restrictions** — configurable allowed destination ports
 - **Account lockout** — protection against brute-force attempts
+- **Internal address blocking** — private and loopback destinations are refused by default
 
 </details>
 
@@ -141,6 +143,26 @@ shadow9 serve
 
 Connect your SOCKS5 client to `127.0.0.1:1080` with your credentials.
 
+### Binding and network exposure
+
+The server binds to `127.0.0.1` by default, so it only accepts connections from the same
+machine. `shadow9 service install` defaults the same way, so a service installed with no
+flags is also local-only. Exposing the proxy to your network is now something you ask for
+explicitly:
+
+```bash
+shadow9 serve --host 0.0.0.0                    # this run only
+sudo shadow9 service install --host 0.0.0.0     # bake it into the systemd unit
+```
+
+Or set `server.host: "0.0.0.0"` in `config/config.yaml`.
+
+The default used to be `0.0.0.0`. Listening on every interface meant an unauthenticated
+stranger could open connections to the proxy, and each one costs 64 MB during password
+hashing, so a machine could be pushed out of memory from the outside. Binding to loopback
+means only local clients can reach it. If you do open it up, put it behind a firewall rule
+that limits which addresses can connect.
+
 ---
 
 ## Usage
@@ -165,7 +187,7 @@ shadow9 stop
 shadow9 user generate
 
 # Generate with options
-shadow9 user generate --username myuser --password "MyP@ss!" --tor --bridge obfs4 --security moderate
+shadow9 user generate --username myuser --password "Str0ngP@ssw0rd!" --tor --bridge obfs4 --security moderate
 
 # List users
 shadow9 user list
@@ -185,6 +207,53 @@ shadow9 user disable <username>
 
 # Remove a user
 shadow9 user remove <username>
+```
+
+Passwords you supply with `--password` must be at least 12 characters and contain an
+uppercase letter, a lowercase letter, a digit and a special character. Omit the flag
+to get a generated password that already meets those rules.
+
+`--ports` and `--bind-port` accept 1-65535, and `--rate-limit` accepts 1 or more.
+On `shadow9 user modify`, `--rate-limit 0` and `--bind-port 0` mean "go back to the
+server default".
+
+### Interactive Menu
+
+```bash
+# Open the menu (this is also what runs when shadow9 is called with no arguments)
+shadow9 menu
+```
+
+### Encryption Keys
+
+```bash
+# Create the master key that encrypts the credentials file
+shadow9 key generate
+
+# Regenerate it (this invalidates every existing credential)
+shadow9 key generate --force
+
+# Report whether a master key is configured
+shadow9 key check
+```
+
+### REST API
+
+The API is a separate process from the proxy. It needs `SHADOW9_API_KEY` set;
+every endpoint returns 503 without it.
+
+```bash
+# Write config/api.yaml and create an API key
+shadow9 api setup
+
+# Run the API server
+shadow9 api start
+
+# Show the API configuration and whether the server answers
+shadow9 api status
+
+# Show or rotate the stored API key
+shadow9 api key
 ```
 
 ### Service Management (Linux)
@@ -234,12 +303,10 @@ Located at `config/config.yaml`:
 
 ```yaml
 server:
-  host: "127.0.0.1"          # bind address
+  host: "127.0.0.1"          # bind address, local-only by default
   port: 1080                  # SOCKS5 port
-  max_connections: 100
-  connection_timeout: 30
-  relay_timeout: 300
-  buffer_size: 65536
+  max_connections: 100        # connections accepted at once
+  connection_timeout: 30      # seconds
 
 tor:
   enabled: true
@@ -247,14 +314,11 @@ tor:
   socks_port: 9050
   control_port: 9051
   control_password: null
-  auto_detect: true
 
 auth:
   require_auth: true
   credentials_file: "config/credentials.enc"
-  master_key_env: "SHADOW9_MASTER_KEY"
-  session_timeout_hours: 24
-  max_failed_attempts: 5
+  max_failed_attempts: 5      # failures before the account is locked
   lockout_duration_minutes: 15
 
 log:
@@ -266,13 +330,17 @@ log:
 
 security:
   allowed_ports: [80, 443, 8080, 8443]
-  blocked_hosts: []
-  allow_localhost: false
-  rate_limit_per_minute: 100
-  max_request_size: 1048576
+  block_private_ranges: true  # refuse private and loopback destinations
+  allow_localhost: false      # exception to the above for 127.0.0.0/8
+  rate_limit_per_minute: 100  # default when a user has no rate limit set
 ```
 
+Every key above is read by the server. The master key is always taken from the
+`SHADOW9_MASTER_KEY` environment variable and is not configurable from this file.
+
 ### Environment Variables
+
+Read by the proxy (`shadow9 serve`):
 
 | Variable | Description |
 |----------|-------------|
@@ -283,6 +351,16 @@ security:
 | `SHADOW9_TOR_ENABLED` | Enable Tor routing |
 | `SHADOW9_TOR_PORT` | Tor SOCKS port |
 | `SHADOW9_LOG_LEVEL` | Log level |
+
+Read by the API (`shadow9 api start`):
+
+| Variable | Description |
+|----------|-------------|
+| `SHADOW9_API_KEY` | Required. Every endpoint returns 503 until this is set |
+| `SHADOW9_CORS_ORIGINS` | Comma-separated allowed origins. Empty means CORS is off |
+| `SHADOW9_HOST`, `SHADOW9_PORT` | Server bind address and port |
+| `SHADOW9_TOR_SOCKS_PORT` | Tor SOCKS port. The API uses this name, not `SHADOW9_TOR_PORT` |
+| `SHADOW9_MASTER_KEY` | Encryption key for credentials |
 
 ---
 
@@ -314,15 +392,16 @@ Shadow9 manages separate Tor instances per bridge type — direct on 9050, obfs4
 | `--tor/--no-tor` | — | `--tor` |
 | `--bridge` | `none`, `obfs4`, `snowflake` | `none` |
 | `--security` | `none`, `basic`, `moderate`, `paranoid` | `basic` |
-| `--ports` | `"80,443"` or `"all"` | `all` |
-| `--rate-limit` | integer | unlimited |
-| `--bind-port` | port number | shared (1080) |
+| `--ports` | `"80,443"` (each 1-65535) or `"all"` | `all` |
+| `--rate-limit` | requests per minute, 1 or more | server default |
+| `--bind-port` | 1-65535 | shared (1080) |
+| `--logging/--no-logging` | — | `--logging` |
 
 **Example:**
 ```bash
 shadow9 user generate \
   --username secureuser \
-  --password "ComplexP@ss!" \
+  --password "Str0ngP@ssw0rd!" \
   --tor \
   --bridge snowflake \
   --security paranoid \
@@ -342,7 +421,14 @@ Shadow9 Manager
 ├── CLI (Typer + Rich)
 │   ├── Server commands (serve, stop)
 │   ├── User commands (generate, list, modify, remove)
-│   └── Service commands (install, start, stop, logs)
+│   ├── Service commands (install, start, stop, logs)
+│   ├── Key commands (generate, check)
+│   ├── API commands (setup, start, status, key)
+│   └── Interactive menu
+├── REST API (FastAPI, separate process)
+│   ├── User endpoints (list, create, modify, remove)
+│   ├── Server status endpoints
+│   └── API key authentication
 ├── SOCKS5 Server
 │   ├── RFC 1928/1929 protocol handler
 │   ├── User authentication (Argon2id)
@@ -354,8 +440,8 @@ Shadow9 Manager
 │   └── PluggableTransportManager (obfs4, snowflake)
 └── Security Layer
     ├── DPI bypass (TLS splitting, SNI fragmentation)
-    ├── Rate limiting
-    └── Port/host restrictions
+    ├── Rate limiting and account lockout
+    └── Port and internal-address restrictions
 ```
 
 ### Data Flow
@@ -392,9 +478,13 @@ Client → SOCKS5 Handshake → Authentication → User Resolution → Security 
 <summary><strong>Access Control</strong></summary>
 
 - **Per-user port restrictions** — limit which ports users can connect to
-- **Host blocking** — block specific destination hosts
-- **Rate limiting** — per-user request limits
-- **Account lockout** — automatic lockout after failed auth attempts
+- **Internal address blocking** — private and loopback destinations are refused after
+  DNS resolution, so a hostname pointing at an internal address is blocked too.
+  Set `security.allow_localhost: true` to permit loopback
+- **Rate limiting** — per-user request limits, from the user's `--rate-limit` or
+  `security.rate_limit_per_minute`
+- **Account lockout** — an account is locked after `auth.max_failed_attempts`
+  failures for `auth.lockout_duration_minutes`
 
 </details>
 
@@ -417,6 +507,15 @@ Client → SOCKS5 Handshake → Authentication → User Resolution → Security 
 | Connection timeouts | Run `shadow9 check-tor` to diagnose |
 | Permission denied | Use `sudo` for service commands |
 | Port already in use | Change port in config or stop conflicting service |
+| Users disappear after a change | A `.lock` file was deleted while Shadow9 was running, see below |
+
+**Do not delete `*.lock` files while Shadow9 is running.** Shadow9 keeps a small empty
+`.lock` file beside `credentials.enc` and beside the key salt, and uses it to stop the
+proxy and the API changing the same file at once. On Linux the lock belongs to the open
+file rather than to the name, so removing one while it is held lets two processes edit
+the credentials at the same time and one of them silently overwrites the other's users.
+Nothing can detect that after the fact. Stop the service first; with Shadow9 stopped
+these files are safe to delete and are recreated on the next start.
 
 **Diagnostic commands:**
 ```bash
@@ -425,6 +524,46 @@ shadow9 service status         # view service status
 shadow9 service logs -f        # follow logs
 SHADOW9_LOG_LEVEL=DEBUG shadow9 serve  # verbose output
 ```
+
+---
+
+## Breaking Changes
+
+A cleanup pass removed code that nothing in this repository called. If you only use the
+`shadow9` command line or the REST API, nothing here affects you. If you import `shadow9`
+from your own Python, read this list. The package version has not been raised yet, so
+`shadow9.__version__` still reports `1.0.0` and cannot be used to tell the two apart.
+
+**Configuration**
+
+`auth.session_timeout_hours` is gone. Nothing honored it once the session service was
+removed, and the loader warned about it on every start. It has been taken out of the
+shipped `config/config.yaml`; delete it from your own config to stop the warning. Every
+other `auth` setting is unchanged.
+
+**Removed names that were published in `__all__`**
+
+| Was | Now |
+|-----|-----|
+| `shadow9.services.AuthService` | removed, no replacement. The whole `shadow9.services.auth_service` module is gone. |
+| `shadow9.api.get_auth_service` | removed, no replacement. It only ever built the class above. |
+| `shadow9.core.setup_logging` | moved. Import `setup_logging` from `shadow9.config` instead. |
+
+**Removed classes and functions**
+
+None of these had callers, and none has a replacement.
+
+| Was | Kind |
+|-----|------|
+| `shadow9.auth.SessionManager` | in-memory session tracking nothing consulted |
+| `shadow9.services.auth_service.Session` | went with the module above |
+| `shadow9.security.SecureServer`, `SecureTransport`, `TLSWrapper` | an unused TLS layer |
+| `shadow9.security.print_security_info` | console helper |
+| `shadow9.socks5_client.Socks5ClientPool`, `connect_via_socks5` | an unused client pool |
+| `shadow9.schemas.common.PaginatedResponse` | the API returns its own shapes |
+| `shadow9.logging_utils.create_user_logger` | console helper |
+| `shadow9.bridges.print_bridge_info` | console helper |
+| `shadow9.wizards.user_info.run_user_info_wizard` | console helper |
 
 ---
 

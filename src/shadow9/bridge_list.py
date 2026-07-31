@@ -17,18 +17,19 @@ from enum import Enum
 
 class BridgeType(Enum):
     """Supported bridge/pluggable transport types."""
-    NONE = "none"           # Direct Tor connection (detectable)
-    OBFS4 = "obfs4"         # Obfuscated traffic (recommended)
-    SNOWFLAKE = "snowflake" # Uses WebRTC peers
-    WEBTUNNEL = "webtunnel" # Looks like HTTPS to allowed domains
+
+    NONE = "none"  # Direct Tor connection (detectable)
+    OBFS4 = "obfs4"  # Obfuscated traffic (recommended)
+    SNOWFLAKE = "snowflake"  # Uses WebRTC peers
 
 
 @dataclass
 class Bridge:
     """A single Tor bridge configuration."""
+
     type: BridgeType
-    address: str           # IP:Port or domain
-    fingerprint: str       # Bridge fingerprint
+    address: str  # IP:Port or domain
+    fingerprint: str  # Bridge fingerprint
     params: dict = field(default_factory=dict)  # Transport-specific params
 
     def to_bridge_line(self) -> str:
@@ -53,17 +54,19 @@ class Bridge:
 # STUN Servers (for WebRTC NAT traversal)
 # =============================================================================
 
-STUN_SERVERS = ",".join([
-    "stun:stun.l.google.com:19302",
-    "stun:stun.antisip.com:3478",
-    "stun:stun.bluesip.net:3478",
-    "stun:stun.dus.net:3478",
-    "stun:stun.epygi.com:3478",
-    "stun:stun.sonetel.com:3478",
-    "stun:stun.uls.co.za:3478",
-    "stun:stun.voipgate.com:3478",
-    "stun:stun.voys.nl:3478"
-])
+STUN_SERVERS = ",".join(
+    [
+        "stun:stun.l.google.com:19302",
+        "stun:stun.antisip.com:3478",
+        "stun:stun.bluesip.net:3478",
+        "stun:stun.dus.net:3478",
+        "stun:stun.epygi.com:3478",
+        "stun:stun.sonetel.com:3478",
+        "stun:stun.uls.co.za:3478",
+        "stun:stun.voipgate.com:3478",
+        "stun:stun.voys.nl:3478",
+    ]
+)
 
 
 # =============================================================================
@@ -77,8 +80,8 @@ BUILTIN_OBFS4_BRIDGES: List[Bridge] = [
         fingerprint="1AE039EE0B11DB79E4B4B29ABA3C647B40B7B280",
         params={
             "cert": "4JeU2x3EsSphNCqGEMLhOGCQBsLvRPOdDmOGudvPL2qKSn+DCDJuFilndkvF0XhFOQ0qHA",
-            "iat-mode": "0"
-        }
+            "iat-mode": "0",
+        },
     ),
     Bridge(
         type=BridgeType.OBFS4,
@@ -86,8 +89,8 @@ BUILTIN_OBFS4_BRIDGES: List[Bridge] = [
         fingerprint="0BAC39417268B96B9F514E7F63FA6FBA1A788955",
         params={
             "cert": "VwEFpk9F/UN9JED7XpG1XOjm/O8ZCXK80oPecgWnNDZDv5pdkhq1OpbAH0wNqOT6H6BmRQ",
-            "iat-mode": "1"
-        }
+            "iat-mode": "1",
+        },
     ),
     Bridge(
         type=BridgeType.OBFS4,
@@ -95,8 +98,8 @@ BUILTIN_OBFS4_BRIDGES: List[Bridge] = [
         fingerprint="86AC7B8D430DAC4117E9F42C9EAED18133863AAF",
         params={
             "cert": "0aKPMOYUDaYRIVddHfxRHG9q2jJsxEWLqnqCs2wMpfNSwLcJB4lGydBRL7wABs7zGcFk0Q",
-            "iat-mode": "0"
-        }
+            "iat-mode": "0",
+        },
     ),
 ]
 
@@ -122,8 +125,8 @@ def _fastly_bridge(address_suffix: int, front: str) -> Bridge:
             "url": _FASTLY_URL,
             "front": front,
             "ice": STUN_SERVERS,
-            "utls-imitate": "hellorandomizedalpn"
-        }
+            "utls-imitate": "hellorandomizedalpn",
+        },
     )
 
 
@@ -149,8 +152,8 @@ SNOWFLAKE_AMP_GOOGLE = Bridge(
         "ampcache": "https://cdn.ampproject.org/",
         "front": "www.google.com",
         "ice": STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
+        "utls-imitate": "hellorandomizedalpn",
+    },
 )
 
 # CDN77 (backup - may be slow in some regions)
@@ -162,8 +165,8 @@ SNOWFLAKE_CDN77 = Bridge(
         "url": "https://1098762253.rsc.cdn77.org/",
         "front": "www.phpmyadmin.net",
         "ice": STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
+        "utls-imitate": "hellorandomizedalpn",
+    },
 )
 
 # Bunny CDN (Triplebit private broker - independent infrastructure)
@@ -175,8 +178,8 @@ SNOWFLAKE_BUNNY = Bridge(
         "url": "https://triplebit-snowflake-broker.b-cdn.net/",
         "front": "www.bunny.net",
         "ice": STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
+        "utls-imitate": "hellorandomizedalpn",
+    },
 )
 
 # Azure CDN (good fallback, may work when others are blocked)
@@ -188,8 +191,8 @@ SNOWFLAKE_AZURE = Bridge(
         "url": "https://snowflake-broker.azureedge.net/",
         "front": "ajax.aspnetcdn.com",
         "ice": STUN_SERVERS,
-        "utls-imitate": "hellorandomizedalpn"
-    }
+        "utls-imitate": "hellorandomizedalpn",
+    },
 )
 
 

@@ -45,6 +45,11 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
+pytest-of-*/
+# Scratch directories left in the repo root by test runs and repro scripts.
+# They can hold a generated credentials file, so they must never be staged.
+tmp*/
 
 # Virtual environments
 venv/
@@ -64,6 +69,12 @@ env/
 # Project specific
 config/credentials.enc
 config/.salt
+# The sidecar the credential store locks while it rewrites credentials.enc. It appears
+# on the first change a real install makes, and it belongs to that machine.
+config/*.lock
+config/api.yaml
+config/.api_salt
+users/
 *.log
 
 # Environment variables
@@ -76,4 +87,4 @@ config/.salt
 *.key
 secrets/
 nul
-.claude-flow/agents/store.json
+.claude-flow/

@@ -16,10 +16,8 @@ from rich.panel import Panel
 from ..config import Config
 from ..auth import AuthManager
 from ..paths import get_paths, load_master_key
-from ..wizards import (
-    run_user_modify_wizard,
-    run_user_list_wizard, display_user_info
-)
+from ..schemas.user import UserCreate
+from ..wizards import run_user_modify_wizard, run_user_list_wizard, display_user_info
 
 console = Console()
 
@@ -41,37 +39,34 @@ def _offer_service_restart(reason: str = "Changes will apply after restart.") ->
     """Check if service is running and offer to restart it."""
     import subprocess
     import shutil
-    
+
     # Check if systemctl is available (Linux with systemd)
     if not shutil.which("systemctl"):
         console.print(f"\n[yellow]{reason}[/yellow]")
         console.print("[dim]Restart manually: shadow9 service restart[/dim]")
         return
-    
+
     # Check if shadow9 service is running
     try:
         result = subprocess.run(
-            ["systemctl", "is-active", "--quiet", "shadow9.service"],
-            capture_output=True
+            ["systemctl", "is-active", "--quiet", "shadow9.service"], capture_output=True
         )
         service_running = result.returncode == 0
     except Exception:
         service_running = False
-    
+
     if not service_running:
         console.print(f"\n[dim]{reason}[/dim]")
         console.print("[dim]Start with: shadow9 service start[/dim]")
         return
-    
+
     # Service is running - offer to restart
     console.print(f"\n[yellow]{reason}[/yellow]")
     if typer.confirm("Restart service now?", default=True):
         console.print("[cyan]Restarting service...[/cyan]")
         try:
             result = subprocess.run(
-                ["systemctl", "restart", "shadow9.service"],
-                capture_output=True,
-                text=True
+                ["systemctl", "restart", "shadow9.service"], capture_output=True, text=True
             )
             if result.returncode == 0:
                 console.print("[green][OK] Service restarted[/green]")
@@ -84,9 +79,27 @@ def _offer_service_restart(reason: str = "Changes will apply after restart.") ->
         console.print("[dim]Restart later: shadow9 service restart[/dim]")
 
 
-def register_user_commands(app: typer.Typer):
+def _parse_allowed_ports(ports: str) -> list[int]:
+    """Parse a comma-separated port list, applying the range the API also enforces."""
+    try:
+        parsed = [int(p.strip()) for p in ports.split(",")]
+    except ValueError as e:
+        console.print("[red]Error: Invalid port format. Use comma-separated numbers.[/red]")
+        raise typer.Exit(1) from e
+
+    try:
+        # the range lives on the API schema so both entry points accept the same ports
+        UserCreate.validate_ports(parsed)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    return parsed
+
+
+def register_user_commands(app: typer.Typer) -> None:
     """Register user subcommands with the app."""
-    
+
     user_app = typer.Typer(
         help="Manage proxy users.",
         invoke_without_command=True,
@@ -96,23 +109,64 @@ def register_user_commands(app: typer.Typer):
 
     @user_app.command("generate")
     def user_generate(
-        username: Annotated[Optional[str], typer.Option("--username", "-u", help="Custom username (random if not provided)")] = None,
-        password: Annotated[Optional[str], typer.Option("--password", "-p", help="Custom password (random if not provided)")] = None,
-        use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")] = None,
-        bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")] = None,
-        security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
-        ports: Annotated[Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")] = None,
-        rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute")] = None,
-        bind_port: Annotated[Optional[int], typer.Option("--bind-port", help="Custom port for this user (dedicated listener)")] = None,
-        logging: Annotated[Optional[bool], typer.Option("--logging/--no-logging", help="Enable or disable activity logging")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
-    ):
+        username: Annotated[
+            Optional[str],
+            typer.Option("--username", "-u", help="Custom username (random if not provided)"),
+        ] = None,
+        password: Annotated[
+            Optional[str],
+            typer.Option("--password", "-p", help="Custom password (random if not provided)"),
+        ] = None,
+        use_tor: Annotated[
+            Optional[bool], typer.Option("--tor/--no-tor", help="Route traffic through Tor")
+        ] = None,
+        bridge: Annotated[
+            Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")
+        ] = None,
+        security: Annotated[
+            Optional[SecurityChoice],
+            typer.Option("--security", "-s", help="Security/evasion level"),
+        ] = None,
+        ports: Annotated[
+            Optional[str], typer.Option("--ports", help="Comma-separated list of allowed ports")
+        ] = None,
+        rate_limit: Annotated[
+            Optional[int], typer.Option("--rate-limit", min=1, help="Max requests per minute")
+        ] = None,
+        bind_port: Annotated[
+            Optional[int],
+            typer.Option(
+                "--bind-port",
+                min=1,
+                max=65535,
+                help="Custom port for this user (dedicated listener)",
+            ),
+        ] = None,
+        logging: Annotated[
+            Optional[bool],
+            typer.Option("--logging/--no-logging", help="Enable or disable activity logging"),
+        ] = None,
+        config: Annotated[
+            str, typer.Option("--config", "-c", help="Path to configuration file")
+        ] = "config/config.yaml",
+    ) -> None:
         """Generate a user with optional custom username/password.
-        
+
         If username or password not provided, secure random values are generated.
         """
         try:
-            _user_generate_impl(username, password, use_tor, bridge, security, ports, rate_limit, bind_port, logging, config)
+            _user_generate_impl(
+                username,
+                password,
+                use_tor,
+                bridge,
+                security,
+                ports,
+                rate_limit,
+                bind_port,
+                logging,
+                config,
+            )
         except KeyboardInterrupt:
             console.print("\n[yellow]Cancelled[/yellow]")
         except typer.Abort:
@@ -129,7 +183,7 @@ def register_user_commands(app: typer.Typer):
         bind_port: Optional[int],
         logging: Optional[bool],
         config: str,
-    ):
+    ) -> None:
         """Implementation of user_generate command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
@@ -137,7 +191,9 @@ def register_user_commands(app: typer.Typer):
         if username is None:
             console.print("\n[bold]Username:[/bold]")
             console.print("  [dim]Leave blank for a secure random username.[/dim]\n")
-            username_input = typer.prompt("  Username (enter for random)", default="", show_default=False)
+            username_input = typer.prompt(
+                "  Username (enter for random)", default="", show_default=False
+            )
             if username_input.strip():
                 username = username_input.strip()
 
@@ -145,7 +201,9 @@ def register_user_commands(app: typer.Typer):
         if password is None:
             console.print("\n[bold]Password:[/bold]")
             console.print("  [dim]Leave blank for a secure random password.[/dim]\n")
-            password_input = typer.prompt("  Password (enter for random)", default="", show_default=False, hide_input=False)
+            password_input = typer.prompt(
+                "  Password (enter for random)", default="", show_default=False, hide_input=False
+            )
             if password_input.strip():
                 password = password_input.strip()
 
@@ -154,31 +212,31 @@ def register_user_commands(app: typer.Typer):
             console.print("\n[bold]Traffic Routing:[/bold]")
             console.print("  [dim]Tor provides anonymity by routing through multiple relays.[/dim]")
             console.print("  [dim]Direct mode is faster but uses your real IP.[/dim]\n")
-            use_tor = typer.confirm(
-                "Route traffic through Tor?",
-                default=True
-            )
+            use_tor = typer.confirm("Route traffic through Tor?", default=True)
 
         # Prompt for bridge if using Tor and not specified
         if use_tor and bridge is None:
             console.print("\n[bold]Tor Bridge Selection:[/bold]")
             console.print("  [dim]Bridges help bypass Tor blocking in restricted networks.[/dim]\n")
-            
+
             console.print("  [cyan]1. none[/cyan] [green](default)[/green]")
             console.print("     Direct connection to Tor network.")
             console.print("     [dim]Best for: Unrestricted networks, fastest option[/dim]\n")
-            
+
             console.print("  [cyan]2. obfs4[/cyan]")
             console.print("     Obfuscates traffic to look like random data.")
             console.print("     [dim]Best for: ISPs that block Tor, moderate censorship[/dim]\n")
-            
+
             console.print("  [cyan]3. snowflake[/cyan]")
             console.print("     Routes through volunteer browser proxies via WebRTC.")
             console.print("     [dim]Best for: When obfs4 is blocked, dynamic endpoints[/dim]\n")
-            
+
             bridge_choice = typer.prompt("Select bridge [1-3]", default="1")
-            bridge_map = {"1": BridgeChoice.none, "2": BridgeChoice.obfs4, 
-                          "3": BridgeChoice.snowflake}
+            bridge_map = {
+                "1": BridgeChoice.none,
+                "2": BridgeChoice.obfs4,
+                "3": BridgeChoice.snowflake,
+            }
             bridge = bridge_map.get(bridge_choice, BridgeChoice.none)
         elif bridge is None:
             bridge = BridgeChoice.none
@@ -192,76 +250,77 @@ def register_user_commands(app: typer.Typer):
         if security is None:
             console.print("\n[bold]Security Level:[/bold]")
             console.print("  [dim]Controls traffic analysis evasion techniques.[/dim]\n")
-            
+
             console.print("  [cyan]1. none[/cyan]")
             console.print("     No evasion techniques applied.")
             console.print("     [dim]Best for: Maximum speed, privacy not a concern[/dim]\n")
-            
+
             console.print("  [cyan]2. basic[/cyan] [green](recommended)[/green]")
             console.print("     Standard headers, basic fingerprint protection.")
             console.print("     [dim]Best for: General privacy with good performance[/dim]\n")
-            
+
             console.print("  [cyan]3. moderate[/cyan]")
             console.print("     Randomized headers, timing jitter, traffic padding.")
             console.print("     Adds random delays to mask traffic patterns.")
             console.print("     [dim]Best for: Evading DPI, corporate firewalls[/dim]\n")
-            
+
             console.print("  [cyan]4. paranoid[/cyan]")
             console.print("     Maximum evasion: packet fragmentation, random delays,")
             console.print("     decoy traffic generation, full header randomization.")
-            console.print("     [dim]Best for: High-risk environments, nation-state adversaries[/dim]")
+            console.print(
+                "     [dim]Best for: High-risk environments, nation-state adversaries[/dim]"
+            )
             console.print("     [dim]Note: Significant performance impact[/dim]\n")
-            
+
             security_choice = typer.prompt("Select level [1-4]", default="2")
-            security_map = {"1": SecurityChoice.none, "2": SecurityChoice.basic,
-                            "3": SecurityChoice.moderate, "4": SecurityChoice.paranoid}
+            security_map = {
+                "1": SecurityChoice.none,
+                "2": SecurityChoice.basic,
+                "3": SecurityChoice.moderate,
+                "4": SecurityChoice.paranoid,
+            }
             security = security_map.get(security_choice, SecurityChoice.basic)
 
         # Prompt for activity logging preference if not specified
         if logging is None:
             console.print("\n[bold]Activity Logging:[/bold]")
             console.print("  [dim]Controls whether the server logs this user's activity.[/dim]")
-            console.print("  [dim]Disabling prevents recording of connections, IPs, and traffic data.[/dim]\n")
-            logging = typer.confirm(
-                "Enable activity logging?",
-                default=True
+            console.print(
+                "  [dim]Disabling prevents recording of connections, IPs, and traffic data.[/dim]\n"
             )
+            logging = typer.confirm("Enable activity logging?", default=True)
 
         # Parse ports
         allowed_ports = None
         if ports:
-            try:
-                allowed_ports = [int(p.strip()) for p in ports.split(',')]
-            except ValueError:
-                console.print("[red]Error: Invalid port format. Use comma-separated numbers.[/red]")
-                raise typer.Exit(1)
+            allowed_ports = _parse_allowed_ports(ports)
 
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key
         )
 
         # Generate random values for any not provided
         random_user, random_pass = auth_manager.generate_credentials()
         final_username = username if username else random_user
         final_password = password if password else random_pass
-        
+
         routing = "Tor" if use_tor else "Direct"
         if bridge != BridgeChoice.none:
             routing += f" + {bridge.value}"
 
         try:
             auth_manager.add_user(
-                final_username, final_password,
+                final_username,
+                final_password,
                 use_tor=use_tor,
                 bridge_type=bridge.value,
                 security_level=security.value,
                 allowed_ports=allowed_ports,
                 rate_limit=rate_limit,
                 bind_port=bind_port,
-                logging_enabled=logging
+                logging_enabled=logging,
             )
 
             # Build info string
@@ -280,21 +339,25 @@ def register_user_commands(app: typer.Typer):
                 info_lines.append(f"Ports: [cyan]{', '.join(map(str, allowed_ports))}[/cyan]")
             if rate_limit:
                 info_lines.append(f"Rate Limit: [cyan]{rate_limit} req/min[/cyan]")
-            info_lines.append("\n[yellow]Save these credentials! They won't be shown again.[/yellow]")
+            info_lines.append(
+                "\n[yellow]Save these credentials! They won't be shown again.[/yellow]"
+            )
 
-            console.print(Panel(
-                "\n".join(info_lines),
-                title="Generated Credentials",
-                border_style="green"
-            ))
+            console.print(
+                Panel("\n".join(info_lines), title="Generated Credentials", border_style="green")
+            )
 
             # Ask if user wants to save credentials to file
             console.print("\n[bold]Save Credentials to File?[/bold]")
-            console.print("  [dim]This will save username/password to a text file for easy reference.[/dim]")
-            console.print("  [red]Warning: This is a security risk - only use on trusted systems.[/red]\n")
-            
+            console.print(
+                "  [dim]This will save username/password to a text file for easy reference.[/dim]"
+            )
+            console.print(
+                "  [red]Warning: This is a security risk - only use on trusted systems.[/red]\n"
+            )
+
             save_creds = typer.confirm("Save credentials to user folder?", default=False)
-            
+
             if save_creds:
                 # Use centralized paths module
                 paths = get_paths()
@@ -305,9 +368,9 @@ def register_user_commands(app: typer.Typer):
                     security=security.value,
                     bind_port=bind_port,
                     allowed_ports=allowed_ports,
-                    rate_limit=rate_limit
+                    rate_limit=rate_limit,
                 )
-                
+
                 console.print(f"\n[green][OK] Credentials saved to: {cred_file}[/green]")
                 console.print(f"[dim]User folder: {paths.get_user_dir(final_username)}[/dim]")
                 console.print("[dim]Keep this folder secure![/dim]")
@@ -317,12 +380,16 @@ def register_user_commands(app: typer.Typer):
 
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
     @user_app.command("remove")
     def user_remove(
-        username: Annotated[Optional[str], typer.Argument(help="Username to remove (interactive if omitted)")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+        username: Annotated[
+            Optional[str], typer.Argument(help="Username to remove (interactive if omitted)")
+        ] = None,
+        config: Annotated[
+            str, typer.Option("--config", "-c", help="Path to configuration file")
+        ] = "config/config.yaml",
         yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
         all_users: Annotated[bool, typer.Option("--all", help="Remove all users")] = False,
     ):
@@ -346,12 +413,11 @@ def register_user_commands(app: typer.Typer):
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key
         )
 
         users = auth_manager.list_users()
-        
+
         if not users:
             console.print("[yellow]No users configured[/yellow]")
             return
@@ -363,7 +429,7 @@ def register_user_commands(app: typer.Typer):
                 confirm = typer.confirm("Are you sure?", default=False)
                 if not confirm:
                     raise typer.Abort()
-            
+
             paths = get_paths()
             for user in users:
                 auth_manager.remove_user(user)
@@ -376,29 +442,31 @@ def register_user_commands(app: typer.Typer):
         # Interactive mode if no username provided
         if username is None:
             console.print("\n[bold]Select user(s) to remove:[/bold]\n")
-            
+
             # Show numbered list
             for i, user in enumerate(users, 1):
                 use_tor = auth_manager.get_user_tor_preference(user)
                 routing = "Tor" if use_tor else "Direct"
                 console.print(f"  [cyan]{i}.[/cyan] {user} [dim]({routing})[/dim]")
-            
+
             console.print("  [cyan]A.[/cyan] [red]Remove ALL users[/red]")
             console.print("  [cyan]Q.[/cyan] Cancel\n")
-            
+
             choice = typer.prompt("Enter selection (number, A for all, Q to cancel)")
-            
+
             if choice.upper() == "Q":
                 console.print("[yellow]Cancelled[/yellow]")
                 return
-            
+
             if choice.upper() == "A":
                 if not yes:
-                    console.print(f"\n[bold red]This will remove ALL {len(users)} users![/bold red]")
+                    console.print(
+                        f"\n[bold red]This will remove ALL {len(users)} users![/bold red]"
+                    )
                     confirm = typer.confirm("Are you sure?", default=False)
                     if not confirm:
                         raise typer.Abort()
-                
+
                 paths = get_paths()
                 for user in users:
                     auth_manager.remove_user(user)
@@ -407,7 +475,7 @@ def register_user_commands(app: typer.Typer):
                 console.print(f"[green]All {len(users)} users removed[/green]")
                 _offer_service_restart("Changes will apply after restart.")
                 return
-            
+
             # Handle number selection
             try:
                 idx = int(choice) - 1
@@ -438,8 +506,12 @@ def register_user_commands(app: typer.Typer):
 
     @user_app.command("list")
     def user_list(
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
-        interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Interactive mode with actions")] = False,
+        config: Annotated[
+            str, typer.Option("--config", "-c", help="Path to configuration file")
+        ] = "config/config.yaml",
+        interactive: Annotated[
+            bool, typer.Option("--interactive", "-i", help="Interactive mode with actions")
+        ] = False,
     ):
         """List all users (use -i for interactive mode with actions)."""
         try:
@@ -456,8 +528,7 @@ def register_user_commands(app: typer.Typer):
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key
         )
 
         users = auth_manager.list_users()
@@ -478,7 +549,9 @@ def register_user_commands(app: typer.Typer):
                 table.add_row(username, routing)
 
             console.print(table)
-            console.print("\n[dim]Tip: Use 'shadow9 user list -i' for interactive mode with actions[/dim]")
+            console.print(
+                "\n[dim]Tip: Use 'shadow9 user list -i' for interactive mode with actions[/dim]"
+            )
             return
 
         # Interactive mode
@@ -486,8 +559,12 @@ def register_user_commands(app: typer.Typer):
 
     @user_app.command("info")
     def user_info(
-        username: Annotated[Optional[str], typer.Argument(help="Username to show info for (interactive if omitted)")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+        username: Annotated[
+            Optional[str], typer.Argument(help="Username to show info for (interactive if omitted)")
+        ] = None,
+        config: Annotated[
+            str, typer.Option("--config", "-c", help="Path to configuration file")
+        ] = "config/config.yaml",
     ):
         """Show detailed information about a user."""
         try:
@@ -504,41 +581,42 @@ def register_user_commands(app: typer.Typer):
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key
         )
 
         # Interactive mode if no username provided
         if username is None:
             users = auth_manager.list_users()
-            
+
             if not users:
                 console.print("[yellow]No users configured[/yellow]")
                 return
-            
+
             while True:
                 console.print("\n[bold cyan]Select a user to view:[/bold cyan]\n")
                 for i, user in enumerate(users, 1):
                     use_tor = auth_manager.get_user_tor_preference(user)
                     routing = "[green]Tor[/green]" if use_tor else "[yellow]Direct[/yellow]"
                     console.print(f"  [cyan]{i}[/cyan]. {user} ({routing})")
-                
+
                 console.print(f"\n  [dim]Enter number 1-{len(users)}, or 'q' to quit[/dim]")
-                
+
                 choice = typer.prompt("  Select user", default="q")
-                
-                if choice.lower() == 'q':
+
+                if choice.lower() == "q":
                     return
-                
+
                 try:
                     idx = int(choice) - 1
                     if 0 <= idx < len(users):
                         display_user_info(auth_manager, users[idx])
-                        
+
                         if not typer.confirm("\nView another user?", default=False):
                             return
                     else:
-                        console.print(f"  [red]Please enter a number between 1 and {len(users)}[/red]")
+                        console.print(
+                            f"  [red]Please enter a number between 1 and {len(users)}[/red]"
+                        )
                 except ValueError:
                     console.print("  [red]Please enter a valid number[/red]")
         else:
@@ -546,23 +624,63 @@ def register_user_commands(app: typer.Typer):
 
     @user_app.command("modify")
     def user_modify(
-        username: Annotated[Optional[str], typer.Argument(help="Username to modify (omit for interactive selection)")] = None,
-        use_tor: Annotated[Optional[bool], typer.Option("--tor/--no-tor", help="Enable or disable Tor routing")] = None,
-        bridge: Annotated[Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")] = None,
-        enabled: Annotated[Optional[bool], typer.Option("--enable/--disable", help="Enable or disable account")] = None,
-        security: Annotated[Optional[SecurityChoice], typer.Option("--security", "-s", help="Security/evasion level")] = None,
-        ports: Annotated[Optional[str], typer.Option("--ports", help="Allowed ports (comma-separated or 'all')")] = None,
-        rate_limit: Annotated[Optional[int], typer.Option("--rate-limit", help="Max requests per minute (0 for default)")] = None,
-        bind_port: Annotated[Optional[int], typer.Option("--bind-port", help="Custom port (0 to use shared port)")] = None,
-        logging: Annotated[Optional[bool], typer.Option("--logging/--no-logging", help="Enable or disable activity logging for this user")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
-    ):
+        username: Annotated[
+            Optional[str],
+            typer.Argument(help="Username to modify (omit for interactive selection)"),
+        ] = None,
+        use_tor: Annotated[
+            Optional[bool], typer.Option("--tor/--no-tor", help="Enable or disable Tor routing")
+        ] = None,
+        bridge: Annotated[
+            Optional[BridgeChoice], typer.Option("--bridge", "-b", help="Tor bridge type")
+        ] = None,
+        enabled: Annotated[
+            Optional[bool], typer.Option("--enable/--disable", help="Enable or disable account")
+        ] = None,
+        security: Annotated[
+            Optional[SecurityChoice],
+            typer.Option("--security", "-s", help="Security/evasion level"),
+        ] = None,
+        ports: Annotated[
+            Optional[str], typer.Option("--ports", help="Allowed ports (comma-separated or 'all')")
+        ] = None,
+        rate_limit: Annotated[
+            Optional[int],
+            typer.Option("--rate-limit", min=0, help="Max requests per minute (0 for default)"),
+        ] = None,
+        bind_port: Annotated[
+            Optional[int],
+            typer.Option(
+                "--bind-port", min=0, max=65535, help="Custom port (0 to use shared port)"
+            ),
+        ] = None,
+        logging: Annotated[
+            Optional[bool],
+            typer.Option(
+                "--logging/--no-logging", help="Enable or disable activity logging for this user"
+            ),
+        ] = None,
+        config: Annotated[
+            str, typer.Option("--config", "-c", help="Path to configuration file")
+        ] = "config/config.yaml",
+    ) -> None:
         """Modify settings for an existing user.
 
         Run without arguments for interactive mode, or specify username and flags for direct modification.
         """
         try:
-            _user_modify_impl(username, use_tor, bridge, enabled, security, ports, rate_limit, bind_port, logging, config)
+            _user_modify_impl(
+                username,
+                use_tor,
+                bridge,
+                enabled,
+                security,
+                ports,
+                rate_limit,
+                bind_port,
+                logging,
+                config,
+            )
         except KeyboardInterrupt:
             console.print("\n[yellow]Cancelled[/yellow]")
         except typer.Abort:
@@ -579,25 +697,33 @@ def register_user_commands(app: typer.Typer):
         bind_port: Optional[int],
         logging: Optional[bool],
         config: str,
-    ):
+    ) -> None:
         """Implementation of user_modify command."""
         # Check if any modification flags were provided
-        has_flags = any([use_tor is not None, bridge is not None, enabled is not None,
-                         security is not None, ports is not None, rate_limit is not None,
-                         bind_port is not None, logging is not None])
-        
+        has_flags = any(
+            [
+                use_tor is not None,
+                bridge is not None,
+                enabled is not None,
+                security is not None,
+                ports is not None,
+                rate_limit is not None,
+                bind_port is not None,
+                logging is not None,
+            ]
+        )
+
         # Launch interactive wizard if no username or no flags
         if username is None or (username is not None and not has_flags):
             run_user_modify_wizard(config, preselected_username=username)
             return
-        
+
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key
         )
 
         # Check user exists
@@ -641,13 +767,9 @@ def register_user_commands(app: typer.Typer):
                 auth_manager.set_user_allowed_ports(username, None)
                 changes.append("Ports: All (no restrictions)")
             else:
-                try:
-                    allowed_ports = [int(p.strip()) for p in ports.split(',')]
-                    auth_manager.set_user_allowed_ports(username, allowed_ports)
-                    changes.append(f"Ports: {', '.join(map(str, allowed_ports))}")
-                except ValueError:
-                    console.print("[red]Error: Invalid port format. Use comma-separated numbers or 'all'.[/red]")
-                    raise typer.Exit(1)
+                allowed_ports = _parse_allowed_ports(ports)
+                auth_manager.set_user_allowed_ports(username, allowed_ports)
+                changes.append(f"Ports: {', '.join(map(str, allowed_ports))}")
 
         # Update rate limit
         if rate_limit is not None:
@@ -682,12 +804,16 @@ def register_user_commands(app: typer.Typer):
             _offer_service_restart("Changes will apply after restart.")
         else:
             console.print("[yellow]No changes specified.[/yellow]")
-            console.print("[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit, --bind-port, --logging/--no-logging[/dim]")
+            console.print(
+                "[dim]Options: --tor/--no-tor, --bridge, --enable/--disable, --security, --ports, --rate-limit, --bind-port, --logging/--no-logging[/dim]"
+            )
 
     @user_app.command("enable")
     def user_enable(
         username: Annotated[Optional[str], typer.Argument(help="Username to enable")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+        config: Annotated[
+            str, typer.Option("--config", "-c", help="Path to configuration file")
+        ] = "config/config.yaml",
     ):
         """Enable a user account."""
         try:
@@ -704,8 +830,7 @@ def register_user_commands(app: typer.Typer):
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key
         )
 
         users = auth_manager.list_users()
@@ -768,7 +893,9 @@ def register_user_commands(app: typer.Typer):
     @user_app.command("disable")
     def user_disable(
         username: Annotated[Optional[str], typer.Argument(help="Username to disable")] = None,
-        config: Annotated[str, typer.Option("--config", "-c", help="Path to configuration file")] = "config/config.yaml",
+        config: Annotated[
+            str, typer.Option("--config", "-c", help="Path to configuration file")
+        ] = "config/config.yaml",
     ):
         """Disable a user account (prevents login)."""
         try:
@@ -785,8 +912,7 @@ def register_user_commands(app: typer.Typer):
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key
         )
 
         users = auth_manager.list_users()
@@ -845,5 +971,3 @@ def register_user_commands(app: typer.Typer):
             _offer_service_restart("Changes will apply after restart.")
         else:
             console.print(f"[red]User '{username}' not found[/red]")
-
-

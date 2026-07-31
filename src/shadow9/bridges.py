@@ -4,7 +4,6 @@ Tor Bridge and Pluggable Transport Support for Shadow9.
 Provides stealth Tor connectivity using:
 - obfs4 bridges (most effective against DPI)
 - snowflake bridges (uses WebRTC)
-- webtunnel bridges (looks like HTTPS)
 
 This hides the fact that you're using Tor from network observers.
 
@@ -32,6 +31,8 @@ from .bridge_list import (
     SNOWFLAKE_BRIDGES,
 )
 
+from .paths import write_file_safely
+
 logger = structlog.get_logger(__name__)
 
 # Module-level cache for bridge speedtest results
@@ -39,13 +40,16 @@ logger = structlog.get_logger(__name__)
 # don't need to re-run speedtests. Cleared on service restart.
 _bridge_speedtest_cache: dict[str, list[tuple["Bridge", float | None]]] = {}
 
+
 # Persistent bridge cache configuration
 # Use centralized paths module for bridge cache location
 # Fallback to /tmp if primary location fails
 def _get_bridge_cache_file() -> Path:
     """Get the bridge cache file path with fallback support."""
     from .paths import get_bridge_cache_file
+
     return get_bridge_cache_file()
+
 
 # Fallback cache location if primary fails (e.g., read-only filesystem)
 FALLBACK_BRIDGE_CACHE_FILE = Path("/tmp/shadow9_bridge_cache.json")
@@ -63,7 +67,7 @@ def _load_bridge_cache(bridge_type: str) -> dict | None:
     """Load cached bridge data from file."""
     # Try primary location first, then fallback
     cache_files = [_get_bridge_cache_file(), FALLBACK_BRIDGE_CACHE_FILE]
-    
+
     for cache_file in cache_files:
         try:
             if not cache_file.exists():
@@ -82,9 +86,11 @@ def _load_bridge_cache(bridge_type: str) -> dict | None:
             logger.debug("Loaded bridge cache", source=str(cache_file), bridge_type=bridge_type)
             return entry
         except Exception as e:
-            logger.debug("Failed to load bridge cache from location", path=str(cache_file), error=str(e))
+            logger.debug(
+                "Failed to load bridge cache from location", path=str(cache_file), error=str(e)
+            )
             continue
-    
+
     return None
 
 
@@ -99,14 +105,12 @@ def _save_bridge_cache(
         "bridge_name": bridge_name,
         "speed": speed,
         "timestamp": datetime.now().isoformat(),
-        "sorted_results": [
-            (_get_bridge_name(b), s) for b, s in sorted_results if s is not None
-        ],
+        "sorted_results": [(_get_bridge_name(b), s) for b, s in sorted_results if s is not None],
     }
-    
+
     # Try primary location first, then fallback
     cache_files = [_get_bridge_cache_file(), FALLBACK_BRIDGE_CACHE_FILE]
-    
+
     for cache_file in cache_files:
         try:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -115,21 +119,35 @@ def _save_bridge_cache(
                 with open(cache_file) as f:
                     cache = json.load(f)
             cache[bridge_type] = cache_data
-            with open(cache_file, "w") as f:
-                json.dump(cache, f, indent=2)
-            logger.info("Saved bridge cache", bridge_type=bridge_type, bridge=bridge_name, location=str(cache_file))
+            # Whole file or nothing: _load_bridge_cache throws on a truncated one, and
+            # the cost of that is re-testing every bridge on the next start
+            write_file_safely(cache_file, json.dumps(cache, indent=2).encode(), mode=0o644)
+            logger.info(
+                "Saved bridge cache",
+                bridge_type=bridge_type,
+                bridge=bridge_name,
+                location=str(cache_file),
+            )
             return  # Success, no need to try fallback
         except PermissionError as e:
-            logger.debug("Permission denied for cache location, trying fallback", path=str(cache_file))
+            logger.debug(
+                "Permission denied for cache location, trying fallback",
+                path=str(cache_file),
+                error=str(e),
+            )
             continue
         except OSError as e:
             # Catch read-only filesystem errors (errno 30) and other OS errors
-            logger.debug("OS error saving cache, trying fallback", path=str(cache_file), error=str(e))
+            logger.debug(
+                "OS error saving cache, trying fallback", path=str(cache_file), error=str(e)
+            )
             continue
         except Exception as e:
-            logger.warning("Unexpected error saving bridge cache", path=str(cache_file), error=str(e))
+            logger.warning(
+                "Unexpected error saving bridge cache", path=str(cache_file), error=str(e)
+            )
             continue
-    
+
     # All locations failed
     logger.warning("Failed to save bridge cache to any location")
 
@@ -137,6 +155,7 @@ def _save_bridge_cache(
 @dataclass
 class BridgeConfig:
     """Configuration for Tor bridges."""
+
     enabled: bool = False
     bridge_type: BridgeType = BridgeType.OBFS4
     bridges: List[Bridge] = field(default_factory=list)
@@ -144,7 +163,6 @@ class BridgeConfig:
     # Paths to pluggable transport binaries
     obfs4proxy_path: Optional[str] = None
     snowflake_path: Optional[str] = None
-    webtunnel_path: Optional[str] = None
 
     # Use built-in bridges (requires no configuration)
     use_builtin_bridges: bool = True
@@ -193,11 +211,11 @@ class PluggableTransportManager:
         return transports
 
     def generate_torrc(
-        self, 
-        data_dir: Path, 
-        socks_port: int = 9050, 
+        self,
+        data_dir: Path,
+        socks_port: int = 9050,
         control_port: int = 0,
-        specific_bridge: Optional[Bridge] = None
+        specific_bridge: Optional[Bridge] = None,
     ) -> str:
         """
         Generate torrc configuration for bridges.
@@ -216,35 +234,32 @@ class PluggableTransportManager:
             f"SocksPort {socks_port}",
             "UseBridges 1",
         ]
-        
+
         # Performance and timeout tuning for bridges (especially snowflake)
         # Requires Tor 0.4.8+ (installed from official Tor Project repo)
-        lines.extend([
-            # Conflux: Split traffic across multiple circuits for ~30% speed boost
-            "ConfluxEnabled 1",
-            "ConfluxClientUX latency",
-            
-            # Circuit building
-            "LearnCircuitBuildTimeout 0",
-            "CircuitBuildTimeout 120",
-            
-            # Timeouts
-            "SocksTimeout 300",
-            
-            # Circuit management - keep circuits alive longer
-            "MaxCircuitDirtiness 1800",
-            "CircuitIdleTimeout 3600",
-            "KeepalivePeriod 60",
-            "NewCircuitPeriod 30",
-            
-            # Connection limits - increase for more concurrent connections
-            "MaxClientCircuitsPending 128",      # Default 32, allow more pending circuits
-            "ConnectionPadding 1",
-            
-            # Hidden service optimizations
-            "CloseHSClientCircuitsImmediatelyOnTimeout 0",
-            "CloseHSServiceRendCircuitsImmediatelyOnTimeout 0",
-        ])
+        lines.extend(
+            [
+                # Conflux: Split traffic across multiple circuits for ~30% speed boost
+                "ConfluxEnabled 1",
+                "ConfluxClientUX latency",
+                # Circuit building
+                "LearnCircuitBuildTimeout 0",
+                "CircuitBuildTimeout 120",
+                # Timeouts
+                "SocksTimeout 300",
+                # Circuit management - keep circuits alive longer
+                "MaxCircuitDirtiness 1800",
+                "CircuitIdleTimeout 3600",
+                "KeepalivePeriod 60",
+                "NewCircuitPeriod 30",
+                # Connection limits - increase for more concurrent connections
+                "MaxClientCircuitsPending 128",  # Default 32, allow more pending circuits
+                "ConnectionPadding 1",
+                # Hidden service optimizations
+                "CloseHSClientCircuitsImmediatelyOnTimeout 0",
+                "CloseHSServiceRendCircuitsImmediatelyOnTimeout 0",
+            ]
+        )
 
         # Add control port for bootstrap monitoring
         if control_port > 0:
@@ -285,7 +300,7 @@ class PluggableTransportManager:
             lines.append(f"ClientTransportPlugin snowflake exec {transports[BridgeType.SNOWFLAKE]}")
 
         return "\n".join(lines)
-    
+
     def get_fallback_bridges(self) -> List[Bridge]:
         """Get list of bridges to try for fallback."""
         if self.config.bridge_type == BridgeType.SNOWFLAKE:
@@ -357,7 +372,7 @@ class TorBridgeConnector:
     async def start_tor_with_bridges(self) -> tuple[str, int]:
         """
         Start a Tor process configured with bridges.
-        
+
         For snowflake bridges, this will:
         1. Try the cached bridge first (if valid and responds within 5s)
         2. If no cache or cached bridge fails, run a quick speed test on all bridges
@@ -374,18 +389,20 @@ class TorBridgeConnector:
                     f"Pluggable transport {self.config.bridge_type.value} not found",
                 )
                 print(self.pt_manager.get_install_instructions())
-                raise RuntimeError(f"Pluggable transport {self.config.bridge_type.value} not installed")
+                raise RuntimeError(
+                    f"Pluggable transport {self.config.bridge_type.value} not installed"
+                )
 
             # Get list of bridges to try
             fallback_bridges = self.pt_manager.get_fallback_bridges()
-        
+
             if not fallback_bridges:
                 # No fallback list, use default behavior
                 return await self._try_single_bridge(None)
-        
+
             # Phase 0: Try persistent cached bridge first
             cache_key = self.config.bridge_type.value
-        
+
             cached = _load_bridge_cache(cache_key)
             if cached:
                 cached_name = cached["bridge_name"]
@@ -397,9 +414,7 @@ class TorBridgeConnector:
                 if cached_bridge:
                     print(f"\n  Testing cached bridge: {cached_name}...")
                     test_speed, test_error = await self._quick_bridge_test(
-                        cached_bridge,
-                        timeout=CACHE_TEST_TIMEOUT_SECONDS,
-                        target_progress=15
+                        cached_bridge, timeout=CACHE_TEST_TIMEOUT_SECONDS, target_progress=15
                     )
                     if test_speed is not None and test_speed <= CACHE_SPEED_THRESHOLD_SECONDS:
                         print(f"  ✓ Cached bridge works ({test_speed:.1f}s)")
@@ -411,7 +426,9 @@ class TorBridgeConnector:
                             print(f"  ✓ Connected using cached bridge: {cached_name}")
                             return result
                         except RuntimeError as e:
-                            logger.warning(f"Cached bridge {cached_name} failed full connection: {e}")
+                            logger.warning(
+                                f"Cached bridge {cached_name} failed full connection: {e}"
+                            )
                             print(f"  ✗ Cached bridge failed full connection, retesting all...")
                             await self._cleanup_tor()
                     else:
@@ -421,10 +438,16 @@ class TorBridgeConnector:
                         elif test_speed is None:
                             reason = "connection failed"
                         else:
-                            reason = f"too slow ({test_speed:.1f}s > {CACHE_SPEED_THRESHOLD_SECONDS}s)"
+                            reason = (
+                                f"too slow ({test_speed:.1f}s > {CACHE_SPEED_THRESHOLD_SECONDS}s)"
+                            )
                         print(f"  ✗ Cached bridge failed: {reason}")
-                        logger.info("Cached bridge failed, will retest all", bridge=cached_name, reason=reason)
-        
+                        logger.info(
+                            "Cached bridge failed, will retest all",
+                            bridge=cached_name,
+                            reason=reason,
+                        )
+
             # Phase 1: Speed test all bridges (with in-memory caching)
             if cache_key in _bridge_speedtest_cache:
                 # Use cached speedtest results
@@ -441,13 +464,12 @@ class TorBridgeConnector:
                 # Run speedtests
                 print(f"\n  Testing {len(fallback_bridges)} bridges for speed...")
                 bridge_speeds = await self._test_bridge_speeds(fallback_bridges)
-            
+
                 # Sort by speed (fastest first), failed bridges at the end
                 sorted_bridges = sorted(
-                    bridge_speeds,
-                    key=lambda x: x[1] if x[1] is not None else float('inf')
+                    bridge_speeds, key=lambda x: x[1] if x[1] is not None else float("inf")
                 )
-            
+
                 # Show speed test results
                 print("\n  Speed test results:")
                 for bridge, speed in sorted_bridges:
@@ -456,42 +478,46 @@ class TorBridgeConnector:
                         print(f"    {bridge_name}: {speed:.1f}s to 15%")
                     else:
                         print(f"    {bridge_name}: failed/timeout")
-            
+
                 # Only cache if at least one bridge succeeded
                 working_count = sum(1 for _, s in sorted_bridges if s is not None)
                 if working_count > 0:
                     _bridge_speedtest_cache[cache_key] = sorted_bridges
                     logger.info(f"Cached speedtest results for bridge type: {cache_key}")
                 else:
-                    logger.warning(f"Not caching speedtest results - all {len(sorted_bridges)} bridges failed")
-        
+                    logger.warning(
+                        f"Not caching speedtest results - all {len(sorted_bridges)} bridges failed"
+                    )
+
             # Filter to only working bridges
             working_bridges = [(b, s) for b, s in sorted_bridges if s is not None]
-        
+
             if not working_bridges:
                 raise RuntimeError("All bridges failed speed test - none could reach 15% bootstrap")
-        
+
             print("\n  Connecting using fastest bridge...")
-        
+
             # Phase 2: Try to fully connect using sorted bridges (fastest first)
             last_error = None
             for i, (bridge, speed) in enumerate(working_bridges):
                 bridge_name = _get_bridge_name(bridge)
                 logger.info(
-                    f"Connecting with bridge {i+1}/{len(working_bridges)}: {bridge_name} ({speed:.1f}s)",
-                    bridge_type=self.config.bridge_type.value
+                    f"Connecting with bridge {i + 1}/{len(working_bridges)}: {bridge_name} ({speed:.1f}s)",
+                    bridge_type=self.config.bridge_type.value,
                 )
-                print(f"  Trying {bridge_name} (ranked #{i+1} by speed)...")
-            
+                print(f"  Trying {bridge_name} (ranked #{i + 1} by speed)...")
+
                 try:
-                    result = await self._try_single_bridge(bridge, timeout=180)  # 3 min for full connect
+                    result = await self._try_single_bridge(
+                        bridge, timeout=180
+                    )  # 3 min for full connect
                     self._current_bridge = bridge
                     logger.info(f"Successfully connected using bridge: {bridge_name}")
                     print(f"  ✓ Connected using: {bridge_name}")
-                
+
                     # Save successful bridge to persistent cache
                     _save_bridge_cache(cache_key, bridge_name, speed, sorted_bridges)
-                
+
                     return result
                 except RuntimeError as e:
                     last_error = e
@@ -502,110 +528,117 @@ class TorBridgeConnector:
                     continue
 
             # All bridges failed
-            raise RuntimeError(f"All {len(working_bridges)} bridges failed to connect. Last error: {last_error}")
+            raise RuntimeError(
+                f"All {len(working_bridges)} bridges failed to connect. Last error: {last_error}"
+            )
         except asyncio.CancelledError:
             logger.info("Bridge connection cancelled")
             await self._cleanup_tor()
             raise
 
-    async def _test_bridge_speeds(self, bridges: List[Bridge]) -> List[tuple[Bridge, Optional[float]]]:
+    async def _test_bridge_speeds(
+        self, bridges: List[Bridge]
+    ) -> List[tuple[Bridge, Optional[float]]]:
         """
         Test multiple bridges in parallel and measure time to reach 15% bootstrap.
-        
+
         Returns:
             List of (bridge, time_to_15_percent) tuples. time is None if failed.
         """
-        
+
         results = []
         test_timeout = 30  # 30 seconds max per bridge for speed test
         target_progress = 15  # Target bootstrap percentage for speed test
         first_test = True
-        
+
         for bridge in bridges:
             bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
             print(f"    Testing {bridge_name}...", end=" ", flush=True)
-            
-            speed, error = await self._quick_bridge_test(bridge, test_timeout, target_progress, show_config=first_test)
+
+            speed, error = await self._quick_bridge_test(
+                bridge, test_timeout, target_progress, show_config=first_test
+            )
             first_test = False
-            
+
             if speed is not None:
                 print(f"{speed:.1f}s")
             elif error:
                 print(f"FAILED: {error}")
             else:
                 print("timeout/failed")
-            
+
             results.append((bridge, speed))
-        
+
         return results
 
-    async def _quick_bridge_test(self, bridge: Bridge, timeout: int, target_progress: int, show_config: bool = False) -> tuple[Optional[float], Optional[str]]:
+    async def _quick_bridge_test(
+        self, bridge: Bridge, timeout: int, target_progress: int, show_config: bool = False
+    ) -> tuple[Optional[float], Optional[str]]:
         """
         Quick test a bridge - measure time to reach target bootstrap percentage.
-        
+
         Returns:
             Tuple of (time_in_seconds, error_message). time is None if failed, error is None if succeeded.
         """
         import re
         import time as time_module
-        
+
         temp_dir = None
         tor_process = None
         bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
-        
+
         try:
             # Create temp directory
             temp_dir = tempfile.TemporaryDirectory(prefix="shadow9_test_")
             data_dir = Path(temp_dir.name)
-            
+
             # Use a different port for testing to avoid conflicts
             test_port = self.socks_port + 100 + hash(bridge.address) % 100
-            
+
             # Generate torrc
             torrc_content = self.pt_manager.generate_torrc(
-                data_dir, 
-                test_port,
-                specific_bridge=bridge
+                data_dir, test_port, specific_bridge=bridge
             )
-            
+
             # Add log file - use stdout for immediate feedback
             log_file = data_dir / "tor.log"
             torrc_content += f"\nLog notice file {log_file}"
             torrc_content += f"\nLog notice stdout"
-            
+
             torrc_path = data_dir / "torrc"
             torrc_path.write_text(torrc_content)
-            
+
             # Show config for first test to help debug
             if show_config:
                 print(f"\n    [DEBUG] First test torrc:\n")
                 for line in torrc_content.splitlines():
                     print(f"      {line}")
                 print(f"\n    Testing {bridge_name}...", end=" ", flush=True)
-            
+
             # Find tor binary
             tor_path = shutil.which("tor")
             if not tor_path:
                 return None, "tor binary not found"
-            
+
             # Start Tor process - capture both stdout and stderr
             tor_process = subprocess.Popen(
                 [tor_path, "-f", str(torrc_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
             )
-            
+
             start_time = time_module.time()
             output_lines = []
-            
+
             while True:
                 elapsed = time_module.time() - start_time
                 if elapsed > timeout:
                     return None, None  # Timeout (no error message needed)
-                
+
                 # Non-blocking read from stdout
                 if tor_process.stdout:
                     import select
+
                     try:
                         # Try to read available output (works on Unix)
                         while True:
@@ -614,39 +647,46 @@ class TorBridgeConnector:
                                 break
                             line = tor_process.stdout.readline()
                             if line:
-                                output_lines.append(line.decode('utf-8', errors='ignore').strip())
+                                output_lines.append(line.decode("utf-8", errors="ignore").strip())
                             else:
                                 break
                     except Exception:
                         # On Windows or error, try different approach
                         pass
-                
+
                 poll_result = tor_process.poll()
                 if poll_result is not None:
                     # Process exited - get remaining output
                     try:
                         remaining, _ = tor_process.communicate(timeout=1)
                         if remaining:
-                            output_lines.extend(remaining.decode('utf-8', errors='ignore').strip().splitlines())
+                            output_lines.extend(
+                                remaining.decode("utf-8", errors="ignore").strip().splitlines()
+                            )
                     except Exception:
                         pass
-                    
+
                     # Find error message in output
                     error_detail = ""
                     for line in reversed(output_lines):
                         line_lower = line.lower()
-                        if 'error' in line_lower or 'failed' in line_lower or '[err]' in line_lower or '[warn]' in line_lower:
+                        if (
+                            "error" in line_lower
+                            or "failed" in line_lower
+                            or "[err]" in line_lower
+                            or "[warn]" in line_lower
+                        ):
                             # Clean up the line
-                            if ']' in line:
-                                error_detail = line.split(']')[-1].strip()[:100]
+                            if "]" in line:
+                                error_detail = line.split("]")[-1].strip()[:100]
                             else:
                                 error_detail = line[:100]
                             break
-                    
+
                     # If no error found but process failed, show last line
                     if not error_detail and output_lines:
                         error_detail = output_lines[-1][:100]
-                    
+
                     # If still nothing, check log file
                     if not error_detail:
                         try:
@@ -657,32 +697,37 @@ class TorBridgeConnector:
                                     error_detail = last_line[:100]
                         except Exception:
                             pass
-                    
-                    return None, f"Tor exit {poll_result}: {error_detail}" if error_detail else f"Tor exit {poll_result}"
-                
+
+                    return (
+                        None,
+                        f"Tor exit {poll_result}: {error_detail}"
+                        if error_detail
+                        else f"Tor exit {poll_result}",
+                    )
+
                 # Check for bootstrap progress in collected output
                 for line in output_lines:
-                    if 'Bootstrapped' in line:
-                        match = re.search(r'Bootstrapped (\d+)%', line)
+                    if "Bootstrapped" in line:
+                        match = re.search(r"Bootstrapped (\d+)%", line)
                         if match:
                             progress = int(match.group(1))
                             if progress >= target_progress:
                                 return time_module.time() - start_time, None
-                
+
                 # Also check log file for bootstrap progress
                 try:
                     if log_file.exists():
                         log_content = log_file.read_text()
                         for line in log_content.splitlines():
-                            if 'Bootstrapped' in line:
-                                match = re.search(r'Bootstrapped (\d+)%', line)
+                            if "Bootstrapped" in line:
+                                match = re.search(r"Bootstrapped (\d+)%", line)
                                 if match:
                                     progress = int(match.group(1))
                                     if progress >= target_progress:
                                         return time_module.time() - start_time, None
                 except Exception:
                     pass
-                
+
                 await asyncio.sleep(0.5)
 
         except asyncio.CancelledError:
@@ -704,14 +749,16 @@ class TorBridgeConnector:
                 except Exception:
                     pass
 
-    async def _try_single_bridge(self, bridge: Optional[Bridge], timeout: int = 180) -> tuple[str, int]:
+    async def _try_single_bridge(
+        self, bridge: Optional[Bridge], timeout: int = 180
+    ) -> tuple[str, int]:
         """
         Try to start Tor with a specific bridge.
-        
+
         Args:
             bridge: Specific bridge to use, or None for default behavior
             timeout: Bootstrap timeout in seconds
-            
+
         Returns:
             Tuple of (socks_host, socks_port)
         """
@@ -721,15 +768,13 @@ class TorBridgeConnector:
 
         # Generate torrc with specified port and specific bridge
         torrc_content = self.pt_manager.generate_torrc(
-            self._data_dir, 
-            self.socks_port,
-            specific_bridge=bridge
+            self._data_dir, self.socks_port, specific_bridge=bridge
         )
-        
+
         # Add log file to torrc for bootstrap monitoring
         self._log_file = self._data_dir / "tor.log"
         torrc_content += f"\nLog notice file {self._log_file}"
-        
+
         torrc_path = self._data_dir / "torrc"
         torrc_path.write_text(torrc_content)
 
@@ -742,7 +787,7 @@ class TorBridgeConnector:
             bridge_type=self.config.bridge_type.value,
             bridge=bridge_name,
             socks_port=self.socks_port,
-            torrc=str(torrc_path)
+            torrc=str(torrc_path),
         )
 
         # Find tor binary
@@ -761,7 +806,7 @@ class TorBridgeConnector:
         await self._wait_for_bootstrap(timeout=timeout)
 
         return "127.0.0.1", self.socks_port
-    
+
     async def _cleanup_tor(self) -> None:
         """Cleanup Tor process and temp directory without logging stop message."""
         if self._tor_process:
@@ -780,9 +825,25 @@ class TorBridgeConnector:
             self._temp_dir = None
 
     async def _wait_for_bootstrap(self, timeout: int = 180) -> None:
-        """Wait for Tor to finish bootstrapping by monitoring the log file."""
+        """
+        Wait for Tor to finish bootstrapping by monitoring the log file.
+
+        Raises:
+            RuntimeError: when there is no Tor process or no log file to watch, or
+                when Tor dies, stalls or runs past `timeout` before it is bootstrapped
+        """
         import re
-        
+
+        # Both are set by the caller before Tor is launched. Reading them once, here,
+        # means a caller that skipped that step is told so, rather than getting an
+        # AttributeError out of the middle of the polling loop several frames away.
+        tor_process = self._tor_process
+        log_file = self._log_file
+        if tor_process is None:
+            raise RuntimeError("Tor bootstrap was awaited before Tor was started")
+        if log_file is None:
+            raise RuntimeError("Tor bootstrap was awaited before the log file was set")
+
         logger.info("Waiting for Tor to bootstrap...", socks_port=self.socks_port)
 
         start_time = asyncio.get_event_loop().time()
@@ -795,31 +856,35 @@ class TorBridgeConnector:
             current_time = asyncio.get_event_loop().time()
             elapsed = current_time - start_time
             time_since_progress = current_time - last_progress_time
-            
+
             # Check for overall timeout
             if elapsed > timeout:
-                raise RuntimeError(f"Tor bootstrap timeout after {timeout}s (last progress: {last_progress}%)")
-            
+                raise RuntimeError(
+                    f"Tor bootstrap timeout after {timeout}s (last progress: {last_progress}%)"
+                )
+
             # Check for stall - no progress for stall_timeout seconds
             if time_since_progress > stall_timeout and last_progress < 90:
-                raise RuntimeError(f"Tor bootstrap stalled at {last_progress}% (no progress for {stall_timeout}s)")
+                raise RuntimeError(
+                    f"Tor bootstrap stalled at {last_progress}% (no progress for {stall_timeout}s)"
+                )
 
-            if self._tor_process.poll() is not None:
-                stderr = self._tor_process.stderr.read().decode() if self._tor_process.stderr else ""
+            if tor_process.poll() is not None:
+                stderr = tor_process.stderr.read().decode() if tor_process.stderr else ""
                 raise RuntimeError(f"Tor process died: {stderr}")
 
             # Read from log file
-            if hasattr(self, '_log_file') and self._log_file.exists():
+            if log_file.exists():
                 try:
-                    with open(self._log_file, 'r') as f:
+                    with open(log_file, "r") as f:
                         f.seek(log_position)
                         new_content = f.read()
                         log_position = f.tell()
-                        
+
                         for line in new_content.splitlines():
                             # Look for bootstrap progress
-                            if 'Bootstrapped' in line:
-                                match = re.search(r'Bootstrapped (\d+)%', line)
+                            if "Bootstrapped" in line:
+                                match = re.search(r"Bootstrapped (\d+)%", line)
                                 if match:
                                     progress = int(match.group(1))
                                     if progress != last_progress:
@@ -829,27 +894,32 @@ class TorBridgeConnector:
                                     if progress >= 100:
                                         # Give it a moment to fully stabilize
                                         await asyncio.sleep(1)
-                                        logger.info("Tor bootstrap complete", socks_port=self.socks_port)
+                                        logger.info(
+                                            "Tor bootstrap complete", socks_port=self.socks_port
+                                        )
                                         return
-                            
+
                             # Check for error messages that indicate bridge issues
-                            if 'WARN' in line and ('timeout' in line.lower() or 'failed' in line.lower()):
+                            if "WARN" in line and (
+                                "timeout" in line.lower() or "failed" in line.lower()
+                            ):
                                 logger.debug(f"Tor warning: {line.strip()}")
-                                
+
                 except Exception as e:
                     logger.debug(f"Error reading log file: {e}")
 
             # Fallback: check if SOCKS port is actually working after some time
             if elapsed > 30:  # After 30s, try a connection test
                 try:
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection("127.0.0.1", self.socks_port),
-                        timeout=2.0
+                    _reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection("127.0.0.1", self.socks_port), timeout=2.0
                     )
                     writer.close()
                     await writer.wait_closed()
                     if last_progress >= 90:  # Accept 90% as good enough
-                        logger.info("Tor bootstrap complete (connection test)", socks_port=self.socks_port)
+                        logger.info(
+                            "Tor bootstrap complete (connection test)", socks_port=self.socks_port
+                        )
                         return
                 except (ConnectionRefusedError, asyncio.TimeoutError):
                     pass
@@ -885,25 +955,3 @@ def get_bridge_preset(bridge_type: BridgeType) -> BridgeConfig:
     )
 
 
-def print_bridge_info(config: BridgeConfig) -> str:
-    """Generate human-readable bridge configuration summary."""
-    if not config.enabled:
-        return "Bridges: Disabled (Tor connection may be detectable)"
-
-    lines = [
-        f"Bridge Type: {config.bridge_type.value.upper()}",
-    ]
-
-    if config.bridge_type == BridgeType.OBFS4:
-        lines.append("  → Traffic looks like random noise")
-        lines.append("  → Most effective against DPI")
-    elif config.bridge_type == BridgeType.SNOWFLAKE:
-        lines.append("  → Uses WebRTC peer connections")
-        lines.append("  → Hard to block, uses volunteer proxies")
-
-    if config.use_builtin_bridges:
-        lines.append("Using: Built-in public bridges")
-    else:
-        lines.append(f"Using: {len(config.bridges)} custom bridge(s)")
-
-    return "\n".join(lines)

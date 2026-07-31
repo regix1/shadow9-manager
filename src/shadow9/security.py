@@ -13,14 +13,9 @@ Techniques:
 - TLS record fragmentation
 """
 
-import asyncio
-import ssl
 import secrets
-from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum
-from datetime import datetime
 
 import structlog
 
@@ -29,10 +24,11 @@ logger = structlog.get_logger(__name__)
 
 class SecurityLevel(Enum):
     """Security/evasion level presets."""
-    NONE = "none"           # No evasion, raw SOCKS5
-    BASIC = "basic"         # TLS wrapping only
-    MODERATE = "moderate"   # TLS + packet splitting
-    PARANOID = "paranoid"   # Full DPI bypass techniques
+
+    NONE = "none"  # No evasion, raw SOCKS5
+    BASIC = "basic"  # TLS wrapping only
+    MODERATE = "moderate"  # TLS + packet splitting
+    PARANOID = "paranoid"  # Full DPI bypass techniques
 
 
 @dataclass
@@ -46,6 +42,7 @@ class DPIBypassConfig:
     - SpoofDPI (Go-based)
     - zapret (Linux)
     """
+
     enabled: bool = False
 
     # TCP Segmentation - Split TLS ClientHello into multiple segments
@@ -55,11 +52,6 @@ class DPIBypassConfig:
 
     # Fake packet injection - Send decoy packets before real data
     fake_packets_enabled: bool = False
-    fake_packet_ttl: int = 1  # TTL=1 so packet dies at first hop but confuses DPI
-
-    # TTL manipulation - Vary TTL to evade stateful DPI
-    ttl_manipulation: bool = False
-    initial_ttl: int = 64
 
     # SNI (Server Name Indication) fragmentation
     # Split the SNI field across TCP segments
@@ -76,19 +68,17 @@ class DPIBypassConfig:
 
     # HTTP-specific bypass (for HTTP CONNECT)
     http_space_before_method: bool = False  # " GET" instead of "GET"
-    http_mixed_case_method: bool = False    # "gEt" instead of "GET"
-    http_extra_space: bool = False          # Double spaces in headers
+    http_mixed_case_method: bool = False  # "gEt" instead of "GET"
 
 
 @dataclass
 class SecurityConfig:
     """Security and evasion configuration."""
+
     level: SecurityLevel = SecurityLevel.BASIC
 
     # TLS Settings
     tls_enabled: bool = True
-    tls_cert_file: Optional[str] = None
-    tls_key_file: Optional[str] = None
 
     # DPI Bypass (modern techniques)
     dpi_bypass: DPIBypassConfig = field(default_factory=DPIBypassConfig)
@@ -103,10 +93,6 @@ class SecurityConfig:
 
     # DNS
     prevent_dns_leaks: bool = True
-
-    # Connection settings
-    tcp_nodelay: bool = True  # Disable Nagle's algorithm for faster sends
-    keep_alive: bool = True
 
 
 class DPIBypass:
@@ -180,7 +166,7 @@ class DPIBypass:
             # Look for SNI extension type (0x00 0x00)
             # This is a simplified search
             for i in range(43, len(data) - 4):
-                if data[i:i+2] == b'\x00\x00':  # SNI extension type
+                if data[i : i + 2] == b"\x00\x00":  # SNI extension type
                     # Verify it looks like SNI
                     if i + 4 < len(data):
                         return i + 4  # Return position after extension header
@@ -191,13 +177,14 @@ class DPIBypass:
 
     def create_fake_packet(self, real_data: bytes) -> bytes:
         """
-        Create a fake packet with low TTL.
+        Build a decoy payload the same length as the real data.
 
-        The packet reaches the DPI device but dies before reaching
-        the destination, potentially confusing stateful inspection.
+        The technique this comes from gives the decoy a TTL low enough that it dies
+        before the destination, which needs a raw socket. Nothing here sets a TTL, so
+        every preset leaves fake_packets_enabled off and this returns nothing.
         """
         if not self.config.fake_packets_enabled:
-            return b''
+            return b""
 
         # Create packet with random payload
         fake_payload = secrets.token_bytes(len(real_data))
@@ -222,7 +209,7 @@ class DPIBypass:
             segments = []
             chunk_size = self.config.tls_record_split_size
             for i in range(0, len(data), chunk_size):
-                segments.append(data[i:i+chunk_size])
+                segments.append(data[i : i + chunk_size])
             return segments
 
         elif method == "fake":
@@ -251,9 +238,7 @@ class DPIBypass:
         if self.config.split_tls_hello:
             new_fragments = []
             for frag in fragments:
-                new_fragments.extend(
-                    self.split_tls_client_hello(frag, self.config.split_position)
-                )
+                new_fragments.extend(self.split_tls_client_hello(frag, self.config.split_position))
             fragments = new_fragments
 
         # Apply SNI fragmentation
@@ -278,240 +263,28 @@ class DPIBypass:
 
         Some DPI systems look for exact HTTP patterns.
         """
-        if not data.startswith((b'GET ', b'POST ', b'CONNECT ', b'HEAD ')):
+        if not data.startswith((b"GET ", b"POST ", b"CONNECT ", b"HEAD ")):
             return data
 
         modified = data
 
         # Add space before method
         if self.config.http_space_before_method:
-            modified = b' ' + modified
+            modified = b" " + modified
 
         # Mixed case method (some DPI is case-sensitive)
         if self.config.http_mixed_case_method:
             # gEt, pOsT, etc.
-            for method in [b'GET', b'POST', b'CONNECT', b'HEAD', b'PUT', b'DELETE']:
+            for method in [b"GET", b"POST", b"CONNECT", b"HEAD", b"PUT", b"DELETE"]:
                 if modified.upper().startswith(method):
-                    mixed = bytes([
-                        c.lower() if i % 2 else c.upper()
-                        for i, c in enumerate(method.decode())
-                    ], 'ascii')
-                    modified = mixed + modified[len(method):]
+                    mixed = bytes(
+                        [c.lower() if i % 2 else c.upper() for i, c in enumerate(method.decode())],
+                        "ascii",
+                    )
+                    modified = mixed + modified[len(method) :]
                     break
 
         return modified
-
-
-class TLSWrapper:
-    """
-    Wraps SOCKS5 connections in TLS to appear as HTTPS traffic.
-    """
-
-    def __init__(self, config: SecurityConfig):
-        self.config = config
-        self._ssl_context: Optional[ssl.SSLContext] = None
-
-    def create_server_context(self) -> ssl.SSLContext:
-        """Create SSL context for server-side TLS."""
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-
-        if self.config.tls_cert_file and self.config.tls_key_file:
-            context.load_cert_chain(
-                self.config.tls_cert_file,
-                self.config.tls_key_file
-            )
-        else:
-            cert_path, key_path = self._generate_self_signed_cert()
-            context.load_cert_chain(cert_path, key_path)
-
-        context.set_ciphers('ECDHE+AESGCM:DHE+AESGCM:ECDHE+CHACHA20:DHE+CHACHA20')
-        context.options |= ssl.OP_NO_COMPRESSION
-
-        return context
-
-    def create_client_context(self, server_hostname: Optional[str] = None) -> ssl.SSLContext:
-        """Create SSL context for client-side TLS."""
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        return context
-
-    def _generate_self_signed_cert(self) -> tuple[str, str]:
-        """Generate a self-signed certificate mimicking legitimate sites."""
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.hazmat.primitives import serialization
-        import tempfile
-        from datetime import timedelta
-
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-        # Mimic a common CDN certificate
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-            x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
-            x509.NameAttribute(NameOID.LOCALITY_NAME, "San Francisco"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Cloudflare, Inc."),
-            x509.NameAttribute(NameOID.COMMON_NAME, "sni.cloudflaressl.com"),
-        ])
-
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(issuer)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime.utcnow() + timedelta(days=365))
-            .add_extension(
-                x509.SubjectAlternativeName([
-                    x509.DNSName("sni.cloudflaressl.com"),
-                    x509.DNSName("*.cloudflare.com"),
-                    x509.DNSName("cloudflare.com"),
-                ]),
-                critical=False,
-            )
-            .sign(key, hashes.SHA256())
-        )
-
-        cert_path = Path(tempfile.gettempdir()) / "shadow9_cert.pem"
-        key_path = Path(tempfile.gettempdir()) / "shadow9_key.pem"
-
-        with open(cert_path, "wb") as f:
-            f.write(cert.public_bytes(serialization.Encoding.PEM))
-
-        with open(key_path, "wb") as f:
-            f.write(key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption()
-            ))
-
-        logger.info("Generated TLS certificate", cn="sni.cloudflaressl.com")
-        return str(cert_path), str(key_path)
-
-
-class SecureTransport:
-    """
-    Secure transport layer with DPI bypass capabilities.
-
-    Wraps asyncio streams with:
-    - TLS encryption
-    - Packet fragmentation
-    - DPI evasion techniques
-    """
-
-    def __init__(self, config: SecurityConfig):
-        self.config = config
-        self.dpi_bypass = DPIBypass(config.dpi_bypass)
-        self.tls_wrapper = TLSWrapper(config)
-
-    async def send_with_bypass(
-        self,
-        writer: asyncio.StreamWriter,
-        data: bytes
-    ) -> None:
-        """Send data with DPI bypass techniques applied."""
-        if not self.config.dpi_bypass.enabled:
-            writer.write(data)
-            await writer.drain()
-            return
-
-        # Fragment data for DPI bypass
-        fragments = self.dpi_bypass.fragment_for_bypass(data)
-
-        # Send each fragment separately with small delays
-        for i, fragment in enumerate(fragments):
-            writer.write(fragment)
-            await writer.drain()
-
-            # Small delay between fragments to ensure they're sent separately
-            if i < len(fragments) - 1:
-                await asyncio.sleep(0.001)  # 1ms delay
-
-    async def wrap_with_tls(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        server_side: bool = True
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Wrap connection with TLS."""
-        if not self.config.tls_enabled:
-            return reader, writer
-
-        if server_side:
-            self.tls_wrapper.create_server_context()
-        else:
-            self.tls_wrapper.create_client_context()
-
-        # This requires upgrading the transport to TLS
-        # For server-side, this is done at accept time
-        # For client-side, this can be done with start_tls
-
-        return reader, writer  # Placeholder - TLS is applied at server start
-
-
-class SecureServer:
-    """
-    Enhanced SOCKS5 server with security/DPI bypass features.
-    """
-
-    def __init__(self, base_server, security_config: SecurityConfig):
-        self.base_server = base_server
-        self.config = security_config
-        self.transport = SecureTransport(security_config)
-        self._ssl_context: Optional[ssl.SSLContext] = None
-
-    async def start(self) -> None:
-        """Start the secure server."""
-        if self.config.tls_enabled:
-            self._ssl_context = self.transport.tls_wrapper.create_server_context()
-            logger.info("TLS enabled")
-
-        if self.config.dpi_bypass.enabled:
-            logger.info(
-                "DPI bypass enabled",
-                split_tls=self.config.dpi_bypass.split_tls_hello,
-                fragment_sni=self.config.dpi_bypass.fragment_sni,
-                desync=self.config.dpi_bypass.desync_enabled
-            )
-
-        # Start server with TLS if enabled
-        if self._ssl_context:
-            self.base_server._server = await asyncio.start_server(
-                self.base_server._handle_client,
-                self.base_server.host,
-                self.base_server.port,
-                ssl=self._ssl_context,
-                reuse_address=True,
-            )
-        else:
-            await self.base_server.start()
-            return
-
-        self.base_server._running = True
-        addr = self.base_server._server.sockets[0].getsockname()
-
-        features = []
-        if self.config.tls_enabled:
-            features.append("TLS")
-        if self.config.dpi_bypass.enabled:
-            features.append("DPI-Bypass")
-
-        logger.info(
-            "Secure SOCKS5 server started",
-            host=addr[0],
-            port=addr[1],
-            features=features
-        )
-
-    async def stop(self) -> None:
-        """Stop the secure server."""
-        await self.base_server.stop()
 
 
 def get_security_preset(level: SecurityLevel) -> SecurityConfig:
@@ -571,39 +344,3 @@ def get_security_preset(level: SecurityLevel) -> SecurityConfig:
     return presets.get(level, presets[SecurityLevel.BASIC])
 
 
-# Ports commonly allowed through corporate firewalls
-FIREWALL_FRIENDLY_PORTS = [
-    443,   # HTTPS - almost always allowed
-    80,    # HTTP - usually allowed
-    8080,  # HTTP Proxy - often allowed
-    8443,  # HTTPS Alt - often allowed
-]
-
-
-def print_security_info(config: SecurityConfig) -> str:
-    """Generate human-readable security configuration summary."""
-    lines = [
-        f"Security Level: {config.level.value.upper()}",
-        f"TLS Encryption: {'Enabled' if config.tls_enabled else 'Disabled'}",
-    ]
-
-    if config.dpi_bypass.enabled:
-        dpi = config.dpi_bypass
-        lines.append("DPI Bypass: Enabled")
-        if dpi.split_tls_hello:
-            lines.append(f"  - TLS ClientHello splitting (pos: {dpi.split_position})")
-        if dpi.fragment_sni:
-            lines.append(f"  - SNI fragmentation (pos: {dpi.sni_split_position})")
-        if dpi.desync_enabled:
-            lines.append(f"  - Desync attack ({dpi.desync_method})")
-        if dpi.fake_packets_enabled:
-            lines.append(f"  - Fake packets (TTL: {dpi.fake_packet_ttl})")
-    else:
-        lines.append("DPI Bypass: Disabled")
-
-    if config.padding_enabled:
-        lines.append(f"Padding: {config.padding_min}-{config.padding_max} bytes")
-
-    lines.append(f"DNS Leak Prevention: {'Enabled' if config.prevent_dns_leaks else 'Disabled'}")
-
-    return "\n".join(lines)

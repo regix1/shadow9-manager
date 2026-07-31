@@ -27,33 +27,46 @@ def _get_cors_origins() -> list[str]:
     return [origin.strip() for origin in origins_str.split(",") if origin.strip()]
 
 
+def docs_enabled() -> bool:
+    """
+    Whether to publish the interactive docs and the OpenAPI schema.
+
+    Set SHADOW9_API_DOCS=1 to turn them on. They are off by default because they
+    need no API key, so anyone who reaches the port would otherwise be able to
+    enumerate every endpoint, parameter and model.
+    """
+    return os.getenv("SHADOW9_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def create_app(
     title: str = "Shadow9 Manager API",
     version: str = "1.0.0",
     description: str = "RESTful API for Shadow9 SOCKS5 proxy manager",
-    enable_cors: bool = True
+    enable_cors: bool = True,
 ) -> FastAPI:
     """
     Create and configure the FastAPI application.
-    
+
     Args:
         title: API title
         version: API version
         description: API description
         enable_cors: Enable CORS middleware
-        
+
     Returns:
         Configured FastAPI application
     """
+    publish_docs = docs_enabled()
+
     app = FastAPI(
         title=title,
         version=version,
         description=description,
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        docs_url="/api/docs" if publish_docs else None,
+        redoc_url="/api/redoc" if publish_docs else None,
+        openapi_url="/api/openapi.json" if publish_docs else None,
     )
-    
+
     # CORS middleware - only enabled if origins are configured
     cors_origins = _get_cors_origins()
     if enable_cors and cors_origins:
@@ -64,22 +77,22 @@ def create_app(
             allow_methods=["GET", "POST", "PATCH", "DELETE"],
             allow_headers=["X-API-Key", "Content-Type"],
         )
-    
+
     # Include routers
     app.include_router(health.router, prefix="/api")
     app.include_router(users.router, prefix="/api")
     app.include_router(server.router, prefix="/api")
-    
+
     @app.get("/")
-    async def root():
+    async def root() -> dict:
         """Root endpoint with API info."""
         return {
             "name": title,
             "version": version,
-            "docs": "/api/docs",
-            "health": "/api/health"
+            "docs": "/api/docs" if publish_docs else None,
+            "health": "/api/health",
         }
-    
+
     return app
 
 
@@ -87,27 +100,18 @@ def create_app(
 app = create_app()
 
 
-def run_server(
-    host: str = "127.0.0.1",
-    port: int = 8080,
-    reload: bool = False
-) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8080, reload: bool = False) -> None:
     """
     Run the API server.
-    
+
     Args:
         host: Server host address
         port: Server port
         reload: Enable auto-reload for development
     """
     import uvicorn
-    
-    uvicorn.run(
-        "shadow9.api.app:app",
-        host=host,
-        port=port,
-        reload=reload
-    )
+
+    uvicorn.run("shadow9.api.app:app", host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":

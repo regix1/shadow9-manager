@@ -15,7 +15,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from ..paths import get_paths
+from ..paths import get_paths, write_file_safely
 
 console = Console()
 
@@ -35,9 +35,14 @@ def register_service_commands(app: typer.Typer):
 
     @service_app.command("install")
     def service_install(
-        host: Annotated[str, typer.Option("--host", "-h", help="Host to bind to")] = "0.0.0.0",
+        host: Annotated[str, typer.Option("--host", "-h", help="Host to bind to")] = "127.0.0.1",
         port: Annotated[int, typer.Option("--port", "-p", help="Port to listen on")] = 1080,
-        global_cmd: Annotated[bool, typer.Option("--global", "-g", help="Install 'shadow9' command globally in /usr/local/bin")] = True,
+        global_cmd: Annotated[
+            bool,
+            typer.Option(
+                "--global", "-g", help="Install 'shadow9' command globally in /usr/local/bin"
+            ),
+        ] = True,
     ):
         """Install Shadow9 as a systemd service."""
         _check_linux()
@@ -59,25 +64,40 @@ def register_service_commands(app: typer.Typer):
 
         # Get master key from paths module (checks env var and .env file)
         from ..paths import load_master_key
+
         master_key = load_master_key()
-        
+
         if master_key:
             console.print(f"[dim]Using master key from: {paths.env_file}[/dim]")
 
+        # This is the one file whose truncation cannot be recovered from: half a master
+        # key means credentials.enc will never decrypt again, for every user.
+        # write_file_safely renames a complete file into place and applies 0600 before
+        # any content exists, rather than after
         if not master_key:
             import secrets
+
             master_key = secrets.token_urlsafe(32)
             env_file = Path(install_path) / ".env"
-            env_file.write_text(f"SHADOW9_MASTER_KEY={master_key}\n")
-            os.chmod(env_file, 0o600)
+            write_file_safely(env_file, f"SHADOW9_MASTER_KEY={master_key}\n".encode())
             console.print(f"[green]Generated master key and saved to {env_file}[/green]")
-        
+
         # Ensure .env file exists in install path for the service
         target_env = Path(install_path) / ".env"
         if not target_env.exists():
-            target_env.write_text(f"SHADOW9_MASTER_KEY={master_key}\n")
-            os.chmod(target_env, 0o600)
+            write_file_safely(target_env, f"SHADOW9_MASTER_KEY={master_key}\n".encode())
             console.print(f"[dim]Saved master key to: {target_env}[/dim]")
+
+        # A flat RestartSec retries forever at one rate, which fills the journal on a
+        # service that cannot start at all. The decaying interval needs systemd 254.
+        if _systemd_version() >= 254:
+            restart_backoff = (
+                "# back the retry interval off to 5s, 11s, 25s, 55s, 2m, then 5m\n"
+                "RestartSteps=5\n"
+                "RestartMaxDelaySec=300\n"
+            )
+        else:
+            restart_backoff = ""
 
         # Create systemd service file
         # Set SHADOW9_HOME to ensure consistent path resolution
@@ -86,6 +106,9 @@ Description=Shadow9 SOCKS5 Proxy Server
 Documentation=https://github.com/regix1/shadow9-manager
 After=network.target tor.service
 Wants=tor.service
+# Without this, five quick failures leave the unit failed until somebody logs in.
+# It belongs in [Unit]; systemd ignores it under [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -96,8 +119,33 @@ Environment="PYTHONPATH={install_path}/src"
 Environment="SHADOW9_HOME={install_path}"
 Environment="SHADOW9_MASTER_KEY={master_key}"
 ExecStart={python_exec} -m shadow9.cli serve --host {host} --port {port}
-Restart=on-failure
+# a clean exit must also come back, so on-failure is not enough
+Restart=always
 RestartSec=5
+{restart_backoff}# the relay holds two descriptors per connection and the default 1024 runs out
+LimitNOFILE=65535
+# A share of the machine rather than a fixed number of megabytes. 768M was the same
+# figure on a 1 GB VPS and a 64 GB host, and systemd works a percentage out from
+# installed RAM every time it loads the unit, so a resized machine gets the new figure
+# on the next daemon-reload with nothing to edit here. The proxy reads these two files
+# back out of its own cgroup at startup and picks how many password hashes it will run
+# at once so that it fits underneath them.
+# MemoryHigh is the working ceiling and the one the process is expected to live under;
+# MemoryMax is the backstop, which is the order systemd's own documentation recommends.
+MemoryHigh=60%
+MemoryMax=75%
+# continue, not stop, because stop can leave the proxy down for good. When systemd
+# attributes a kill to the OOM killer it applies OOMPolicy, and stop means it stops the
+# unit itself, which Restart=always does not undo. Measured on systemd 249: a unit under
+# stop that took a kill systemd recorded as oom-kill went to inactive (dead) with
+# Result=success and NRestarts=0 and stayed there. Whether a given kill is recorded that
+# way or as a plain signal is a race, so stop is a service that usually comes back and
+# sometimes does not, which is the worst of the two. Under continue the same probe
+# restarted every time, 16 and 20 times in 25 seconds across two runs.
+# Nothing is lost by not using stop: the kill is still on the record as Result=signal
+# with ExecMainStatus=9 and the OOM lines in the journal, while a unit latched dead by
+# stop reports itself as a success and says nothing at all.
+OOMPolicy=continue
 StandardOutput=journal
 StandardError=journal
 
@@ -112,8 +160,10 @@ PrivateTmp=true
 WantedBy=multi-user.target
 """
 
-        Path(SERVICE_FILE).write_text(service_content)
-        os.chmod(SERVICE_FILE, 0o644)
+        # systemd reads this back on daemon-reload, so a half-written unit is a unit that
+        # will not parse. 0644 rather than the helper's default, because systemd and any
+        # operator running systemctl status have to be able to read it
+        write_file_safely(Path(SERVICE_FILE), service_content.encode(), mode=0o644)
 
         # Reload systemd
         subprocess.run(["systemctl", "daemon-reload"], check=True)
@@ -128,7 +178,9 @@ WantedBy=multi-user.target
             if symlink_path.is_symlink():
                 symlink_path.unlink()
             elif symlink_path.exists():
-                console.print(f"[yellow]Warning: {symlink_path} exists and is not a symlink, skipping[/yellow]")
+                console.print(
+                    f"[yellow]Warning: {symlink_path} exists and is not a symlink, skipping[/yellow]"
+                )
                 global_cmd = False
 
             if global_cmd:
@@ -136,18 +188,20 @@ WantedBy=multi-user.target
                 console.print(f"[green]Installed global command: {symlink_path}[/green]")
                 global_note = "\n\nGlobal command: [cyan]shadow9[/cyan] (available system-wide)"
 
-        console.print(Panel(
-            f"[bold green]Service installed![/bold green]\n\n"
-            f"Service file: [cyan]{SERVICE_FILE}[/cyan]\n"
-            f"Install path: [cyan]{install_path}[/cyan]\n"
-            f"Listen: [cyan]{host}:{port}[/cyan]{global_note}\n\n"
-            f"[bold]Next steps:[/bold]\n"
-            f"  shadow9 service start    - Start the service\n"
-            f"  shadow9 service enable   - Enable auto-start on boot\n"
-            f"  shadow9 service status   - Check service status",
-            title="Shadow9 Service",
-            border_style="green"
-        ))
+        console.print(
+            Panel(
+                f"[bold green]Service installed![/bold green]\n\n"
+                f"Service file: [cyan]{SERVICE_FILE}[/cyan]\n"
+                f"Install path: [cyan]{install_path}[/cyan]\n"
+                f"Listen: [cyan]{host}:{port}[/cyan]{global_note}\n\n"
+                f"[bold]Next steps:[/bold]\n"
+                f"  shadow9 service start    - Start the service\n"
+                f"  shadow9 service enable   - Enable auto-start on boot\n"
+                f"  shadow9 service status   - Check service status",
+                title="Shadow9 Service",
+                border_style="green",
+            )
+        )
 
     @service_app.command("uninstall")
     def service_uninstall(
@@ -188,7 +242,9 @@ WantedBy=multi-user.target
         _check_root()
         _check_installed()
 
-        result = subprocess.run(["systemctl", "start", SERVICE_NAME], capture_output=True, text=True)
+        result = subprocess.run(
+            ["systemctl", "start", SERVICE_NAME], capture_output=True, text=True
+        )
         if result.returncode == 0:
             console.print("[green]Service started[/green]")
         else:
@@ -217,7 +273,9 @@ WantedBy=multi-user.target
         _check_root()
         _check_installed()
 
-        result = subprocess.run(["systemctl", "restart", SERVICE_NAME], capture_output=True, text=True)
+        result = subprocess.run(
+            ["systemctl", "restart", SERVICE_NAME], capture_output=True, text=True
+        )
         if result.returncode == 0:
             console.print("[green]Service restarted[/green]")
         else:
@@ -231,7 +289,9 @@ WantedBy=multi-user.target
         _check_root()
         _check_installed()
 
-        result = subprocess.run(["systemctl", "enable", SERVICE_NAME], capture_output=True, text=True)
+        result = subprocess.run(
+            ["systemctl", "enable", SERVICE_NAME], capture_output=True, text=True
+        )
         if result.returncode == 0:
             console.print("[green]Service enabled (will start on boot)[/green]")
         else:
@@ -245,7 +305,9 @@ WantedBy=multi-user.target
         _check_root()
         _check_installed()
 
-        result = subprocess.run(["systemctl", "disable", SERVICE_NAME], capture_output=True, text=True)
+        result = subprocess.run(
+            ["systemctl", "disable", SERVICE_NAME], capture_output=True, text=True
+        )
         if result.returncode == 0:
             console.print("[green]Service disabled (won't start on boot)[/green]")
         else:
@@ -259,49 +321,53 @@ WantedBy=multi-user.target
         _check_installed()
 
         result = subprocess.run(
-            ["systemctl", "status", SERVICE_NAME, "--no-pager"],
-            capture_output=True,
-            text=True
+            ["systemctl", "status", SERVICE_NAME, "--no-pager"], capture_output=True, text=True
         )
 
         # Parse status
         is_active = "active (running)" in result.stdout
-        is_enabled = subprocess.run(
-            ["systemctl", "is-enabled", SERVICE_NAME],
-            capture_output=True,
-            text=True
-        ).stdout.strip() == "enabled"
+        is_enabled = (
+            subprocess.run(
+                ["systemctl", "is-enabled", SERVICE_NAME], capture_output=True, text=True
+            ).stdout.strip()
+            == "enabled"
+        )
 
         status_color = "green" if is_active else "red"
         status_text = "Running" if is_active else "Stopped"
         boot_text = "Enabled" if is_enabled else "Disabled"
 
-        console.print(Panel(
-            f"[bold]Status:[/bold] [{status_color}]{status_text}[/{status_color}]\n"
-            f"[bold]Boot:[/bold]   {boot_text}\n\n"
-            f"[dim]{result.stdout}[/dim]",
-            title="Shadow9 Service Status",
-            border_style=status_color
-        ))
+        console.print(
+            Panel(
+                f"[bold]Status:[/bold] [{status_color}]{status_text}[/{status_color}]\n"
+                f"[bold]Boot:[/bold]   {boot_text}\n\n"
+                f"[dim]{result.stdout}[/dim]",
+                title="Shadow9 Service Status",
+                border_style=status_color,
+            )
+        )
 
     @service_app.command("logs")
     def service_logs(
         follow: Annotated[bool, typer.Option("--follow", "-f", help="Follow log output")] = False,
         lines: Annotated[int, typer.Option("--lines", "-n", help="Number of lines to show")] = 50,
-        current: Annotated[bool, typer.Option("--current", "-c", help="Only show logs from current service run")] = False,
+        current: Annotated[
+            bool, typer.Option("--current", "-c", help="Only show logs from current service run")
+        ] = False,
     ):
         """View Shadow9 service logs."""
         _check_linux()
         _check_installed()
 
         cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager"]
-        
+
         # If --current, get logs only since the service last started
         if current:
             # Get the timestamp when the service was last activated
             result = subprocess.run(
                 ["systemctl", "show", SERVICE_NAME, "--property=ActiveEnterTimestamp", "--value"],
-                capture_output=True, text=True
+                capture_output=True,
+                text=True,
             )
             timestamp = result.stdout.strip()
             if timestamp:
@@ -309,7 +375,7 @@ WantedBy=multi-user.target
                 console.print(f"[dim]Showing logs since service start: {timestamp}[/dim]\n")
         else:
             cmd.append(f"-n{lines}")
-        
+
         if follow:
             cmd.append("-f")
             if not current:
@@ -318,6 +384,25 @@ WantedBy=multi-user.target
         else:
             result = subprocess.run(cmd, capture_output=True, text=True)
             console.print(result.stdout)
+
+
+def _systemd_version() -> int:
+    """Read the running systemd's major version, or 0 if it cannot be determined."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+
+    # The first line reads "systemd 255 (255.4-1ubuntu8.4)"
+    parts = result.stdout.split()
+    if len(parts) >= 2 and parts[1].isdigit():
+        return int(parts[1])
+    return 0
 
 
 def _check_linux():

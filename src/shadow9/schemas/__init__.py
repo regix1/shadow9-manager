@@ -24,7 +24,7 @@ from .common import (
 __all__ = [
     # User schemas
     "UserCreate",
-    "UserUpdate", 
+    "UserUpdate",
     "UserResponse",
     "UserListResponse",
     # Server schemas

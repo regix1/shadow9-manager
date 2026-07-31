@@ -13,7 +13,7 @@ from rich.panel import Panel
 console = Console()
 
 
-def run_serve_wizard(default_host: str = "0.0.0.0", default_port: int = 1080) -> Tuple[str, int]:
+def run_serve_wizard(default_host: str = "127.0.0.1", default_port: int = 1080) -> Tuple[str, int]:
     """
     Interactive mode for serve command.
 
@@ -24,11 +24,12 @@ def run_serve_wizard(default_host: str = "0.0.0.0", default_port: int = 1080) ->
     Returns:
         Tuple of (host, port)
     """
-    console.print(Panel(
-        "[bold cyan]Server Configuration[/bold cyan]\n\n"
-        "Configure the SOCKS5 proxy server.",
-        border_style="cyan"
-    ))
+    console.print(
+        Panel(
+            "[bold cyan]Server Configuration[/bold cyan]\n\nConfigure the SOCKS5 proxy server.",
+            border_style="cyan",
+        )
+    )
 
     console.print("\n[bold]Server Binding[/bold]")
     console.print("  [dim]Choose where the proxy server listens for connections.[/dim]\n")
@@ -63,10 +64,12 @@ def show_serve_preview(host: str, port: int) -> None:
         host: The host to bind to
         port: The port to listen on
     """
-    console.print(Panel(
-        f"[bold]Server Configuration[/bold]\n\n"
-        f"  Listen: [cyan]{host}:{port}[/cyan]\n\n"
-        f"[dim]User settings control Tor routing, bridges, and security levels.[/dim]\n"
-        f"[dim]For background operation: shadow9 service install[/dim]",
-        border_style="cyan"
-    ))
+    console.print(
+        Panel(
+            f"[bold]Server Configuration[/bold]\n\n"
+            f"  Listen: [cyan]{host}:{port}[/cyan]\n\n"
+            f"[dim]User settings control Tor routing, bridges, and security levels.[/dim]\n"
+            f"[dim]For background operation: shadow9 service install[/dim]",
+            border_style="cyan",
+        )
+    )

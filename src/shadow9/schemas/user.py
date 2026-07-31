@@ -14,53 +14,31 @@ from ..models.user import BridgeType, SecurityLevel
 
 class UserCreate(BaseModel):
     """Schema for creating a new user (POST /users)."""
-    
+
     username: str = Field(
         ...,
         min_length=3,
         max_length=64,
-        pattern=r'^[a-zA-Z0-9_-]+$',
+        pattern=r"^[a-zA-Z0-9_-]+$",
         description="Unique username",
-        examples=["john_doe", "user-123"]
+        examples=["john_doe", "user-123"],
     )
     password: str = Field(
-        ...,
-        min_length=12,
-        description="Strong password (min 12 chars, mixed case, digit, special)"
+        ..., min_length=12, description="Strong password (min 12 chars, mixed case, digit, special)"
     )
-    use_tor: bool = Field(
-        default=True,
-        description="Route traffic through Tor"
-    )
-    bridge_type: BridgeType = Field(
-        default=BridgeType.NONE,
-        description="Tor bridge type"
-    )
+    use_tor: bool = Field(default=True, description="Route traffic through Tor")
+    bridge_type: BridgeType = Field(default=BridgeType.NONE, description="Tor bridge type")
     security_level: SecurityLevel = Field(
-        default=SecurityLevel.BASIC,
-        description="Security/evasion level"
+        default=SecurityLevel.BASIC, description="Security/evasion level"
     )
     allowed_ports: Optional[list[int]] = Field(
-        default=None,
-        description="Allowed destination ports (null = all)"
+        default=None, description="Allowed destination ports (null = all)"
     )
-    rate_limit: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Max requests per minute"
-    )
-    bind_port: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=65535,
-        description="Custom bind port"
-    )
-    logging_enabled: bool = Field(
-        default=True,
-        description="Enable activity logging"
-    )
+    rate_limit: Optional[int] = Field(default=None, ge=1, description="Max requests per minute")
+    bind_port: Optional[int] = Field(default=None, ge=1, le=65535, description="Custom bind port")
+    logging_enabled: bool = Field(default=True, description="Enable activity logging")
 
-    @field_validator('password')
+    @field_validator("password")
     @classmethod
     def validate_password_strength(cls, v: str) -> str:
         """Validate password meets security requirements."""
@@ -76,7 +54,7 @@ class UserCreate(BaseModel):
             raise ValueError("Password must contain at least one special character")
         return v
 
-    @field_validator('allowed_ports')
+    @field_validator("allowed_ports")
     @classmethod
     def validate_ports(cls, v: Optional[list[int]]) -> Optional[list[int]]:
         """Validate all ports are in valid range."""
@@ -89,49 +67,35 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     """Schema for updating a user (PATCH /users/{username})."""
-    
+
     password: Optional[str] = Field(
-        default=None,
-        min_length=12,
-        description="New password (optional)"
+        default=None, min_length=12, description="New password (optional)"
     )
-    use_tor: Optional[bool] = Field(
-        default=None,
-        description="Route traffic through Tor"
-    )
-    bridge_type: Optional[BridgeType] = Field(
-        default=None,
-        description="Tor bridge type"
-    )
+    use_tor: Optional[bool] = Field(default=None, description="Route traffic through Tor")
+    bridge_type: Optional[BridgeType] = Field(default=None, description="Tor bridge type")
     security_level: Optional[SecurityLevel] = Field(
-        default=None,
-        description="Security/evasion level"
+        default=None, description="Security/evasion level"
     )
     allowed_ports: Optional[list[int]] = Field(
-        default=None,
-        description="Allowed destination ports"
+        default=None, description="Allowed destination ports"
     )
-    rate_limit: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Max requests per minute"
-    )
-    bind_port: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=65535,
-        description="Custom bind port"
-    )
-    logging_enabled: Optional[bool] = Field(
-        default=None,
-        description="Enable activity logging"
-    )
-    enabled: Optional[bool] = Field(
-        default=None,
-        description="Enable/disable user"
-    )
+    rate_limit: Optional[int] = Field(default=None, ge=1, description="Max requests per minute")
+    bind_port: Optional[int] = Field(default=None, ge=1, le=65535, description="Custom bind port")
+    logging_enabled: Optional[bool] = Field(default=None, description="Enable activity logging")
+    enabled: Optional[bool] = Field(default=None, description="Enable/disable user")
 
-    @field_validator('password')
+    @field_validator("allowed_ports")
+    @classmethod
+    def validate_ports(cls, v: Optional[list[int]]) -> Optional[list[int]]:
+        """Apply the range the create schema and the CLI already apply.
+
+        Without this a PATCH stored ports the CLI refuses. `UserRepository.update`
+        setattrs whatever it is given and `Credential` does not validate on assignment,
+        so a 0 reached disk and then matched no real destination port for that user.
+        """
+        return UserCreate.validate_ports(v)
+
+    @field_validator("password")
     @classmethod
     def validate_password_strength(cls, v: Optional[str]) -> Optional[str]:
         """Validate password if provided."""
@@ -152,9 +116,9 @@ class UserUpdate(BaseModel):
 
 class UserResponse(BaseModel):
     """Schema for user response (excludes sensitive data like password_hash)."""
-    
+
     model_config = ConfigDict(from_attributes=True)
-    
+
     username: str = Field(..., description="Username")
     use_tor: bool = Field(..., description="Routes through Tor")
     bridge_type: BridgeType = Field(..., description="Tor bridge type")
@@ -170,6 +134,6 @@ class UserResponse(BaseModel):
 
 class UserListResponse(BaseModel):
     """Response for listing users."""
-    
+
     users: list[UserResponse] = Field(..., description="List of users")
     total: int = Field(..., ge=0, description="Total user count")

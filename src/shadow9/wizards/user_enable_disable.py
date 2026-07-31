@@ -20,11 +20,11 @@ def run_user_enable_wizard(
 ) -> bool:
     """
     Interactive wizard to enable users.
-    
+
     Args:
         auth_manager: The authentication manager
         username: Optional specific username to enable
-        
+
     Returns:
         True if operation was successful, False otherwise
     """
@@ -92,11 +92,11 @@ def run_user_disable_wizard(
 ) -> bool:
     """
     Interactive wizard to disable users.
-    
+
     Args:
         auth_manager: The authentication manager
         username: Optional specific username to disable
-        
+
     Returns:
         True if operation was successful, False otherwise
     """

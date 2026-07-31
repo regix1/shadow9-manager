@@ -21,7 +21,6 @@ auth:
   require_auth: true          # Require SOCKS5 authentication
   credentials_file: "config/credentials.enc"  # Encrypted credentials file
   master_key_env: "SHADOW9_MASTER_KEY"        # Environment variable for master key
-  session_timeout_hours: 24   # Session timeout
   max_failed_attempts: 5      # Max failed auth attempts before lockout
   lockout_duration_minutes: 15  # Lockout duration
 

@@ -22,6 +22,7 @@ console = Console(force_terminal=True)
 # Status icons - use ASCII fallbacks on Windows to avoid encoding issues
 class Icons:
     """Icons for status indicators (ASCII on Windows, Unicode elsewhere)."""
+
     if sys.platform == "win32":
         # ASCII fallbacks for Windows cmd.exe/PowerShell encoding issues
         SUCCESS = "[OK]"
@@ -33,9 +34,9 @@ class Icons:
     else:
         # Unicode icons for Unix-like systems
         SUCCESS = "\u2713"  # ✓
-        ERROR = "\u2717"    # ✗
+        ERROR = "\u2717"  # ✗
         WARNING = "\u26a0"  # ⚠
-        INFO = "\u2192"     # →
+        INFO = "\u2192"  # →
         PENDING = "\u25cb"  # ○
         RUNNING = "\u25c9"  # ◉
 
@@ -43,6 +44,7 @@ class Icons:
 # Color scheme
 class Colors:
     """Consistent color scheme."""
+
     PRIMARY = "cyan"
     SUCCESS = "green"
     ERROR = "red"

@@ -82,7 +82,7 @@ class UserAwareLogger:
         username: Optional[str],
         client_addr: Optional[tuple[str, int]] = None,
         target: Optional[str] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         """
         Log a connection event, respecting user logging preferences.
@@ -109,16 +109,3 @@ class UserAwareLogger:
             log_data["target"] = target
 
         self._logger.info(event, **log_data)
-
-
-def create_user_logger(auth_manager: AuthManager) -> UserAwareLogger:
-    """
-    Create a user-aware logger instance.
-
-    Args:
-        auth_manager: The AuthManager to check user preferences
-
-    Returns:
-        A UserAwareLogger instance
-    """
-    return UserAwareLogger(auth_manager)
