@@ -11,6 +11,7 @@ from .user_info import display_user_info
 from .serve import run_serve_wizard, show_serve_preview
 from .init_wizard import run_init_wizard, show_config_summary, show_master_key
 from .api_setup import run_api_setup_wizard, display_api_config
+from .wireguard_setup import run_wireguard_setup_wizard, show_wireguard_summary
 
 __all__ = [
     # User creation
@@ -31,4 +32,7 @@ __all__ = [
     # API
     "run_api_setup_wizard",
     "display_api_config",
+    # WireGuard
+    "run_wireguard_setup_wizard",
+    "show_wireguard_summary",
 ]

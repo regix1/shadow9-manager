@@ -1,0 +1,33 @@
+#!/bin/sh
+
+# Runs on the first boot after this package is installed, and on the first boot
+# after flashing an image that contains it. The boot service deletes a
+# uci-defaults script once it exits 0 and re-runs it every boot until then,
+# which is what a step needing the network up and the hub reachable wants.
+#
+# What this does not do, stated because it is easy to assume otherwise: an
+# ordinary sysupgrade does not bring this package back. The overlay backup
+# skips files a package owns, so /usr/sbin/shadow9-node is gone after a flash
+# while /etc/config/shadow9 and /etc/shadow9.token remain, because those are
+# declared conffiles. The interface then sits in UCI failing to come up, which
+# looks like a broken tunnel rather than a missing package. Getting the package
+# into the image, through attended sysupgrade or the image builder, is what
+# makes this script run again.
+
+[ -x /usr/sbin/shadow9-node ] || exit 0
+
+iface="$(uci -q get shadow9.node.interface)"
+[ -n "$iface" ] || iface=wg0
+
+# Already enrolled.
+[ -n "$(uci -q get "network.$iface.private_key")" ] && exit 0
+
+hub="$(uci -q get shadow9.node.hub)"
+[ -n "$hub" ] || exit 0
+[ -s /etc/shadow9.token ] || exit 0
+
+# A non-zero exit leaves this script in place, so an unreachable hub is simply
+# retried on the next boot.
+/usr/sbin/shadow9-node join -hub "$hub" -token-file /etc/shadow9.token -iface "$iface" || exit 1
+
+exit 0

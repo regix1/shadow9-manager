@@ -58,6 +58,14 @@ dev = [
     "black>=24.0.0",
     "mypy>=1.8.0",
 ]
+# Only needed to draw a QR code for 'shadow9 wg device add'. An extra rather than a base
+# dependency because a hub that never hands a config to a phone never draws one, and
+# without it that command still writes the config file and says what is missing.
+# SVG output and the terminal drawing are both pure Python, so this pulls in no imaging
+# library of its own.
+qr = [
+    "qrcode>=7.4.2",
+]
 
 [project.scripts]
 shadow9 = "shadow9.cli:cli"

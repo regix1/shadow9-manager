@@ -12,6 +12,8 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 
+from ..auth import AuthManager
+from ..config import Config, get_project_root
 from ..core.config import get_settings
 from ..repositories.user_repository import UserRepository
 from ..services.user_service import UserService
@@ -44,12 +46,44 @@ def get_user_repository() -> UserRepository:
         credentials_file=credentials_file,
         master_key=get_master_key(),
         max_concurrent_hashes=settings.auth.max_concurrent_auth,
+        tunnel_network=settings.wireguard.tunnel_network,
     )
 
 
-def get_user_service(repository: UserRepository = Depends(get_user_repository)) -> UserService:
+def get_config() -> Config:
+    """
+    Load the dataclass configuration the WireGuard services read.
+
+    The same file `get_settings` reads, loaded through the other half of the config pair,
+    which is the half that hands out plain dataclasses rather than pydantic settings.
+
+    Returns:
+        The configuration, with environment overrides applied
+    """
+    config_file = get_project_root() / "config" / "config.yaml"
+    return Config.load(config_file if config_file.exists() else None)
+
+
+def get_user_service(
+    repository: UserRepository = Depends(get_user_repository),
+    config: Config = Depends(get_config),
+) -> UserService:
     """Get user service with repository injected."""
-    return UserService(repository=repository)
+    return UserService(repository=repository, config=config)
+
+
+def get_auth_manager(repository: UserRepository = Depends(get_user_repository)) -> AuthManager:
+    """
+    Get the credential store the API already holds.
+
+    Handed out rather than built again, because a second store in the same process keeps
+    its own copy of the credential table and the two of them go out of step the moment one
+    writes. This process is meant to have exactly one.
+
+    Returns:
+        The store behind the user repository
+    """
+    return repository.auth_manager
 
 
 async def verify_api_key(api_key: Optional[str] = Security(api_key_header)) -> str:

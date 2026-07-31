@@ -1,10 +1,43 @@
 """Tests for configuration loading, saving and precedence."""
 
+from pathlib import Path
+
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from shadow9.config import Config, LogConfig, ServerConfig, generate_default_config
-from shadow9.core.config import Settings
+from shadow9.config import (
+    Config,
+    LogConfig,
+    ServerConfig,
+    WireguardConfig,
+    generate_default_config,
+)
+from shadow9.core.config import Settings, WireguardSettings
+
+# The file a stock install reads at startup.
+SHIPPED_CONFIG = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
+
+# One name per WireGuard setting, derived by WireguardSettings from its own env prefix and
+# read by hand in Config._apply_env_overrides.
+WIREGUARD_ENV_NAMES = [
+    "SHADOW9_WIREGUARD_ENABLED",
+    "SHADOW9_WIREGUARD_LISTEN_PORT",
+    "SHADOW9_WIREGUARD_ENROLLMENT_HOST",
+    "SHADOW9_WIREGUARD_ENROLLMENT_PORT",
+    "SHADOW9_WIREGUARD_TUNNEL_NETWORK",
+    "SHADOW9_WIREGUARD_HUB_ENDPOINT",
+    "SHADOW9_WIREGUARD_MTU",
+    "SHADOW9_WIREGUARD_DNS",
+    "SHADOW9_WIREGUARD_KEEPALIVE",
+]
+
+
+@pytest.fixture(autouse=True)
+def clear_wireguard_environment(monkeypatch):
+    """Keep a SHADOW9_WIREGUARD_* variable in the developer's shell out of the results."""
+    for name in WIREGUARD_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
 # Every key a real config/config.yaml carries. Settings models only a subset, and the
@@ -49,6 +82,19 @@ FULL_CONFIG = {
         "rate_limit_per_minute": 100,
         "max_request_size": 1048576,
     },
+    # Every value here differs from the default, so a save that quietly rewrites the
+    # section with defaults fails rather than looking like a successful round trip.
+    "wireguard": {
+        "enabled": True,
+        "listen_port": 51821,
+        "enrollment_host": "198.51.100.9",
+        "enrollment_port": 8191,
+        "tunnel_network": "10.42.0.0/24",
+        "hub_endpoint": "vpn.example.com:51821",
+        "mtu": 1412,
+        "dns": ["10.42.0.1"],
+        "keepalive": 20,
+    },
 }
 
 # The keys Settings does not model. Losing any of these is the bug under test.
@@ -76,7 +122,7 @@ class TestSettingsRoundTrip:
     """Saving settings must not drop keys the file already carries."""
 
     def test_save_keeps_every_key(self, tmp_path):
-        """Load, save and reload keeps all 30 keys of a full config file."""
+        """Load, save and reload keeps every key of a full config file."""
         config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
 
         settings = Settings.load_from_yaml(config_file)
@@ -456,3 +502,386 @@ class TestTheServePathReadsTheEnvironment:
         assert loaded, "the serve path never called Config.load"
         assert loaded[0].auth.max_concurrent_auth == 3
         assert loaded[0].server.host == "10.9.9.9"
+
+
+class RecordingLogger:
+    """A stand-in for the module logger that keeps what it was told."""
+
+    def __init__(self) -> None:
+        self.warnings: list[tuple[str, dict]] = []
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.warnings.append((event, dict(kwargs)))
+
+    def info(self, event: str, **kwargs: object) -> None:
+        return None
+
+    def error(self, event: str, **kwargs: object) -> None:
+        return None
+
+
+def settings_with_wireguard(**overrides: object) -> Settings:
+    """A Settings whose WireGuard values were assigned after it was built.
+
+    Pydantic checks a field when the model is constructed and not when one is assigned, so
+    this is the route a bad value actually takes to reach validate_all.
+    """
+    settings = Settings()
+    for name, value in overrides.items():
+        setattr(settings.wireguard, name, value)
+    return settings
+
+
+class TestTheWireguardGroupExistsOnBothHalves:
+    def test_the_shipped_comment_names_both_inbound_ports(self):
+        text = SHIPPED_CONFIG.read_text(encoding="utf-8")
+
+        assert "Open this UDP port for the WireGuard tunnel" in text
+        assert "Open this TCP port; keep the admin API port closed" in text
+
+    """The proxy reads one config module and the API reads the other.
+
+    A field on one and not the other is read from the file, shown in the interface and
+    then ignored by whichever half was missed, which is a defect this codebase has
+    shipped before.
+    """
+
+    def test_both_halves_define_the_same_fields(self):
+        from dataclasses import fields as dataclass_fields
+
+        dataclass_names = {f.name for f in dataclass_fields(WireguardConfig)}
+
+        assert dataclass_names == set(WireguardSettings.model_fields)
+
+    def test_both_halves_default_the_same(self):
+        """Same name, same unit, same value, or the two halves run different hubs."""
+        config, settings = WireguardConfig(), WireguardSettings()
+
+        for name in WireguardSettings.model_fields:
+            assert getattr(config, name) == getattr(settings, name), name
+
+    def test_the_hub_is_off_until_it_is_configured(self):
+        """hub_endpoint has no sensible guess, so the feature cannot default to on."""
+        assert WireguardConfig().enabled is False
+        assert WireguardSettings().enabled is False
+        assert WireguardConfig().hub_endpoint == ""
+
+    def test_the_documented_defaults(self):
+        """1420 is the MTU the kernel gives a fresh WireGuard device.
+
+        Framing measures 32 bytes over an inner packet padded to a multiple of 16, so with
+        the outer IPv4 and UDP headers 1440 fits a 1500 byte path and the 20 bytes below
+        that cover an IPv6 underlay. 25 seconds sits under the 30 second UDP mapping
+        timeout common to NAT and stateful firewalls.
+        """
+        config, settings = WireguardConfig(), WireguardSettings()
+
+        assert config.mtu == settings.mtu == 1420
+        assert config.keepalive == settings.keepalive == 25
+        assert config.listen_port == settings.listen_port == 51820
+        assert config.enrollment_host == settings.enrollment_host == "0.0.0.0"
+        assert config.enrollment_port == settings.enrollment_port == 8081
+        assert config.tunnel_network == settings.tunnel_network == "10.9.0.0/24"
+
+
+class TestTheWireguardSectionIsRead:
+    """The three steps that fail silently when they are skipped."""
+
+    def test_the_file_beats_the_defaults(self, tmp_path):
+        """Without the section in Config._from_dict the file is never looked at."""
+        config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
+
+        config = Config.load(config_file)
+
+        assert config.wireguard.enabled is True
+        assert config.wireguard.listen_port == 51821
+        assert config.wireguard.enrollment_host == "198.51.100.9"
+        assert config.wireguard.enrollment_port == 8191
+        assert config.wireguard.tunnel_network == "10.42.0.0/24"
+        assert config.wireguard.hub_endpoint == "vpn.example.com:51821"
+        assert config.wireguard.mtu == 1412
+        assert config.wireguard.dns == ["10.42.0.1"]
+        assert config.wireguard.keepalive == 20
+
+    def test_config_save_writes_the_section(self, tmp_path):
+        """Without it in Config.save the section vanishes on the next save."""
+        config_file = tmp_path / "config.yaml"
+        config = Config()
+        config.wireguard.hub_endpoint = "10.0.0.9:51820"
+
+        config.save(config_file)
+        written = yaml.safe_load(config_file.read_text())
+
+        assert written["wireguard"]["hub_endpoint"] == "10.0.0.9:51820"
+        assert written["wireguard"]["mtu"] == 1420
+
+    def test_settings_load_from_yaml_reads_the_section(self, tmp_path):
+        """Without it in the load_from_yaml chain the API reports the defaults."""
+        config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
+
+        settings = Settings.load_from_yaml(config_file)
+
+        assert settings.wireguard.listen_port == 51821
+        assert settings.wireguard.enrollment_host == "198.51.100.9"
+        assert settings.wireguard.enrollment_port == 8191
+        assert settings.wireguard.tunnel_network == "10.42.0.0/24"
+        assert settings.wireguard.dns == ["10.42.0.1"]
+
+
+class TestTheWireguardSectionSurvivesASave:
+    """Load, save, reload, with every key still carrying its value."""
+
+    def test_every_wireguard_key_round_trips(self, tmp_path):
+        config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
+
+        Settings.load_from_yaml(config_file).save_to_yaml(config_file)
+        reloaded = Settings.load_from_yaml(config_file)
+
+        for key, value in FULL_CONFIG["wireguard"].items():
+            assert getattr(reloaded.wireguard, key) == value, f"wireguard.{key} changed on save"
+
+    def test_a_settings_save_still_loads_through_config(self, tmp_path):
+        """The file the API writes is the file the proxy reads."""
+        config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
+
+        Settings.load_from_yaml(config_file).save_to_yaml(config_file)
+        config = Config.load(config_file)
+
+        assert config.wireguard.tunnel_network == "10.42.0.0/24"
+        assert config.wireguard.mtu == 1412
+        assert config.wireguard.dns == ["10.42.0.1"]
+
+    def test_no_hub_key_is_written(self, tmp_path):
+        """config.yaml is written 0644, so a private key must not reach it."""
+        config_file = tmp_path / "config.yaml"
+
+        Settings().save_to_yaml(config_file)
+        written = yaml.safe_load(config_file.read_text())
+
+        assert "private_key" not in written["wireguard"]
+
+
+class TestTheShippedConfigFile:
+    """A stock install has to load the file the repository ships."""
+
+    def test_it_loads_without_warnings(self, monkeypatch):
+        """An unknown key inside a known section is warned about and then ignored."""
+        from shadow9 import config as config_module
+
+        recorder = RecordingLogger()
+        monkeypatch.setattr(config_module, "logger", recorder)
+
+        config = Config.load(SHIPPED_CONFIG)
+
+        assert recorder.warnings == []
+        assert config.wireguard == WireguardConfig()
+
+    def test_the_api_half_reads_the_same_file(self):
+        settings = Settings.load_from_yaml(SHIPPED_CONFIG)
+
+        assert settings.wireguard.listen_port == 51820
+        assert settings.wireguard.enrollment_host == "0.0.0.0"
+        assert settings.wireguard.enrollment_port == 8081
+        assert settings.wireguard.mtu == 1420
+        assert settings.wireguard.dns == []
+
+    def test_it_carries_every_wireguard_key(self):
+        shipped = yaml.safe_load(SHIPPED_CONFIG.read_text())
+
+        assert set(shipped["wireguard"]) == set(WireguardSettings.model_fields)
+
+
+class TestTheWireguardEnvironmentVariables:
+    """One name per setting, honoured by both halves, or the log describes one of them."""
+
+    def test_both_halves_honour_every_variable(self, monkeypatch, tmp_path):
+        """The file says something else, so this also shows the environment winning."""
+        monkeypatch.setenv("SHADOW9_WIREGUARD_ENABLED", "true")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_LISTEN_PORT", "51999")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_ENROLLMENT_HOST", "192.0.2.9")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_ENROLLMENT_PORT", "8199")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_TUNNEL_NETWORK", "10.77.0.0/24")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_HUB_ENDPOINT", "203.0.113.9:51999")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_MTU", "1380")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_DNS", "10.77.0.1, 10.77.0.2")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_KEEPALIVE", "15")
+        config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
+
+        proxy = Config.load(config_file).wireguard
+        api = Settings.load_from_yaml(config_file).wireguard
+
+        for half in (proxy, api):
+            assert half.enabled is True
+            assert half.listen_port == 51999
+            assert half.enrollment_host == "192.0.2.9"
+            assert half.enrollment_port == 8199
+            assert half.tunnel_network == "10.77.0.0/24"
+            assert half.hub_endpoint == "203.0.113.9:51999"
+            assert half.mtu == 1380
+            assert half.dns == ["10.77.0.1", "10.77.0.2"]
+            assert half.keepalive == 15
+
+    @pytest.mark.parametrize(
+        ("name", "bad"),
+        [
+            ("SHADOW9_WIREGUARD_LISTEN_PORT", "0"),
+            ("SHADOW9_WIREGUARD_LISTEN_PORT", "nonsense"),
+            ("SHADOW9_WIREGUARD_ENROLLMENT_PORT", "0"),
+            ("SHADOW9_WIREGUARD_ENROLLMENT_PORT", "nonsense"),
+            ("SHADOW9_WIREGUARD_MTU", "9000"),
+            ("SHADOW9_WIREGUARD_KEEPALIVE", "-1"),
+            ("SHADOW9_WIREGUARD_TUNNEL_NETWORK", "8.8.8.0/24"),
+        ],
+    )
+    def test_a_value_that_cannot_work_is_refused_by_variable_name(
+        self, monkeypatch, tmp_path, name, bad
+    ):
+        """Named in the message, because an environment variable is invisible in a file."""
+        monkeypatch.setenv(name, bad)
+        config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
+
+        with pytest.raises(ValueError, match=name):
+            Config.load(config_file)
+
+
+class TestWireguardValuesThatCannotWork:
+    """Each refusal names the offending value, on both halves."""
+
+    @pytest.mark.parametrize("network", ["8.8.8.0/24", "1.1.1.0/24", "0.0.0.0/0"])
+    def test_a_public_tunnel_network_is_refused(self, network):
+        """Peers would be handed addresses belonging to somebody else, and every packet
+        for the real owner of that range would go into the tunnel."""
+        with pytest.raises(ValueError, match=network):
+            WireguardConfig(tunnel_network=network)
+
+        with pytest.raises(ValidationError, match="private range"):
+            WireguardSettings(tunnel_network=network)
+
+        assert any(
+            network in error
+            for error in settings_with_wireguard(tunnel_network=network).validate_all()
+        )
+
+    @pytest.mark.parametrize(
+        "network", ["10.9.0.0/24", "172.20.0.0/14", "100.64.0.0/10", "fd09:9::/64"]
+    )
+    def test_the_ranges_an_operator_would_reach_for_are_allowed(self, network):
+        """100.64.0.0/10 is RFC 6598 shared space, not globally routable, and only some
+        Python versions call it private, so it is named rather than inferred."""
+        assert WireguardConfig(tunnel_network=network).tunnel_network == network
+        assert WireguardSettings(tunnel_network=network).tunnel_network == network
+
+    @pytest.mark.parametrize("network", ["10.9.0.1/24", "not-a-network", ""])
+    def test_a_tunnel_network_that_is_not_a_network_is_refused(self, network):
+        """A host address with a prefix is the common way to write this one wrong."""
+        with pytest.raises(ValueError, match="tunnel_network"):
+            WireguardConfig(tunnel_network=network)
+
+        with pytest.raises(ValidationError, match="tunnel_network"):
+            WireguardSettings(tunnel_network=network)
+
+    @pytest.mark.parametrize("port", [0, -1, 65536, 70000])
+    def test_a_listen_port_outside_the_range_is_refused(self, port):
+        with pytest.raises(ValueError, match=str(port)):
+            WireguardConfig(listen_port=port)
+
+        with pytest.raises(ValidationError):
+            WireguardSettings(listen_port=port)
+
+        assert any(
+            str(port) in error
+            for error in settings_with_wireguard(listen_port=port).validate_all()
+        )
+
+    @pytest.mark.parametrize("port", [0, -1, 65536, 70000])
+    def test_an_enrollment_port_outside_the_range_is_refused(self, port: int) -> None:
+        with pytest.raises(ValueError, match=str(port)):
+            WireguardConfig(enrollment_port=port)
+
+        with pytest.raises(ValidationError):
+            WireguardSettings(enrollment_port=port)
+
+        assert any(
+            str(port) in error
+            for error in settings_with_wireguard(enrollment_port=port).validate_all()
+        )
+
+    @pytest.mark.parametrize(
+        ("left", "right", "port"),
+        [
+            ("api.port", "wireguard.enrollment_port", 8080),
+            ("api.port", "server.port", 1080),
+            ("wireguard.enrollment_port", "server.port", 1080),
+        ],
+    )
+    def test_two_inbound_listeners_cannot_share_a_port(
+        self, left: str, right: str, port: int
+    ) -> None:
+        settings = Settings()
+        if left == "api.port":
+            settings.api.port = port
+        if left == "wireguard.enrollment_port":
+            settings.wireguard.enrollment_port = port
+        if right == "wireguard.enrollment_port":
+            settings.wireguard.enrollment_port = port
+        if right == "server.port":
+            settings.server.port = port
+
+        errors = settings.validate_all()
+
+        assert any(left in error and right in error and str(port) in error for error in errors)
+
+    @pytest.mark.parametrize("mtu", [0, 576, 1279, 1441, 9000])
+    def test_an_mtu_outside_the_band_is_refused(self, mtu):
+        """1280 is the smallest an IPv6 link may carry, 1440 the most a 1500 byte path
+        leaves once WireGuard framing and the outer headers are taken off."""
+        with pytest.raises(ValueError, match=str(mtu)):
+            WireguardConfig(mtu=mtu)
+
+        with pytest.raises(ValidationError):
+            WireguardSettings(mtu=mtu)
+
+        assert any(str(mtu) in error for error in settings_with_wireguard(mtu=mtu).validate_all())
+
+    def test_a_negative_keepalive_is_refused(self):
+        with pytest.raises(ValueError, match="-5"):
+            WireguardConfig(keepalive=-5)
+
+        with pytest.raises(ValidationError):
+            WireguardSettings(keepalive=-5)
+
+    def test_keepalive_zero_is_allowed(self):
+        """0 is how wg-quick turns keepalives off, so it is a setting and not a mistake."""
+        assert WireguardConfig(keepalive=0).keepalive == 0
+        assert WireguardSettings(keepalive=0).keepalive == 0
+
+    @pytest.mark.parametrize(
+        ("key", "bad"),
+        [("listen_port", 0), ("mtu", 70), ("tunnel_network", "8.8.8.0/24")],
+    )
+    def test_a_bad_value_in_a_file_is_refused_at_load(self, tmp_path, key, bad):
+        """The file names the value, so the operator can find the line."""
+        data = {**FULL_CONFIG, "wireguard": {**FULL_CONFIG["wireguard"], key: bad}}
+        config_file = write_config(tmp_path / "config.yaml", data)
+
+        with pytest.raises(ValueError, match=str(bad)):
+            Config.load(config_file)
+
+    def test_a_value_assigned_after_construction_is_reported_by_validate(self):
+        """The one route that cannot raise at the boundary still has to be visible."""
+        config = Config()
+        config.wireguard.mtu = 500
+
+        assert any("wireguard.mtu must be between 1280 and 1440" in e for e in config.validate())
+
+    def test_both_halves_report_the_same_problem(self):
+        """An operator seeing two different complaints has to guess which half is talking."""
+        config = Config()
+        config.wireguard.listen_port = 0
+        config.wireguard.mtu = 70
+
+        proxy_errors = [e for e in config.validate() if e.startswith("wireguard.")]
+        api_errors = settings_with_wireguard(listen_port=0, mtu=70).validate_all()
+
+        assert proxy_errors == [e for e in api_errors if e.startswith("wireguard.")]
+        assert proxy_errors

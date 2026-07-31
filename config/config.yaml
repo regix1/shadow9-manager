@@ -41,3 +41,14 @@ security:
   allow_localhost: false      # Allow connections to localhost
   rate_limit_per_minute: 100  # Max requests per minute per user
   max_request_size: 1048576   # Max request size in bytes
+
+wireguard:
+  enabled: false              # Enable the WireGuard hub
+  listen_port: 51820          # Open this UDP port for the WireGuard tunnel
+  enrollment_host: "0.0.0.0" # Reachable listener for enrollment, refresh, and node downloads
+  enrollment_port: 8081       # Open this TCP port; keep the admin API port closed
+  tunnel_network: "10.9.0.0/24"     # Private range peer addresses come from (253 peers)
+  hub_endpoint: ""            # host:port peers dial, set once the hub is reachable
+  mtu: 1420                   # Tunnel MTU, the kernel default, room for an IPv6 underlay
+  dns: []                     # Resolvers handed to peers (empty = leave the client's own)
+  keepalive: 25               # Seconds between peer keepalives, under the 30s NAT timeout

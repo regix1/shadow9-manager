@@ -5,6 +5,9 @@ Tests for the FastAPI REST API endpoints.
 import importlib
 import os
 import threading
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,11 +17,15 @@ from typing import Optional
 from fastapi.testclient import TestClient
 
 from shadow9.api.app import create_app
+from shadow9.api.deps import get_user_repository
+from shadow9.config import Config
 from shadow9.core.api_config import get_api_key, set_api_key
+from shadow9.core.config import get_settings, Settings
 from shadow9.models.user import BridgeType, Credential, SecurityLevel
 from shadow9.repositories.user_repository import UserRepository
 from shadow9.schemas.user import UserCreate, UserUpdate
 from shadow9.services.user_service import UserService
+from shadow9.services import user_service as user_service_module
 
 
 def _utc_now() -> datetime:
@@ -31,8 +38,122 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+class TestListenerLaunch:
+    """The API start command starts the admin and enrollment listeners together."""
+
+    def test_start_passes_both_listener_addresses_to_the_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from shadow9.api import app as app_module
+        from shadow9.commands import api as api_commands
+
+        listener_config = Config()
+        listener_config.wireguard.enrollment_host = "0.0.0.0"
+        listener_config.wireguard.enrollment_port = 8191
+        called: dict[str, object] = {}
+
+        def read_api_config(_config_path: str) -> dict[str, object]:
+            return {"host": "127.0.0.1", "port": 8090}
+
+        def no_api_key(_config_path: Path) -> None:
+            return None
+
+        def load_config(_cls: type[Config], _config_path: Path | None = None) -> Config:
+            return listener_config
+
+        def config_dir() -> Path:
+            return Path("config")
+
+        def docs_are_off() -> bool:
+            return False
+
+        def run_servers(
+            host: str,
+            port: int,
+            reload: bool,
+            enrollment_host: str,
+            enrollment_port: int,
+            socks_port: int,
+        ) -> None:
+            called.update(
+                host=host,
+                port=port,
+                reload=reload,
+                enrollment_host=enrollment_host,
+                enrollment_port=enrollment_port,
+                socks_port=socks_port,
+            )
+
+        monkeypatch.setattr(api_commands, "_read_api_config", read_api_config)
+        monkeypatch.setattr(api_commands, "get_api_key", no_api_key)
+        monkeypatch.setattr(api_commands.Config, "load", classmethod(load_config))
+        monkeypatch.setattr(api_commands, "get_config_dir", config_dir)
+        monkeypatch.setattr(api_commands, "_docs_are_published", docs_are_off)
+        monkeypatch.setattr(app_module, "run_server", run_servers)
+
+        api_commands._start_impl("api.yaml", None, None, False)
+
+        assert called == {
+            "host": "127.0.0.1",
+            "port": 8090,
+            "reload": False,
+            "enrollment_host": "0.0.0.0",
+            "enrollment_port": 8191,
+            "socks_port": 1080,
+        }
+
+    @pytest.mark.parametrize(
+        ("left", "right", "ports"),
+        [
+            (
+                "api.port",
+                "wireguard.enrollment_port",
+                {"port": 8081, "enrollment_port": 8081, "socks_port": 1080},
+            ),
+            (
+                "api.port",
+                "server.port",
+                {"port": 1080, "enrollment_port": 8081, "socks_port": 1080},
+            ),
+            (
+                "wireguard.enrollment_port",
+                "server.port",
+                {"port": 8080, "enrollment_port": 1080, "socks_port": 1080},
+            ),
+        ],
+    )
+    def test_server_refuses_two_listeners_on_one_port(
+        self, left: str, right: str, ports: dict[str, int]
+    ) -> None:
+        from shadow9.api.app import run_server
+
+        with pytest.raises(ValueError) as raised:
+            run_server(**ports)
+
+        message = str(raised.value)
+        assert left in message
+        assert right in message
+
+
 # Create test app
 app = create_app()
+
+
+@contextmanager
+def overridden_repository(repository: object) -> Iterator[None]:
+    """
+    Put a stand-in repository behind the routes for the body of the `with`.
+
+    Patching the module attribute does nothing here: `Depends` captures the function
+    object when the route is declared, and `get_user_repository` is cached on top of
+    that, so a test that patches the name still reaches the real credential store on
+    whatever machine it runs on.
+    """
+    app.dependency_overrides[get_user_repository] = lambda: repository
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(get_user_repository, None)
 
 
 @pytest.fixture
@@ -63,6 +184,17 @@ class TestHealthEndpoints:
         data = response.json()
         assert data["status"] == "healthy"
         assert data["service"] == "shadow9-manager"
+
+    def test_wireguard_enrollment_is_not_served(self, client: TestClient) -> None:
+        response = client.post("/api/wireguard/enroll", json={})
+
+        assert response.status_code == 404
+
+    @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
+    def test_admin_routes_remain_mounted(self, client: TestClient) -> None:
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/users").status_code == 401
+        assert client.get("/api/server/config").status_code == 401
 
     @patch.dict("os.environ", {"SHADOW9_MASTER_KEY": "test-master-key"})
     @patch("shadow9.api.endpoints.health.get_user_repository")
@@ -133,41 +265,37 @@ class TestUserEndpoints:
         assert response.status_code == 401
 
     @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
-    @patch("shadow9.api.deps.get_user_repository")
-    def test_create_user_success(self, mock_repo, client, auth_headers):
+    def test_create_user_success(self, client, auth_headers):
         """Test successful user creation."""
-        # Mock repository
-        mock_repo_instance = MagicMock()
-        mock_repo_instance.hash_password.return_value = "hashed_password"
-        mock_repo_instance.exists = AsyncMock(return_value=False)
-        mock_repo_instance.create = AsyncMock(
-            return_value=MagicMock(
+        repository = MagicMock()
+        repository.hash_password.return_value = "hashed_password"
+        repository.exists = AsyncMock(return_value=False)
+        repository.create = AsyncMock(
+            return_value=Credential(
                 username="test_user",
+                password_hash="hashed_password",
                 use_tor=True,
                 bridge_type=BridgeType.NONE,
                 security_level=SecurityLevel.BASIC,
-                allowed_ports=None,
-                rate_limit=None,
-                bind_port=None,
                 logging_enabled=True,
                 enabled=True,
                 created_at=_utc_now(),
-                last_used=None,
             )
         )
-        mock_repo.return_value = mock_repo_instance
 
-        response = client.post(
-            "/api/users",
-            json={
-                "username": "test_user",
-                "password": "SecurePass123!",
-            },
-            headers=auth_headers,
-        )
+        with overridden_repository(repository):
+            response = client.post(
+                "/api/users",
+                json={
+                    "username": "test_user",
+                    "password": "SecurePass123!",
+                },
+                headers=auth_headers,
+            )
 
-        # Should succeed or fail based on actual service implementation
-        assert response.status_code in [201, 400, 500]
+        assert response.status_code == 201, response.text
+        assert response.json()["username"] == "test_user"
+        repository.create.assert_awaited_once()
 
     @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
     def test_create_user_validation_error(self, client, auth_headers):
@@ -197,17 +325,18 @@ class TestUserEndpoints:
         assert response.status_code == 422
 
     @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
-    @patch("shadow9.api.deps.get_user_repository")
-    def test_list_users(self, mock_repo, client, auth_headers):
+    def test_list_users(self, client, auth_headers):
         """Test user listing."""
-        mock_repo_instance = MagicMock()
-        mock_repo_instance.list = AsyncMock(return_value=[])
-        mock_repo_instance.count = AsyncMock(return_value=0)
-        mock_repo.return_value = mock_repo_instance
+        repository = MagicMock()
+        repository.list = AsyncMock(return_value=[])
+        repository.count = AsyncMock(return_value=0)
 
-        response = client.get("/api/users", headers=auth_headers)
-        # Should succeed or fail based on service state
-        assert response.status_code in [200, 500]
+        with overridden_repository(repository):
+            response = client.get("/api/users", headers=auth_headers)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["users"] == []
+        assert response.json()["total"] == 0
 
     @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
     def test_generate_credentials(self, client, auth_headers):
@@ -221,15 +350,16 @@ class TestServerEndpoints:
     """Tests for server management endpoints."""
 
     @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
-    @patch("shadow9.api.deps.get_user_repository")
-    def test_get_server_status(self, mock_repo, client, auth_headers):
+    def test_get_server_status(self, client, auth_headers):
         """Test server status endpoint."""
-        mock_repo_instance = MagicMock()
-        mock_repo_instance.count = AsyncMock(return_value=5)
-        mock_repo.return_value = mock_repo_instance
+        repository = MagicMock()
+        repository.count = AsyncMock(return_value=5)
 
-        response = client.get("/api/server/status", headers=auth_headers)
-        assert response.status_code in [200, 500]
+        with overridden_repository(repository):
+            response = client.get("/api/server/status", headers=auth_headers)
+
+        assert response.status_code == 200, response.text
+        assert "running" in response.json()
 
     @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
     @patch("shadow9.api.endpoints.server._something_is_listening", new_callable=AsyncMock)
@@ -264,8 +394,39 @@ class TestServerEndpoints:
     @patch.dict("os.environ", {"SHADOW9_API_KEY": "test-api-key"})
     def test_get_server_config(self, client, auth_headers):
         """Test server config endpoint."""
-        response = client.get("/api/server/config", headers=auth_headers)
-        assert response.status_code in [200, 500]
+        settings = Settings()
+        settings.wireguard.enabled = True
+        settings.wireguard.listen_port = 51987
+        settings.wireguard.enrollment_host = "0.0.0.0"
+        settings.wireguard.enrollment_port = 8191
+        settings.wireguard.tunnel_network = "10.77.0.0/24"
+        settings.wireguard.hub_endpoint = "vpn.example.test:51987"
+        settings.wireguard.mtu = 1380
+        settings.wireguard.dns = ["10.77.0.1", "1.1.1.1"]
+        settings.wireguard.keepalive = 19
+
+        def configured_settings() -> Settings:
+            return settings
+
+        app.dependency_overrides[get_settings] = configured_settings
+        try:
+            response = client.get("/api/server/config", headers=auth_headers)
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+
+        assert response.status_code == 200
+        assert response.json()["wireguard"] == {
+            "enabled": True,
+            "listen_port": 51987,
+            "enrollment_host": "0.0.0.0",
+            "enrollment_port": 8191,
+            "tunnel_network": "10.77.0.0/24",
+            "hub_endpoint": "vpn.example.test:51987",
+            "mtu": 1380,
+            "dns": ["10.77.0.1", "1.1.1.1"],
+            "keepalive": 19,
+        }
+        assert "private_key" not in response.json()["wireguard"]
 
 
 class CredentialStore:
@@ -362,6 +523,49 @@ class TestUserListingPagination:
 
         assert await service.count(enabled_only=True) == 60
         assert await service.count() == 180
+
+
+class TestPeerChangesReissueConfigs:
+    @pytest.mark.asyncio
+    async def test_enable_and_disable_use_the_locked_peer_change(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, bool]] = []
+        repository = MagicMock()
+        repository.auth_manager = MagicMock()
+        repository.update = AsyncMock()
+
+        def change(config: Config, auth_manager: object, name: str, enabled: bool) -> bool:
+            calls.append((name, enabled))
+            return True
+
+        monkeypatch.setattr(user_service_module, "set_peer_enabled", change)
+        service = UserService(repository=repository, config=Config())
+
+        assert await service.disable("phone") is True
+        assert await service.enable("phone") is True
+        assert calls == [("phone", False), ("phone", True)]
+        repository.update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_delete_uses_the_locked_peer_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        removed: list[str] = []
+        repository = MagicMock()
+        repository.auth_manager = MagicMock()
+        repository.delete = AsyncMock()
+
+        def delete(config: Config, auth_manager: object, name: str) -> bool:
+            removed.append(name)
+            return True
+
+        monkeypatch.setattr(user_service_module, "delete_user_peer", delete)
+        service = UserService(repository=repository, config=Config())
+
+        assert await service.delete("phone") is True
+        assert removed == ["phone"]
+        repository.delete.assert_not_awaited()
 
 
 class TestPasswordHashingStaysOffTheLoop:

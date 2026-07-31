@@ -15,7 +15,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from ..config import Config, listener_port_errors
 from ..core.api_config import generate_api_key, get_api_key, load_api_config, set_api_key
+from ..paths import get_config_dir
 from ..wizards.api_setup import run_api_setup_wizard, DEFAULT_CONFIG_PATH
 
 console = Console()
@@ -125,7 +127,7 @@ def start(
 def _start_impl(config_path: str, host: Optional[str], port: Optional[int], reload: bool) -> None:
     """Implementation of start command."""
     try:
-        import uvicorn
+        from ..api.app import run_server
     except ImportError as e:
         console.print("[red]FastAPI not installed. Run: pip install fastapi uvicorn[/red]")
         raise typer.Exit(1) from e
@@ -145,6 +147,17 @@ def _start_impl(config_path: str, host: Optional[str], port: Optional[int], relo
         api_host = host or config.get("host", "127.0.0.1")
         api_port = port or config.get("port", 8080)
         api_key = get_api_key(Path(config_path))
+
+    listener_config = Config.load(get_config_dir() / "config.yaml")
+    port_errors = listener_port_errors(
+        api_port,
+        listener_config.wireguard.enrollment_port,
+        listener_config.server.port,
+    )
+    if port_errors:
+        for error in port_errors:
+            console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1)
 
     # Set API key in environment if configured
     if api_key:
@@ -169,7 +182,9 @@ def _start_impl(config_path: str, host: Optional[str], port: Optional[int], relo
     console.print(
         Panel(
             f"[bold green]Shadow9 REST API[/bold green]\n\n"
-            f"Server:    [cyan]http://{api_host}:{api_port}[/cyan]\n"
+            f"Admin:      [cyan]http://{api_host}:{api_port}[/cyan]\n"
+            f"Enrollment: [cyan]http://{listener_config.wireguard.enrollment_host}:"
+            f"{listener_config.wireguard.enrollment_port}[/cyan]\n"
             f"{docs_lines}\n"
             f"[dim]Press Ctrl+C to stop.[/dim]",
             title="API Server",
@@ -177,8 +192,13 @@ def _start_impl(config_path: str, host: Optional[str], port: Optional[int], relo
         )
     )
 
-    uvicorn.run(
-        "shadow9.api.app:app", host=api_host, port=api_port, reload=reload, log_level="info"
+    run_server(
+        host=api_host,
+        port=api_port,
+        reload=reload,
+        enrollment_host=listener_config.wireguard.enrollment_host,
+        enrollment_port=listener_config.wireguard.enrollment_port,
+        socks_port=listener_config.server.port,
     )
 
 

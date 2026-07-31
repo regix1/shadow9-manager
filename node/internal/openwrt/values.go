@@ -1,0 +1,125 @@
+package openwrt
+
+import (
+	"fmt"
+	"net"
+	"strconv"
+	"strings"
+)
+
+// AddressWithPrefix turns the plain address the hub hands out into the form
+// the addresses list takes.
+//
+// A node gets a host route, not the whole tunnel subnet: with a /24 here the
+// router would treat every other peer as on-link and answer ARP for addresses
+// that are actually on the far side of the tunnel.
+func AddressWithPrefix(address string) (string, error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return "", fmt.Errorf("the address is empty")
+	}
+	if strings.Contains(address, "/") {
+		if _, _, err := net.ParseCIDR(address); err != nil {
+			return "", fmt.Errorf("%q is not an address: %w", address, err)
+		}
+		return address, nil
+	}
+	parsed := net.ParseIP(address)
+	if parsed == nil {
+		return "", fmt.Errorf("%q is not an address", address)
+	}
+	if parsed.To4() != nil {
+		return address + "/32", nil
+	}
+	return address + "/128", nil
+}
+
+// SplitEndpoint separates the host:port the hub answers with into the two UCI
+// options netifd wants. An IPv6 endpoint arrives in brackets and the brackets
+// are not part of the host.
+func SplitEndpoint(endpoint string) (host string, port int, err error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", 0, fmt.Errorf("the hub endpoint is empty")
+	}
+	host, text, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return "", 0, fmt.Errorf("%q is not a host and port: %w", endpoint, err)
+	}
+	if host == "" {
+		return "", 0, fmt.Errorf("%q has no host", endpoint)
+	}
+	port, err = strconv.Atoi(text)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("%q does not have a usable port", endpoint)
+	}
+	return host, port, nil
+}
+
+// LanNetwork returns the router's LAN subnet in CIDR form, which is what a
+// site gateway advertises to the rest of the tunnel.
+func LanNetwork(router Router) (string, error) {
+	address := router.Get("network.lan.ipaddr")
+	if address == "" {
+		return "", fmt.Errorf("network.lan.ipaddr is not set")
+	}
+	// uci get prints a list as its values separated by spaces, and a LAN can
+	// carry more than one address. The first is the one to advertise.
+	address = strings.Fields(address)[0]
+
+	if strings.Contains(address, "/") {
+		_, network, err := net.ParseCIDR(address)
+		if err != nil {
+			return "", fmt.Errorf("network.lan.ipaddr is %q, which is not an address", address)
+		}
+		return network.String(), nil
+	}
+
+	mask := router.Get("network.lan.netmask")
+	if mask == "" {
+		mask = "255.255.255.0"
+	}
+	ip := net.ParseIP(address).To4()
+	dotted := net.ParseIP(mask).To4()
+	if ip == nil || dotted == nil {
+		return "", fmt.Errorf("cannot read a subnet from %s and %s", address, mask)
+	}
+	netmask := net.IPMask(dotted)
+	ones, bits := netmask.Size()
+	if bits == 0 {
+		return "", fmt.Errorf("%s is not a usable netmask", mask)
+	}
+	return fmt.Sprintf("%s/%d", ip.Mask(netmask).String(), ones), nil
+}
+
+// Hostname returns the router's configured hostname, or an empty string when
+// it has none.
+func Hostname(router Router) string {
+	return router.Get("system.@system[0].hostname")
+}
+
+// PeerName turns a hostname into a name the hub will accept: 3 to 64 letters,
+// digits, underscores or hyphens. A hostname is usually already one, but a
+// dotted name is common enough to be worth converting rather than refusing.
+func PeerName(hostname string) (string, error) {
+	var name strings.Builder
+	for _, r := range strings.TrimSpace(hostname) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			name.WriteRune(r)
+		default:
+			name.WriteByte('-')
+		}
+	}
+	cleaned := strings.Trim(name.String(), "-")
+	const shortestName, longestName = 3, 64
+	if len(cleaned) < shortestName {
+		return "", fmt.Errorf(
+			"%q does not make a peer name of at least %d usable characters, pass -name",
+			hostname, shortestName)
+	}
+	if len(cleaned) > longestName {
+		cleaned = cleaned[:longestName]
+	}
+	return cleaned, nil
+}

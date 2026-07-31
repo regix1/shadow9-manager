@@ -19,10 +19,13 @@ from argon2 import PasswordHasher
 
 import shadow9.auth as auth_module
 import shadow9.paths as paths_module
-from shadow9.auth import AuthManager
+from shadow9.auth import AuthManager, Credential as StoredCredential
 from shadow9.models.user import Credential
 from shadow9.paths import get_paths, lock_file, read_or_create_salt, write_file_safely
 from shadow9.repositories.user_repository import UserRepository
+from shadow9.wireguard.addresses import parse_address, parse_network
+from shadow9.wireguard.keys import generate_keypair
+from shadow9.wireguard.render import Peer, PeerRole, Topology
 
 
 # cheap enough that a test can afford one per credential, and still the encoded shape the
@@ -1488,3 +1491,365 @@ class TestUserDirectoryValidation:
     def test_a_plain_username_still_works(self):
         paths = get_paths()
         assert paths.get_user_dir("testuser") == paths.users_dir / "testuser"
+
+
+def _peer_record(username: str, public_key: str, address: str) -> dict:
+    """A stored record for a user who is also a WireGuard peer."""
+    return {
+        "username": username,
+        "password_hash": _CHEAP_HASHER.hash(username),
+        "created_at": "2026-01-01T00:00:00",
+        "wg_public_key": public_key,
+        "wg_address": address,
+        "wg_routes": ["192.168.1.0/24"],
+        "wg_role": "node",
+        "wg_endpoint": "203.0.113.10:51820",
+        "wg_keepalive": 25,
+        "wg_expires_at": "2027-01-01T00:00:00",
+    }
+
+
+class TestPeerSettingsOnAStoredRecord:
+    """A peer lives on the user record, so it is checked where every other field is."""
+
+    def test_a_user_who_is_not_a_peer_is_written_the_way_it_always_was(self, tmp_path):
+        """Almost nobody is a peer, and a record with no wg_ keys is one any version reads."""
+        creds_file = tmp_path / "credentials.enc"
+        auth = AuthManager(credentials_file=creds_file)
+        auth.add_user("alice", "SecurePass123!@#")
+
+        written = json.loads(creds_file.read_text())["alice"]
+        assert [name for name in written if name.startswith("wg_")] == []
+
+    def test_a_peer_record_survives_a_read_and_a_write(self, tmp_path):
+        creds_file = tmp_path / "credentials.enc"
+        keypair = generate_keypair()
+        creds_file.write_bytes(
+            json.dumps({"alice": _peer_record("alice", keypair.public_key, "10.9.0.2")}).encode()
+        )
+
+        auth = AuthManager(credentials_file=creds_file)
+        assert auth.load_error is None
+
+        record = auth.get_credential("alice")
+        assert record is not None
+        assert record.wg_public_key == keypair.public_key
+        assert record.wg_address == "10.9.0.2"
+        assert record.wg_routes == ["192.168.1.0/24"]
+        assert record.wg_role == "node"
+        assert record.wg_keepalive == 25
+
+        auth.add_user("bob", "SecurePass123!@#")
+        written = json.loads(creds_file.read_text())
+        assert written["alice"]["wg_public_key"] == keypair.public_key
+        assert [name for name in written["bob"] if name.startswith("wg_")] == []
+
+    def test_a_public_key_the_tunnel_would_reject_is_refused_at_load(self, tmp_path):
+        """is_valid_key is the renderer's own check, so one key cannot mean two things."""
+        creds_file = tmp_path / "credentials.enc"
+        record = _peer_record("alice", "not-a-key", "10.9.0.2")
+        creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        assert auth.load_error is not None
+        assert "wg_public_key" in auth.load_error
+        assert auth.list_users() == []
+
+    def test_an_address_written_as_a_range_is_refused(self, tmp_path):
+        """wg_address names one host. A prefix means somebody meant a different thing."""
+        creds_file = tmp_path / "credentials.enc"
+        record = _peer_record("alice", generate_keypair().public_key, "10.9.0.2/24")
+        creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        assert auth.load_error is not None
+        assert auth.list_users() == []
+
+    def test_a_peer_address_outside_the_configured_tunnel_is_refused(self):
+        credential = StoredCredential(
+            username="alice",
+            password_hash=_CHEAP_HASHER.hash("alice"),
+            created_at="2026-01-01T00:00:00",
+            wg_public_key=generate_keypair().public_key,
+            wg_address="10.9.0.2",
+            wg_role="node",
+        )
+
+        with pytest.raises(ValueError, match=r"10\.20\.0\.0/24"):
+            auth_module._check_peer_fields(
+                credential, parse_network("10.20.0.0/24")
+            )
+
+    def test_a_route_carrying_host_bits_is_refused_rather_than_masked_off(self, tmp_path):
+        """192.168.1.1/24 and 192.168.1.0/24 differ, and the difference is what routes."""
+        creds_file = tmp_path / "credentials.enc"
+        record = _peer_record("alice", generate_keypair().public_key, "10.9.0.2")
+        record["wg_routes"] = ["192.168.1.1/24"]
+        creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        assert auth.load_error is not None
+        assert auth.list_users() == []
+
+    def test_a_role_that_is_not_one_of_the_three_is_refused(self, tmp_path):
+        creds_file = tmp_path / "credentials.enc"
+        record = _peer_record("alice", generate_keypair().public_key, "10.9.0.2")
+        record["wg_role"] = "gateway"
+        creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        assert auth.load_error is not None
+        assert auth.list_users() == []
+
+    def test_every_role_the_renderer_knows_is_accepted(self, tmp_path):
+        for role in (PeerRole.HUB, PeerRole.NODE, PeerRole.DEVICE):
+            creds_file = tmp_path / f"credentials-{role.value}.enc"
+            record = _peer_record("alice", generate_keypair().public_key, "10.9.0.2")
+            record["wg_role"] = role.value
+            creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+            auth = AuthManager(credentials_file=creds_file)
+
+            assert auth.load_error is None
+            stored = auth.get_credential("alice")
+            assert stored is not None
+            assert stored.wg_role == role.value
+
+    def test_a_keepalive_of_zero_is_refused(self, tmp_path):
+        """Zero is not "send none", which is the field being absent. It is not an interval."""
+        creds_file = tmp_path / "credentials.enc"
+        record = _peer_record("alice", generate_keypair().public_key, "10.9.0.2")
+        record["wg_keepalive"] = 0
+        creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        assert auth.load_error is not None
+        assert auth.list_users() == []
+
+    def test_an_expiry_carrying_an_offset_is_stored_the_way_the_other_times_are(self, tmp_path):
+        """Text order is time order in this file only while nothing carries an offset."""
+        creds_file = tmp_path / "credentials.enc"
+        record = _peer_record("alice", generate_keypair().public_key, "10.9.0.2")
+        record["wg_expires_at"] = "2027-01-01T13:00:00+02:00"
+        creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        stored = auth.get_credential("alice")
+        assert stored is not None
+        assert stored.wg_expires_at == "2027-01-01T11:00:00"
+
+    def test_an_expiry_that_is_not_a_time_is_refused(self, tmp_path):
+        creds_file = tmp_path / "credentials.enc"
+        record = _peer_record("alice", generate_keypair().public_key, "10.9.0.2")
+        record["wg_expires_at"] = "soon"
+        creds_file.write_bytes(json.dumps({"alice": record}).encode())
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        assert auth.load_error is not None
+        assert auth.list_users() == []
+
+    def test_a_peer_key_a_caller_makes_up_never_reaches_the_file(self, tmp_path):
+        """update_credential setattrs what it is handed, and the load refuses what it wrote.
+
+        Written, that record would fail the next load, and a failed load sets load_error,
+        which stops every write after it. The store would come up holding no users, with
+        the real ones still on disk and no way to save over them.
+        """
+        creds_file = tmp_path / "credentials.enc"
+        auth = AuthManager(credentials_file=creds_file)
+        auth.add_user("alice", "SecurePass123!@#")
+        before = creds_file.read_bytes()
+
+        with pytest.raises(ValueError):
+            auth.update_credential("alice", {"wg_public_key": "nonsense"})
+
+        assert creds_file.read_bytes() == before
+        stored = auth.get_credential("alice")
+        assert stored is not None
+        assert stored.wg_public_key is None
+
+        reopened = AuthManager(credentials_file=creds_file)
+        assert reopened.load_error is None
+        assert reopened.list_users() == ["alice"]
+
+    def test_removing_a_user_takes_its_peer_with_it(self, tmp_path):
+        """A peer record in a file of its own would outlive the user it belongs to."""
+        creds_file = tmp_path / "credentials.enc"
+        keypair = generate_keypair()
+        creds_file.write_bytes(
+            json.dumps({"alice": _peer_record("alice", keypair.public_key, "10.9.0.2")}).encode()
+        )
+
+        auth = AuthManager(credentials_file=creds_file)
+        assert auth.remove_user("alice") is True
+
+        assert keypair.public_key not in creds_file.read_text()
+        assert json.loads(creds_file.read_text()) == {}
+
+    def test_disabling_a_peer_keeps_its_keys_and_enabling_puts_it_back(self, tmp_path):
+        """A disabled peer is left out of every config, not stripped of its identity."""
+        creds_file = tmp_path / "credentials.enc"
+        keypair = generate_keypair()
+        creds_file.write_bytes(
+            json.dumps({"alice": _peer_record("alice", keypair.public_key, "10.9.0.2")}).encode()
+        )
+
+        auth = AuthManager(credentials_file=creds_file)
+        assert auth.set_user_enabled("alice", False) is True
+
+        disabled = auth.get_credential("alice")
+        assert disabled is not None
+        assert disabled.enabled is False
+        assert disabled.wg_public_key == keypair.public_key
+        assert disabled.wg_address == "10.9.0.2"
+        assert disabled.wg_routes == ["192.168.1.0/24"]
+
+        assert auth.set_user_enabled("alice", True) is True
+        restored = auth.get_credential("alice")
+        assert restored is not None
+        assert restored.enabled is True
+        assert restored.wg_public_key == keypair.public_key
+
+    def test_a_disabled_peer_is_left_out_of_the_configs_and_its_routes_go_with_it(self, tmp_path):
+        """The stored flag has to be the one the renderer reads, or disabling does nothing."""
+        creds_file = tmp_path / "credentials.enc"
+        keypair = generate_keypair()
+        creds_file.write_bytes(
+            json.dumps({"alice": _peer_record("alice", keypair.public_key, "10.9.0.2")}).encode()
+        )
+
+        auth = AuthManager(credentials_file=creds_file)
+        auth.set_user_enabled("alice", False)
+        stored = auth.get_credential("alice")
+        assert stored is not None
+        assert stored.wg_public_key is not None
+        assert stored.wg_address is not None
+        assert stored.wg_role is not None
+        assert stored.wg_routes is not None
+
+        gateway = Peer(
+            name=stored.username,
+            public_key=stored.wg_public_key,
+            address=parse_address(stored.wg_address),
+            role=PeerRole(stored.wg_role),
+            routes=tuple(parse_network(route) for route in stored.wg_routes),
+            enabled=stored.enabled,
+        )
+        hub = Peer(
+            name="hub",
+            public_key=generate_keypair().public_key,
+            address=parse_address("10.9.0.1"),
+            role=PeerRole.HUB,
+            endpoint="203.0.113.10:51820",
+        )
+        phone = Peer(
+            name="phone",
+            public_key=generate_keypair().public_key,
+            address=parse_address("10.9.0.3"),
+            role=PeerRole.DEVICE,
+        )
+        topology = Topology(
+            tunnel_network=parse_network("10.9.0.0/24"), hub=hub, spokes=(gateway, phone)
+        )
+
+        assert [peer.name for peer in topology.active_spokes()] == ["phone"]
+        assert topology.routes_reachable_from(phone) == ()
+
+
+class TestAFileWrittenByALaterVersion:
+    """A key this version has no field for used to fail the whole load, which stopped writes."""
+
+    def test_a_field_from_a_later_version_loads_instead_of_failing_the_file(self, tmp_path):
+        creds_file = tmp_path / "credentials.enc"
+        creds_file.write_bytes(
+            json.dumps(
+                {
+                    "alice": {
+                        "username": "alice",
+                        "password_hash": _CHEAP_HASHER.hash("alice"),
+                        "created_at": "2026-01-01T00:00:00",
+                        "wg_preshared_key": "a setting this version has never heard of",
+                    }
+                }
+            ).encode()
+        )
+
+        auth = AuthManager(credentials_file=creds_file)
+
+        assert auth.load_error is None
+        assert auth.list_users() == ["alice"]
+
+    def test_a_field_from_a_later_version_is_still_there_after_a_write(self, tmp_path):
+        """Dropping it would mean one login on an older build deletes the newer settings."""
+        creds_file = tmp_path / "credentials.enc"
+        creds_file.write_bytes(
+            json.dumps(
+                {
+                    "alice": {
+                        "username": "alice",
+                        "password_hash": _CHEAP_HASHER.hash("alice"),
+                        "created_at": "2026-01-01T00:00:00",
+                        "wg_preshared_key": "kept",
+                        "wg_table": "off",
+                    }
+                }
+            ).encode()
+        )
+
+        auth = AuthManager(credentials_file=creds_file)
+        assert auth.add_user("bob", "SecurePass123!@#") is True
+
+        written = json.loads(creds_file.read_text())
+        assert written["alice"]["wg_preshared_key"] == "kept"
+        assert written["alice"]["wg_table"] == "off"
+        assert "unknown_fields" not in written["alice"]
+        assert "unknown_fields" not in written["bob"]
+
+    def test_an_unknown_field_is_named_once_per_load_rather_than_per_record(
+        self, tmp_path, monkeypatch
+    ):
+        """An operator seeing this is running an older build than the one that wrote the file."""
+        creds_file = tmp_path / "credentials.enc"
+        creds_file.write_bytes(
+            json.dumps(
+                {
+                    name: {
+                        "username": name,
+                        "password_hash": _CHEAP_HASHER.hash(name),
+                        "created_at": "2026-01-01T00:00:00",
+                        "wg_preshared_key": "x",
+                    }
+                    for name in ("alice", "bob")
+                }
+            ).encode()
+        )
+
+        named: list[list[str]] = []
+
+        def record_warning(event: str, **kwargs: object) -> None:
+            if "fields" in kwargs:
+                named.append(kwargs["fields"])
+
+        monkeypatch.setattr(auth_module.logger, "warning", record_warning)
+        AuthManager(credentials_file=creds_file)
+
+        assert named == [["wg_preshared_key"]]
+
+    def test_a_caller_cannot_write_arbitrary_keys_through_the_update_path(self, tmp_path):
+        """The box unknown keys are kept in is not a field a caller may set."""
+        creds_file = tmp_path / "credentials.enc"
+        auth = AuthManager(credentials_file=creds_file)
+        auth.add_user("alice", "SecurePass123!@#")
+
+        auth.update_credential("alice", {"unknown_fields": {"injected": "value"}})
+
+        written = json.loads(creds_file.read_text())["alice"]
+        assert "injected" not in written
+        assert "unknown_fields" not in written

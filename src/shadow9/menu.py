@@ -229,7 +229,11 @@ def _get_auth_manager() -> AuthManager:
     if not master_key:
         console.print("[red]Master key not found. Please run 'shadow9 init' first.[/red]")
         raise ValueError("Master key not configured")
-    return AuthManager(master_key=master_key)
+    config_file = paths.config_file
+    config = Config.load(config_file) if config_file.exists() else Config()
+    return AuthManager(
+        master_key=master_key, tunnel_network=config.wireguard.tunnel_network
+    )
 
 
 # User Management Actions
@@ -591,6 +595,23 @@ def _action_view_config() -> None:
         table2.add_row("Lockout Duration", f"{config.auth.lockout_duration_minutes} min")
 
         console.print(table2)
+        console.print()
+
+        table3 = Table(title="WireGuard Configuration", show_header=True)
+        table3.add_column("Setting", style="cyan")
+        table3.add_column("Value", style="green")
+
+        table3.add_row("Enabled", str(config.wireguard.enabled))
+        table3.add_row("Listen Port", str(config.wireguard.listen_port))
+        table3.add_row("Enrollment Host", config.wireguard.enrollment_host)
+        table3.add_row("Enrollment Port", str(config.wireguard.enrollment_port))
+        table3.add_row("Tunnel Network", config.wireguard.tunnel_network)
+        table3.add_row("Hub Endpoint", config.wireguard.hub_endpoint)
+        table3.add_row("MTU", str(config.wireguard.mtu))
+        table3.add_row("DNS", ", ".join(config.wireguard.dns))
+        table3.add_row("Keepalive", f"{config.wireguard.keepalive}s")
+
+        console.print(table3)
 
     except Exception as e:
         console.print(f"[red]Error loading configuration: {e}[/red]")

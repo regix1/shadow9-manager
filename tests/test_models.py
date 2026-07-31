@@ -3,17 +3,20 @@ Tests for Pydantic domain models.
 """
 
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pydantic import ValidationError
 
+from shadow9.auth import Credential as StoredCredential
 from shadow9.models.user import (
     SecurityLevel,
     BridgeType,
+    PeerRole,
     UserBase,
     User,
     Credential,
     utc_now,
 )
+from shadow9.wireguard.keys import generate_keypair
 from shadow9.models.server import (
     Socks5AuthMethod,
     Socks5Command,
@@ -230,3 +233,129 @@ class TestServerModels:
         )
         assert status.running is True
         assert status.active_connections == 5
+
+
+class TestPeerSettingsOnTheUserModel:
+    """The model and the credential store hold the same seven fields, checked the same way."""
+
+    def test_a_user_is_not_a_peer_until_the_fields_are_set(self):
+        user = UserBase(username="alice")
+
+        assert user.wg_public_key is None
+        assert user.wg_address is None
+        assert user.wg_routes is None
+        assert user.wg_role is None
+        assert user.wg_endpoint is None
+        assert user.wg_keepalive is None
+        assert user.wg_expires_at is None
+
+    def test_a_peer_keeps_what_it_was_given(self):
+        keypair = generate_keypair()
+        user = UserBase(
+            username="gateway",
+            wg_public_key=keypair.public_key,
+            wg_address="10.9.0.2",
+            wg_routes=["192.168.1.0/24", "10.0.0.0/8"],
+            wg_role=PeerRole.NODE,
+            wg_endpoint="203.0.113.10:51820",
+            wg_keepalive=25,
+        )
+
+        assert user.wg_public_key == keypair.public_key
+        assert user.wg_routes == ["192.168.1.0/24", "10.0.0.0/8"]
+        assert user.wg_role is PeerRole.NODE
+
+    def test_a_key_the_tunnel_would_reject_is_refused(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_public_key="not-a-key")
+
+    def test_a_key_of_the_right_length_that_is_not_base64_is_refused(self):
+        """44 characters is not the check. Decoding to 32 bytes is."""
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_public_key="!" * 44)
+
+    def test_an_address_written_as_a_range_is_refused(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_address="10.9.0.2/24")
+
+    def test_a_route_carrying_host_bits_is_refused_rather_than_masked_off(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_routes=["192.168.1.1/24"])
+
+    def test_a_route_that_is_not_a_network_is_refused(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_routes=["everything"])
+
+    def test_a_role_that_is_not_one_of_the_three_is_refused(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_role="gateway")
+
+    def test_a_keepalive_outside_the_range_is_refused(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_keepalive=0)
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_keepalive=70000)
+
+    def test_an_empty_endpoint_is_refused(self):
+        with pytest.raises(ValidationError):
+            UserBase(username="alice", wg_endpoint="   ")
+
+    def test_a_peer_reaches_the_store_in_the_shapes_the_store_holds(self):
+        """to_dict feeds the dataclass the store writes, and json.dumps is what is under it.
+
+        Left as a PeerRole and a datetime these two would reach the file's json.dumps and
+        fail the write there, which is a long way from the model that produced them.
+        """
+        keypair = generate_keypair()
+        credential = Credential(
+            username="gateway",
+            password_hash="hash",
+            wg_public_key=keypair.public_key,
+            wg_address="10.9.0.2",
+            wg_routes=["192.168.1.0/24"],
+            wg_role=PeerRole.NODE,
+            wg_endpoint="203.0.113.10:51820",
+            wg_keepalive=25,
+            wg_expires_at=datetime(2027, 1, 1, 13, 0, tzinfo=timezone(timedelta(hours=2))),
+        )
+
+        data = credential.to_dict()
+
+        assert data["wg_role"] == "node"
+        assert data["wg_expires_at"] == "2027-01-01T11:00:00"
+        assert isinstance(data["wg_routes"], list)
+
+        stored = StoredCredential(**data)
+        assert stored.wg_public_key == keypair.public_key
+        assert stored.wg_role == "node"
+        assert stored.wg_expires_at == "2027-01-01T11:00:00"
+
+    def test_a_stored_peer_reads_back_into_the_model(self):
+        keypair = generate_keypair()
+        credential = Credential.from_dict(
+            {
+                "username": "gateway",
+                "password_hash": "hash",
+                "created_at": "2026-01-01T00:00:00",
+                "wg_public_key": keypair.public_key,
+                "wg_address": "10.9.0.2",
+                "wg_routes": ["192.168.1.0/24"],
+                "wg_role": "node",
+                "wg_endpoint": "203.0.113.10:51820",
+                "wg_keepalive": 25,
+                "wg_expires_at": "2027-01-01T00:00:00",
+            }
+        )
+
+        assert credential.wg_role is PeerRole.NODE
+        assert credential.wg_expires_at == datetime(2027, 1, 1, tzinfo=timezone.utc)
+        assert credential.wg_address == "10.9.0.2"
+
+    def test_a_user_who_is_not_a_peer_round_trips_with_no_peer_settings(self):
+        credential = Credential(username="alice", password_hash="hash")
+
+        stored = StoredCredential(**credential.to_dict())
+
+        assert stored.wg_public_key is None
+        assert stored.wg_routes is None
+        assert stored.wg_expires_at is None

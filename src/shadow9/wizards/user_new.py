@@ -48,7 +48,9 @@ def run_user_wizard(config_path: str = "config/config.yaml") -> bool | None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(),
+            master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network,
         )
 
         # Step 1: Username

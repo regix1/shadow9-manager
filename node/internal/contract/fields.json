@@ -1,0 +1,64 @@
+{
+  "endpoint": {
+    "method": "POST",
+    "path": "/api/wireguard/enroll",
+    "success_status": 200
+  },
+  "example_secret": "s3cr3t-join-token-value",
+  "request": {
+    "python_model": "shadow9.schemas.wireguard.EnrollmentRequest",
+    "go_type": "shadow9-node/internal/enroll.Request",
+    "fields": [
+      { "name": "token_id", "type": "string", "required": true },
+      { "name": "name", "type": "string", "required": true },
+      { "name": "public_key", "type": "string", "required": true },
+      { "name": "routes", "type": "string[]", "required": false },
+      { "name": "nonce", "type": "string", "required": true },
+      { "name": "mac", "type": "string", "required": true }
+    ]
+  },
+  "response": {
+    "python_model": "shadow9.schemas.wireguard.EnrollmentResponse",
+    "go_type": "shadow9-node/internal/enroll.Response",
+    "fields": [
+      { "name": "address", "type": "string", "required": true },
+      { "name": "hub_public_key", "type": "string", "required": true },
+      { "name": "hub_endpoint", "type": "string", "required": true },
+      { "name": "tunnel_network", "type": "string", "required": true },
+      { "name": "mtu", "type": "integer", "required": true },
+      { "name": "keepalive", "type": "integer", "required": true },
+      { "name": "protocol", "type": "integer", "required": true },
+      { "name": "mac", "type": "string", "required": true }
+    ]
+  },
+  "refresh_endpoint": {
+    "method": "POST",
+    "path": "/api/wireguard/refresh",
+    "success_status": 200
+  },
+  "refresh_request": {
+    "python_model": "shadow9.schemas.wireguard.RefreshRequest",
+    "go_type": "shadow9-node/internal/enroll.RefreshRequest",
+    "fields": [
+      { "name": "name", "type": "string", "required": true },
+      { "name": "nonce", "type": "string", "required": true },
+      { "name": "mac", "type": "string", "required": true }
+    ]
+  },
+  "refresh_response": {
+    "python_model": "shadow9.schemas.wireguard.RefreshResponse",
+    "go_type": "shadow9-node/internal/enroll.RefreshResponse",
+    "fields": [
+      { "name": "address", "type": "string", "required": true },
+      { "name": "hub_public_key", "type": "string", "required": true },
+      { "name": "hub_endpoint", "type": "string", "required": true },
+      { "name": "tunnel_network", "type": "string", "required": true },
+      { "name": "allowed_ips", "type": "string[]", "required": true },
+      { "name": "mtu", "type": "integer", "required": true },
+      { "name": "keepalive", "type": "integer", "required": true },
+      { "name": "protocol", "type": "integer", "required": true },
+      { "name": "revision", "type": "integer", "required": true },
+      { "name": "mac", "type": "string", "required": true }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "address": "10.9.0.7",
+  "hub_public_key": "hR3n0oPxK9zLm2vQwE4tYuIoP1aSdF6gH8jKlZxCvB0=",
+  "hub_endpoint": "203.0.113.10:51820",
+  "tunnel_network": "10.9.0.0/24",
+  "allowed_ips": ["10.9.0.0/24", "192.168.2.0/24"],
+  "mtu": 1412,
+  "keepalive": 20,
+  "protocol": 1,
+  "revision": 7,
+  "mac": "6fb0d6a61905c065815d27210be29204e4de997d90acbf2d49852fbedc824642"
+}

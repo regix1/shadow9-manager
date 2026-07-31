@@ -10,10 +10,12 @@ import secrets
 import string
 from typing import Optional
 
+from ..config import Config
 from ..core.logging import get_logger
 from ..models.user import Credential
 from ..repositories.user_repository import UserRepository
 from ..schemas.user import UserCreate, UserResponse, UserUpdate
+from .wireguard_service import delete_user_peer, set_peer_enabled
 
 
 logger = get_logger(__name__)
@@ -35,7 +37,7 @@ class UserService:
     # required type, so a null on it would leave the credential unusable.
     CLEARABLE_FIELDS: frozenset[str] = frozenset({"allowed_ports", "rate_limit", "bind_port"})
 
-    def __init__(self, repository: UserRepository):
+    def __init__(self, repository: UserRepository, config: Optional[Config] = None):
         """
         Initialize the user service.
 
@@ -43,6 +45,7 @@ class UserService:
             repository: User repository for data access
         """
         self._repo = repository
+        self._config = config
 
     # CREATE
 
@@ -204,17 +207,35 @@ class UserService:
 
     async def enable(self, username: str) -> bool:
         """Enable a user account."""
-        result = await self._repo.update(username, {"enabled": True})
-        if result:
+        if self._config is not None:
+            enabled = await asyncio.to_thread(
+                set_peer_enabled,
+                self._config,
+                self._repo.auth_manager,
+                username,
+                True,
+            )
+        else:
+            enabled = await self._repo.update(username, {"enabled": True}) is not None
+        if enabled:
             logger.info("Enabled user", username=username)
-        return result is not None
+        return enabled
 
     async def disable(self, username: str) -> bool:
         """Disable a user account."""
-        result = await self._repo.update(username, {"enabled": False})
-        if result:
+        if self._config is not None:
+            disabled = await asyncio.to_thread(
+                set_peer_enabled,
+                self._config,
+                self._repo.auth_manager,
+                username,
+                False,
+            )
+        else:
+            disabled = await self._repo.update(username, {"enabled": False}) is not None
+        if disabled:
             logger.info("Disabled user", username=username)
-        return result is not None
+        return disabled
 
     # DELETE
 
@@ -228,7 +249,15 @@ class UserService:
         Returns:
             True if deleted, False if not found
         """
-        deleted = await self._repo.delete(username)
+        if self._config is not None:
+            deleted = await asyncio.to_thread(
+                delete_user_peer,
+                self._config,
+                self._repo.auth_manager,
+                username,
+            )
+        else:
+            deleted = await self._repo.delete(username)
         if deleted:
             logger.info("Deleted user", username=username)
         return deleted
@@ -262,6 +291,13 @@ class UserService:
             enabled=credential.enabled,
             created_at=credential.created_at,
             last_used=credential.last_used,
+            wg_public_key=credential.wg_public_key,
+            wg_address=credential.wg_address,
+            wg_routes=credential.wg_routes,
+            wg_role=credential.wg_role,
+            wg_endpoint=credential.wg_endpoint,
+            wg_keepalive=credential.wg_keepalive,
+            wg_expires_at=credential.wg_expires_at,
         )
 
     def _generate_secure_password(self, length: int = 24) -> str:

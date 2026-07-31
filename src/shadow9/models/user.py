@@ -10,6 +10,10 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..wireguard.addresses import parse_address, parse_network
+from ..wireguard.keys import is_valid_key
+from ..wireguard.render import PeerRole
+
 
 def utc_now() -> datetime:
     """The current time, carrying UTC rather than leaving the zone to be guessed."""
@@ -93,6 +97,35 @@ class UserBase(BaseModel):
     )
     enabled: bool = Field(default=True, description="Whether the user account is enabled")
 
+    # WireGuard peer settings, the same seven the credential store holds and checked the
+    # same way. All of them absent means this user is not a peer. The checks below call
+    # into the wireguard package rather than restating the rules, so the API and the CLI
+    # cannot come to disagree about what a valid key or a valid route is.
+    wg_public_key: Optional[str] = Field(
+        default=None, description="Base64 X25519 public key (44 characters)"
+    )
+    wg_address: Optional[str] = Field(
+        default=None, description="This peer's address inside the tunnel, without a prefix"
+    )
+    wg_routes: Optional[list[str]] = Field(
+        default=None, description="Subnets reachable through this peer, in CIDR form"
+    )
+    wg_role: Optional[PeerRole] = Field(
+        default=None, description="What this peer is in the star: hub, node or device"
+    )
+    wg_endpoint: Optional[str] = Field(
+        default=None, description="host:port other peers dial. Only the hub has one"
+    )
+    wg_keepalive: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Seconds between keepalives this peer sends (None = send none)",
+    )
+    wg_expires_at: Optional[datetime] = Field(
+        default=None, description="When this peer stops being allowed in"
+    )
+
     @field_validator("allowed_ports")
     @classmethod
     def validate_ports(cls, v: Optional[list[int]]) -> Optional[list[int]]:
@@ -101,6 +134,44 @@ class UserBase(BaseModel):
             for port in v:
                 if port < 1 or port > 65535:
                     raise ValueError(f"Invalid port: {port}. Must be 1-65535")
+        return v
+
+    @field_validator("wg_public_key")
+    @classmethod
+    def validate_wg_public_key(cls, v: Optional[str]) -> Optional[str]:
+        """Apply the check the renderer applies, so a key the tunnel would reject never stores."""
+        if v is not None and not is_valid_key(v):
+            raise ValueError(f"Not a WireGuard public key: {v!r}")
+        return v
+
+    @field_validator("wg_address")
+    @classmethod
+    def validate_wg_address(cls, v: Optional[str]) -> Optional[str]:
+        """A single host inside the tunnel, so a prefix is refused rather than ignored."""
+        if v is not None:
+            parse_address(v)
+        return v
+
+    @field_validator("wg_routes")
+    @classmethod
+    def validate_wg_routes(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        """Every route is a network, host bits and all.
+
+        parse_network refuses them rather than masking them off, so 192.168.1.1/24 is an
+        error here instead of a silent 192.168.1.0/24. Those are different subnets and the
+        difference decides which traffic crosses the tunnel.
+        """
+        if v is not None:
+            for route in v:
+                parse_network(route)
+        return v
+
+    @field_validator("wg_endpoint")
+    @classmethod
+    def validate_wg_endpoint(cls, v: Optional[str]) -> Optional[str]:
+        """An endpoint has to be something to dial, so an empty string is not one."""
+        if v is not None and not v.strip():
+            raise ValueError("Endpoint is empty")
         return v
 
 
@@ -142,6 +213,14 @@ class Credential(User):
             if isinstance(data["security_level"], SecurityLevel)
             else data["security_level"]
         )
+        # The peer settings go to the store in the shapes it holds: an expiry as one of
+        # this file's naive UTC strings, a role as its plain word. Left as a datetime and a
+        # PeerRole they would reach json.dumps in the store and fail the write there,
+        # which is a long way from here.
+        if data.get("wg_expires_at"):
+            data["wg_expires_at"] = _stored_time(data["wg_expires_at"])
+        if isinstance(data.get("wg_role"), PeerRole):
+            data["wg_role"] = data["wg_role"].value
         return data
 
     @classmethod
@@ -152,4 +231,6 @@ class Credential(User):
             data["created_at"] = _loaded_time(data["created_at"])
         if isinstance(data.get("last_used"), str) and data["last_used"]:
             data["last_used"] = _loaded_time(data["last_used"])
+        if isinstance(data.get("wg_expires_at"), str) and data["wg_expires_at"]:
+            data["wg_expires_at"] = _loaded_time(data["wg_expires_at"])
         return cls(**data)

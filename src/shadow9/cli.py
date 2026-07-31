@@ -50,6 +50,7 @@ from .commands import (
     register_service_commands,
     register_util_commands,
     register_api_commands,
+    register_wireguard_commands,
 )
 from .menu import run_interactive_menu
 
@@ -104,6 +105,7 @@ register_user_commands(app)
 register_service_commands(app)
 register_util_commands(app)
 register_api_commands(app)
+register_wireguard_commands(app)
 
 
 # Entry point for the CLI

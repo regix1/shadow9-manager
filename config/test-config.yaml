@@ -34,3 +34,13 @@ security:
   allow_localhost: false
   rate_limit_per_minute: 100
   max_request_size: 1048576
+wireguard:
+  enabled: false
+  listen_port: 51820
+  enrollment_host: 0.0.0.0
+  enrollment_port: 8081
+  tunnel_network: 10.9.0.0/24
+  hub_endpoint: ''
+  mtu: 1420
+  dns: []
+  keepalive: 25

@@ -298,7 +298,8 @@ def register_user_commands(app: typer.Typer) -> None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network
         )
 
         # Generate random values for any not provided
@@ -413,7 +414,8 @@ def register_user_commands(app: typer.Typer) -> None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network
         )
 
         users = auth_manager.list_users()
@@ -528,7 +530,8 @@ def register_user_commands(app: typer.Typer) -> None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network
         )
 
         users = auth_manager.list_users()
@@ -581,7 +584,8 @@ def register_user_commands(app: typer.Typer) -> None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network
         )
 
         # Interactive mode if no username provided
@@ -723,7 +727,8 @@ def register_user_commands(app: typer.Typer) -> None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network
         )
 
         # Check user exists
@@ -830,7 +835,8 @@ def register_user_commands(app: typer.Typer) -> None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network
         )
 
         users = auth_manager.list_users()
@@ -912,7 +918,8 @@ def register_user_commands(app: typer.Typer) -> None:
         master_key = load_master_key()
 
         auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key
+            credentials_file=cfg.get_credentials_file(), master_key=master_key,
+            tunnel_network=cfg.wireguard.tunnel_network
         )
 
         users = auth_manager.list_users()

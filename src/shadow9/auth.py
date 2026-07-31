@@ -11,7 +11,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
-from dataclasses import dataclass, asdict, fields, replace
+from dataclasses import dataclass, asdict, field, fields, replace
 from datetime import datetime, timezone
 
 from argon2 import PasswordHasher, extract_parameters
@@ -24,6 +24,9 @@ import base64
 import structlog
 
 from .paths import lock_file, read_or_create_salt, resolve_salt_file, write_file_safely
+from .wireguard.addresses import TunnelNetwork, parse_address, parse_network
+from .wireguard.keys import derive_public_key, is_valid_key
+from .wireguard.render import PeerRole
 
 logger = structlog.get_logger(__name__)
 
@@ -61,11 +64,50 @@ class Credential:
         True  # When False, no user activity is logged  # None = use shared server port
     )
 
+    # WireGuard peer settings. All of them absent means this user is not a peer, which is
+    # what every user is until somebody enrolls one. A peer lives on the user record
+    # rather than in a file of its own so that enable, disable and remove already work on
+    # it and there is nothing to leave behind when a user is deleted.
+    wg_public_key: Optional[str] = None  # Base64 X25519 public key, 44 characters
+    wg_address: Optional[str] = None  # This peer's address inside the tunnel, no prefix
+    wg_routes: Optional[list[str]] = None  # Subnets reachable through this peer, CIDR
+    wg_role: Optional[str] = None  # hub, node or device
+    wg_endpoint: Optional[str] = None  # host:port other peers dial. Only the hub has one
+    wg_keepalive: Optional[int] = None  # Seconds between keepalives, or None for silence
+    wg_expires_at: Optional[str] = None  # When this peer stops being allowed in
+    wg_private_key: Optional[str] = field(default=None, repr=False)
+    wg_refresh_key: Optional[str] = field(default=None, repr=False)
+    wg_full_tunnel: Optional[bool] = None
+    wg_obfuscated: Optional[bool] = None
 
-# What a stored record may be asked to change. A caller hands over field names it got
-# from an API schema, and a name this record does not have is ignored rather than
-# attached to the record and written to the file.
-_CREDENTIAL_FIELDS = frozenset(field.name for field in fields(Credential))
+    # Keys read out of the file that this version has no field for. Kept so that the next
+    # write puts them back rather than dropping them, which is what makes a downgrade
+    # survivable: see _record_for_file. Never written to the file under this name.
+    unknown_fields: dict[str, object] = field(default_factory=dict)
+
+
+# The names this version knows. The box that unknown keys are kept in is deliberately not
+# one of them: nothing is written to the file under that name, and a caller handing over
+# field names it got from an API schema must not be able to write arbitrary keys into a
+# record. A name this record does not have is ignored rather than attached and written.
+_CREDENTIAL_FIELDS = frozenset(
+    field.name for field in fields(Credential) if field.name != "unknown_fields"
+)
+
+# The peer settings, named once so the load check and the write both cover the same seven.
+_WIREGUARD_FIELDS = (
+    "wg_public_key",
+    "wg_address",
+    "wg_routes",
+    "wg_role",
+    "wg_endpoint",
+    "wg_keepalive",
+    "wg_expires_at",
+    "wg_private_key",
+    "wg_refresh_key",
+    "wg_full_tunnel",
+    "wg_obfuscated",
+)
 
 
 @dataclass(frozen=True)
@@ -194,7 +236,9 @@ def _checked_password_hash(value: object, username: str) -> None:
         raise ValueError(f"{username} has a password hash nothing can verify") from None
 
 
-def _checked_credential(username: str, record: dict[str, object]) -> Credential:
+def _checked_credential(
+    username: str, record: dict[str, object], tunnel_network: TunnelNetwork
+) -> Credential:
     """
     Build one stored record, rejecting anything the rest of the system cannot use.
 
@@ -205,6 +249,13 @@ def _checked_credential(username: str, record: dict[str, object]) -> Credential:
     rewrite it. Refusing here puts the failure where the bad bytes are and leaves
     load_error set, which is what stops a write replacing the file.
 
+    A key this version has no field for is the one thing that is not refused. Passing the
+    whole record to the dataclass raised TypeError on any such key, which failed the load,
+    which stopped every write: a file written by a later version left an older one unable
+    to save at all, and the only sign of it was an "unexpected keyword argument" in a log.
+    Those keys are set aside instead and written back by the next save, so a version that
+    does not understand a setting neither refuses to run nor quietly deletes it.
+
     Args:
         username: The name the record is filed under
         record: The record's fields as they came out of the file
@@ -214,9 +265,13 @@ def _checked_credential(username: str, record: dict[str, object]) -> Credential:
 
     Raises:
         ValueError: when a field holds something this store would never have written
-        TypeError: when the record has a field this store does not know
     """
-    credential = Credential(**record)
+    credential = Credential(
+        **{name: value for name, value in record.items() if name in _CREDENTIAL_FIELDS}
+    )
+    credential.unknown_fields = {
+        name: value for name, value in record.items() if name not in _CREDENTIAL_FIELDS
+    }
 
     if credential.username != username:
         raise ValueError(
@@ -234,9 +289,9 @@ def _checked_credential(username: str, record: dict[str, object]) -> Credential:
     if credential.last_used is not None:
         credential.last_used = _checked_timestamp(credential.last_used, "last_used")
 
-    for field in ("enabled", "use_tor", "logging_enabled"):
-        if not isinstance(getattr(credential, field), bool):
-            raise ValueError(f"{field} is not true or false: {getattr(credential, field)!r}")
+    for name in ("enabled", "use_tor", "logging_enabled"):
+        if not isinstance(getattr(credential, name), bool):
+            raise ValueError(f"{name} is not true or false: {getattr(credential, name)!r}")
 
     if credential.bridge_type not in _BRIDGE_TYPES:
         raise ValueError(f"bridge_type is not a bridge: {credential.bridge_type!r}")
@@ -258,7 +313,132 @@ def _checked_credential(username: str, record: dict[str, object]) -> Credential:
     if credential.bind_port is not None:
         _checked_port(credential.bind_port, "bind_port")
 
+    _check_peer_fields(credential, tunnel_network)
+
     return credential
+
+
+def _check_peer_fields(credential: Credential, tunnel_network: TunnelNetwork) -> None:
+    """Raise unless this record's WireGuard settings are ones the tunnel could be built from.
+
+    Each check is the one the code that consumes the value already uses, imported rather
+    than rewritten, because two definitions of "a valid key" drift apart and the drift only
+    shows up as a tunnel that will not come up. parse_network in particular refuses host
+    bits, so 192.168.1.1/24 is an error here and not a silent 192.168.1.0/24, which are
+    different subnets and decide which traffic crosses the tunnel.
+
+    What cannot be checked here is that no two peers hold the same tunnel address. This
+    sees one record, and WireGuard hands a duplicated address to the newer peer without an
+    error while the older one silently loses it, so whatever adds a peer has to call
+    wireguard.addresses.claim_address against every other peer's address first.
+
+    Args:
+        credential: The record to check, already built
+
+    Raises:
+        ValueError: when a peer setting is not something a config could be rendered from
+    """
+    key = credential.wg_public_key
+    if key is not None and (not isinstance(key, str) or not is_valid_key(key)):
+        raise ValueError(f"wg_public_key is not a WireGuard public key: {key!r}")
+
+    private_key = credential.wg_private_key
+    if private_key is not None:
+        if not isinstance(private_key, str) or not is_valid_key(private_key):
+            raise ValueError("wg_private_key is not a WireGuard private key")
+        if key is not None and derive_public_key(private_key) != key:
+            raise ValueError("wg_private_key does not match wg_public_key")
+
+    refresh_key = credential.wg_refresh_key
+    if refresh_key is not None:
+        if not isinstance(refresh_key, str):
+            raise ValueError("wg_refresh_key is not a refresh key")
+        try:
+            decoded_refresh_key = bytes.fromhex(refresh_key)
+        except ValueError:
+            raise ValueError("wg_refresh_key is not a refresh key") from None
+        if len(decoded_refresh_key) != 32:
+            raise ValueError("wg_refresh_key is not a refresh key")
+
+    for name in ("wg_full_tunnel", "wg_obfuscated"):
+        value = getattr(credential, name)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"{name} is not true or false: {value!r}")
+
+    if credential.wg_address is not None:
+        if not isinstance(credential.wg_address, str):
+            raise ValueError(f"wg_address is not an address: {credential.wg_address!r}")
+        # a plain address, so a prefix is refused: 10.9.0.2/24 is a range and this field
+        # names one host in the tunnel
+        address = parse_address(credential.wg_address)
+        if address not in tunnel_network:
+            raise ValueError(
+                f"wg_address {address} is outside tunnel network {tunnel_network}"
+            )
+
+    if credential.wg_routes is not None:
+        if not isinstance(credential.wg_routes, list):
+            raise ValueError(f"wg_routes is not a list: {credential.wg_routes!r}")
+        for route in credential.wg_routes:
+            if not isinstance(route, str):
+                raise ValueError(f"wg_routes holds something that is not a network: {route!r}")
+            parse_network(route)
+
+    if credential.wg_role is not None:
+        try:
+            PeerRole(credential.wg_role)
+        except ValueError:
+            raise ValueError(f"wg_role is not a role: {credential.wg_role!r}") from None
+
+    if credential.wg_endpoint is not None and (
+        not isinstance(credential.wg_endpoint, str) or not credential.wg_endpoint
+    ):
+        raise ValueError(f"wg_endpoint is not an endpoint: {credential.wg_endpoint!r}")
+
+    if credential.wg_keepalive is not None and (
+        not _is_whole_number(credential.wg_keepalive) or not 1 <= credential.wg_keepalive <= 65535
+    ):
+        raise ValueError(f"wg_keepalive is not an interval: {credential.wg_keepalive!r}")
+
+    if credential.wg_expires_at is not None:
+        # written back like the other two times this record holds, so an expiry compares
+        # against them as text without either side having to parse its way out of an offset
+        credential.wg_expires_at = _checked_timestamp(credential.wg_expires_at, "wg_expires_at")
+
+
+def _record_for_file(credential: Credential) -> dict[str, object]:
+    """One stored record as it is written to the file.
+
+    Two things happen here that asdict on its own does not do, and both are about what an
+    older version of this store can still read.
+
+    A peer setting that is not set is left out rather than written as null. Almost nobody
+    is a WireGuard peer, and a record with no wg_ keys in it is a record every version of
+    this store can read, so adding these fields does not by itself make an install's file
+    unreadable by the version before this one. Enrolling the first peer is what does that,
+    which is a deliberate act rather than something an upgrade does behind the operator.
+
+    A key this version has no field for is written back unchanged. Those keys come from a
+    file some later version wrote, and dropping them would mean a downgrade that starts the
+    proxy and lets one login through silently deletes settings the newer version needs. The
+    store already learned that lesson from two implementations replacing each other's
+    users: writing back a table you do not fully understand is how records disappear.
+
+    Args:
+        credential: The record to write
+
+    Returns:
+        The record's fields, keyed the way the file keys them
+    """
+    record: dict[str, object] = asdict(credential)
+    del record["unknown_fields"]
+
+    for name in _WIREGUARD_FIELDS:
+        if record[name] is None:
+            del record[name]
+
+    record.update(credential.unknown_fields)
+    return record
 
 
 class AuthManager:
@@ -279,6 +459,7 @@ class AuthManager:
         credentials_file: Optional[Path] = None,
         master_key: Optional[str] = None,
         salt_file: Optional[Path] = None,
+        tunnel_network: Optional[str] = None,
     ):
         """
         Initialize the authentication manager.
@@ -294,6 +475,11 @@ class AuthManager:
             self.credentials_file = get_credentials_file()
         else:
             self.credentials_file = credentials_file
+        if tunnel_network is None:
+            from .config import WireguardConfig
+
+            tunnel_network = WireguardConfig().tunnel_network
+        self._tunnel_network = parse_network(tunnel_network)
         self._salt_file = salt_file
         self._credentials: dict[str, Credential] = {}
 
@@ -380,7 +566,7 @@ class AuthManager:
                 data = json.loads(encrypted_data.decode())
 
             loaded = {
-                username: _checked_credential(username, cred_data)
+                username: _checked_credential(username, cred_data, self._tunnel_network)
                 for username, cred_data in data.items()
             }
 
@@ -420,6 +606,20 @@ class AuthManager:
         self._credentials = loaded
         self.load_error = None
         logger.info("Loaded credentials", count=len(self._credentials))
+
+        # Said once per load rather than once per record, because every authentication
+        # that notices the file has changed comes back through here. An operator seeing
+        # this has a file written by a version newer than the one running, and the names
+        # are what tells them which feature is going unenforced while it does.
+        unknown = sorted({name for cred in loaded.values() for name in cred.unknown_fields})
+        if unknown:
+            logger.warning(
+                "The credentials file holds settings this version does not know, so they "
+                "are carried through untouched and nothing here enforces them",
+                path=str(self.credentials_file),
+                fields=unknown,
+            )
+
         return True
 
     def reload_credentials(self) -> bool:
@@ -572,7 +772,7 @@ class AuthManager:
             # take the table in one step before serializing: asdict() runs Python code,
             # so iterating the live dict lets another thread add or remove a user midway
             snapshot = list(self._credentials.items())
-            data = {username: asdict(cred) for username, cred in snapshot}
+            data = {username: _record_for_file(cred) for username, cred in snapshot}
             json_data = json.dumps(data, indent=2)
 
             if self._fernet:
@@ -770,6 +970,9 @@ class AuthManager:
 
         Returns:
             The stored record, or None if there is no such user
+
+        Raises:
+            ValueError: when a peer setting is not one a config could be rendered from
         """
         with self._mutating():
             cred = self._credentials.get(username)
@@ -779,6 +982,13 @@ class AuthManager:
             for name, value in changes.items():
                 if name in _CREDENTIAL_FIELDS:
                     setattr(cred, name, value)
+
+            # checked before the write rather than after, because the load refuses a
+            # record it cannot use and refusing is what sets load_error, which stops every
+            # later write. A peer key with a character missing would otherwise be written
+            # here and lock the whole store on the next start, with the users it holds
+            # still on disk and no way in. Raising leaves _mutating to put the table back.
+            _check_peer_fields(cred, self._tunnel_network)
 
             self._save_credentials()
 

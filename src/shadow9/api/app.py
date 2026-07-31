@@ -9,7 +9,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .endpoints import health, server, users
+from .endpoints import health, server, users, wireguard
 
 
 def _get_cors_origins() -> list[str]:
@@ -96,11 +96,38 @@ def create_app(
     return app
 
 
+def create_enrollment_app(
+    title: str = "Shadow9 Enrollment API",
+    version: str = "1.0.0",
+    description: str = "WireGuard enrollment and node downloads",
+) -> FastAPI:
+    """Create the public app used by WireGuard nodes."""
+    publish_docs = docs_enabled()
+    enrollment = FastAPI(
+        title=title,
+        version=version,
+        description=description,
+        docs_url="/api/docs" if publish_docs else None,
+        redoc_url="/api/redoc" if publish_docs else None,
+        openapi_url="/api/openapi.json" if publish_docs else None,
+    )
+    enrollment.include_router(wireguard.router, prefix="/api")
+    return enrollment
+
+
 # Default app instance
 app = create_app()
+enrollment_app = create_enrollment_app()
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8080, reload: bool = False) -> None:
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    reload: bool = False,
+    enrollment_host: str = "0.0.0.0",
+    enrollment_port: int = 8081,
+    socks_port: int = 1080,
+) -> None:
     """
     Run the API server.
 
@@ -108,10 +135,56 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, reload: bool = False) 
         host: Server host address
         port: Server port
         reload: Enable auto-reload for development
+        enrollment_host: Enrollment listener host address
+        enrollment_port: Enrollment listener port
+        socks_port: SOCKS5 listener port
     """
+    from threading import Thread
+    from time import monotonic
+
     import uvicorn
 
-    uvicorn.run("shadow9.api.app:app", host=host, port=port, reload=reload)
+    from ..config import listener_port_errors
+
+    port_errors = listener_port_errors(port, enrollment_port, socks_port)
+    if port_errors:
+        raise ValueError("; ".join(port_errors))
+
+    enrollment = uvicorn.Server(
+        uvicorn.Config(
+            "shadow9.api.app:enrollment_app",
+            host=enrollment_host,
+            port=enrollment_port,
+            log_level="info",
+        )
+    )
+    errors: list[BaseException] = []
+
+    def serve_enrollment() -> None:
+        try:
+            enrollment.run()
+        except BaseException as error:
+            errors.append(error)
+
+    thread = Thread(target=serve_enrollment, name="shadow9-enrollment", daemon=True)
+    thread.start()
+
+    deadline = monotonic() + 5.0
+    while thread.is_alive() and not enrollment.started and monotonic() < deadline:
+        thread.join(0.01)
+    if not enrollment.started:
+        enrollment.should_exit = True
+        thread.join(1.0)
+        message = f"Enrollment listener could not start at {enrollment_host}:{enrollment_port}"
+        if errors:
+            raise RuntimeError(message) from errors[0]
+        raise RuntimeError(message)
+
+    try:
+        uvicorn.run("shadow9.api.app:app", host=host, port=port, reload=reload, log_level="info")
+    finally:
+        enrollment.should_exit = True
+        thread.join(5.0)
 
 
 if __name__ == "__main__":

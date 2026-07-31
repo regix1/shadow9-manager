@@ -58,6 +58,7 @@ class UserRepository(Repository[Credential, str]):
         master_key: Optional[str] = None,
         salt_file: Optional[Path] = None,
         max_concurrent_hashes: Optional[int] = None,
+        tunnel_network: Optional[str] = None,
     ):
         """
         Initialize the user repository.
@@ -78,6 +79,7 @@ class UserRepository(Repository[Credential, str]):
             credentials_file=credentials_file,
             master_key=master_key,
             salt_file=salt_file,
+            tunnel_network=tunnel_network,
         )
 
         # Every REST create and password change starts one of these hashes on asyncio's
@@ -92,6 +94,17 @@ class UserRepository(Repository[Credential, str]):
         self._hash_slots = threading.BoundedSemaphore(
             max_concurrent_hashes or self.MAX_CONCURRENT_HASHES
         )
+
+    @property
+    def auth_manager(self) -> AuthManager:
+        """The store itself, for callers that work in records rather than API models.
+
+        WireGuard enrollment writes peer fields onto a stored record and needs the same
+        store this repository already holds. Building a second one in the same process
+        would give each its own copy of the credential table, and this file has already
+        cost the project once for exactly that.
+        """
+        return self._auth
 
     @property
     def load_error(self) -> Optional[str]:

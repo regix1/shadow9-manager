@@ -239,8 +239,10 @@ shadow9 key check
 
 ### REST API
 
-The API is a separate process from the proxy. It needs `SHADOW9_API_KEY` set;
-every endpoint returns 503 without it.
+The admin API is a separate process from the proxy. It needs `SHADOW9_API_KEY` set and
+binds to `127.0.0.1:8080` by default. Starting it also starts the public enrollment
+listener from the `wireguard.enrollment_host` and `wireguard.enrollment_port` settings.
+That second listener serves only enrollment, refresh, node binaries, and their checksums.
 
 ```bash
 # Write config/api.yaml and create an API key
@@ -255,6 +257,27 @@ shadow9 api status
 # Show or rotate the stored API key
 shadow9 api key
 ```
+
+### WireGuard hub
+
+Set up a hub and follow the printed join command on each node:
+
+```bash
+shadow9 wg init --endpoint 203.0.113.10:51820
+shadow9 wg device add phone
+```
+
+Open these two ports in the host firewall and in the cloud firewall or security group:
+
+- TCP 8081 by default, or `wireguard.enrollment_port`, for enrollment, refresh, and node downloads.
+- UDP 51820 by default, or `wireguard.listen_port`, for the WireGuard tunnel.
+
+Do not open the admin API port, TCP 8080 by default, to the internet. It stays on localhost;
+its API key still crosses plain HTTP in cleartext, and this listener split does not add encryption.
+
+The generated hub config runs `iptables` for an IPv4 tunnel and `ip6tables` for an IPv6
+tunnel. Install the matching command and make sure it controls the host firewall. Shadow9
+does not currently render nftables rules directly.
 
 ### Service Management (Linux)
 
@@ -333,6 +356,17 @@ security:
   block_private_ranges: true  # refuse private and loopback destinations
   allow_localhost: false      # exception to the above for 127.0.0.0/8
   rate_limit_per_minute: 100  # default when a user has no rate limit set
+
+wireguard:
+  enabled: false
+  listen_port: 51820           # public UDP tunnel port
+  enrollment_host: "0.0.0.0"  # public enrollment listener
+  enrollment_port: 8081        # public TCP enrollment and download port
+  tunnel_network: "10.9.0.0/24"
+  hub_endpoint: ""
+  mtu: 1420
+  dns: []
+  keepalive: 25
 ```
 
 Every key above is read by the server. The master key is always taken from the
@@ -351,6 +385,8 @@ Read by the proxy (`shadow9 serve`):
 | `SHADOW9_TOR_ENABLED` | Enable Tor routing |
 | `SHADOW9_TOR_PORT` | Tor SOCKS port |
 | `SHADOW9_LOG_LEVEL` | Log level |
+| `SHADOW9_WIREGUARD_ENROLLMENT_HOST` | Enrollment listener bind address |
+| `SHADOW9_WIREGUARD_ENROLLMENT_PORT` | Enrollment listener TCP port |
 
 Read by the API (`shadow9 api start`):
 
@@ -361,6 +397,8 @@ Read by the API (`shadow9 api start`):
 | `SHADOW9_HOST`, `SHADOW9_PORT` | Server bind address and port |
 | `SHADOW9_TOR_SOCKS_PORT` | Tor SOCKS port. The API uses this name, not `SHADOW9_TOR_PORT` |
 | `SHADOW9_MASTER_KEY` | Encryption key for credentials |
+| `SHADOW9_WIREGUARD_ENROLLMENT_HOST` | Enrollment listener bind address |
+| `SHADOW9_WIREGUARD_ENROLLMENT_PORT` | Enrollment listener TCP port |
 
 ---
 

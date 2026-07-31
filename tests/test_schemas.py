@@ -7,7 +7,8 @@ from pydantic import ValidationError
 
 from shadow9.schemas.user import UserCreate, UserUpdate, UserResponse
 from shadow9.schemas.common import SuccessResponse, ErrorResponse, PaginationParams
-from shadow9.models.user import BridgeType, SecurityLevel, utc_now
+from shadow9.models.user import BridgeType, PeerRole, SecurityLevel, utc_now
+from shadow9.wireguard.keys import generate_keypair
 
 
 class TestUserSchemas:
@@ -155,3 +156,142 @@ class TestCommonSchemas:
         # Limit too high
         with pytest.raises(ValidationError):
             PaginationParams(limit=5000)
+
+
+class TestPeerSettingsOnTheApiSchemas:
+    """The API must refuse exactly what the CLI refuses, or the two disagree on the file."""
+
+    def test_creating_a_user_without_peer_settings_still_works(self):
+        user = UserCreate(username="alice", password="SecurePass123!")
+
+        assert user.wg_public_key is None
+        assert user.wg_role is None
+
+    def test_a_user_can_be_created_as_a_peer(self):
+        keypair = generate_keypair()
+        user = UserCreate(
+            username="gateway",
+            password="SecurePass123!",
+            wg_public_key=keypair.public_key,
+            wg_address="10.9.0.2",
+            wg_routes=["192.168.1.0/24"],
+            wg_role=PeerRole.NODE,
+            wg_endpoint="203.0.113.10:51820",
+            wg_keepalive=25,
+        )
+
+        assert user.wg_public_key == keypair.public_key
+        assert user.wg_role is PeerRole.NODE
+
+    def test_create_refuses_what_the_store_refuses(self):
+        with pytest.raises(ValidationError):
+            UserCreate(username="alice", password="SecurePass123!", wg_public_key="not-a-key")
+        with pytest.raises(ValidationError):
+            UserCreate(username="alice", password="SecurePass123!", wg_address="10.9.0.2/24")
+        with pytest.raises(ValidationError):
+            UserCreate(username="alice", password="SecurePass123!", wg_routes=["192.168.1.1/24"])
+        with pytest.raises(ValidationError):
+            UserCreate(username="alice", password="SecurePass123!", wg_role="gateway")
+        with pytest.raises(ValidationError):
+            UserCreate(username="alice", password="SecurePass123!", wg_keepalive=0)
+
+    def test_update_refuses_what_the_store_refuses(self):
+        """A PATCH is how a peer's address or routes change, and the store does not recheck.
+
+        UserRepository.update setattrs whatever it is handed onto a dataclass that does not
+        validate assignments, so a value that gets past here is a value on disk.
+        """
+        with pytest.raises(ValidationError):
+            UserUpdate(wg_public_key="not-a-key")
+        with pytest.raises(ValidationError):
+            UserUpdate(wg_address="10.9.0.2/24")
+        with pytest.raises(ValidationError):
+            UserUpdate(wg_routes=["192.168.1.1/24"])
+        with pytest.raises(ValidationError):
+            UserUpdate(wg_role="gateway")
+        with pytest.raises(ValidationError):
+            UserUpdate(wg_keepalive=70000)
+
+    def test_an_update_that_mentions_no_peer_settings_leaves_them_unset(self):
+        """exclude_unset is what tells "clear this" apart from "do not touch this"."""
+        update = UserUpdate(rate_limit=10)
+
+        assert "wg_address" not in update.model_dump(exclude_unset=True)
+        assert update.model_dump(exclude_unset=True) == {"rate_limit": 10}
+
+    def test_an_update_can_clear_a_peer_setting(self):
+        update = UserUpdate(wg_routes=None)
+
+        assert update.model_dump(exclude_unset=True) == {"wg_routes": None}
+
+    def test_a_response_carries_the_peer_settings(self):
+        keypair = generate_keypair()
+        response = UserResponse(
+            username="gateway",
+            use_tor=True,
+            bridge_type=BridgeType.NONE,
+            security_level=SecurityLevel.BASIC,
+            allowed_ports=None,
+            rate_limit=None,
+            bind_port=None,
+            logging_enabled=True,
+            enabled=True,
+            created_at=utc_now(),
+            last_used=None,
+            wg_public_key=keypair.public_key,
+            wg_address="10.9.0.2",
+            wg_routes=["192.168.1.0/24"],
+            wg_role=PeerRole.NODE,
+            wg_endpoint="203.0.113.10:51820",
+            wg_keepalive=25,
+        )
+
+        assert response.wg_public_key == keypair.public_key
+        assert response.wg_role is PeerRole.NODE
+
+    def test_a_response_for_someone_who_is_not_a_peer_needs_none_of_them(self):
+        response = UserResponse(
+            username="alice",
+            use_tor=True,
+            bridge_type=BridgeType.NONE,
+            security_level=SecurityLevel.BASIC,
+            allowed_ports=None,
+            rate_limit=None,
+            bind_port=None,
+            logging_enabled=True,
+            enabled=True,
+            created_at=utc_now(),
+            last_used=None,
+        )
+
+        assert response.wg_public_key is None
+        assert response.wg_role is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("wg_public_key", "not-a-key"),
+            ("wg_address", "10.9.0.2/24"),
+            ("wg_routes", ["192.168.1.1/24"]),
+            ("wg_endpoint", ""),
+            ("wg_keepalive", 0),
+        ],
+    )
+    def test_a_response_refuses_invalid_peer_settings(self, field: str, value: object):
+        values: dict[str, object] = {
+            "username": "gateway",
+            "use_tor": True,
+            "bridge_type": BridgeType.NONE,
+            "security_level": SecurityLevel.BASIC,
+            "allowed_ports": None,
+            "rate_limit": None,
+            "bind_port": None,
+            "logging_enabled": True,
+            "enabled": True,
+            "created_at": utc_now(),
+            "last_used": None,
+        }
+        values[field] = value
+
+        with pytest.raises(ValidationError):
+            UserResponse(**values)

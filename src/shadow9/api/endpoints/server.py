@@ -11,7 +11,16 @@ from fastapi import APIRouter, Depends
 from ...core.config import api_worker_count, get_settings, Settings
 from ...core.logging import get_logger
 from ...memory_budget import MIB, read_memory_budget
-from ...schemas.server import ServerStatusResponse
+from ...schemas.server import (
+    AuthSection,
+    LogSection,
+    SecuritySection,
+    ServerConfigResponse,
+    ServerSection,
+    ServerStatusResponse,
+    TorSection,
+    WireguardSection,
+)
 from ...services.user_service import UserService
 from ..deps import get_current_admin, get_user_service
 
@@ -105,6 +114,7 @@ async def get_server_status(
 
 @router.get(
     "/config",
+    response_model=ServerConfigResponse,
     summary="Get server configuration",
     responses={
         200: {"description": "Server configuration"},
@@ -113,7 +123,7 @@ async def get_server_status(
 )
 async def get_server_config(
     settings: Settings = Depends(get_settings), _admin: str = Depends(get_current_admin)
-) -> dict:
+) -> ServerConfigResponse:
     """
     Get current server configuration (non-sensitive values).
 
@@ -123,52 +133,63 @@ async def get_server_config(
     """
     budget = read_memory_budget()
 
-    return {
-        "server": {
-            "host": settings.server.host,
-            "port": settings.server.port,
-            "max_connections": settings.server.max_connections,
-            "connection_timeout": settings.server.connection_timeout,
-        },
-        "tor": {
-            "enabled": settings.tor.enabled,
-            "socks_port": settings.tor.socks_port,
-        },
-        "auth": {
-            "require_auth": settings.auth.require_auth,
-            "max_failed_attempts": settings.auth.max_failed_attempts,
-            "lockout_duration_minutes": settings.auth.lockout_duration_minutes,
+    return ServerConfigResponse(
+        server=ServerSection(
+            host=settings.server.host,
+            port=settings.server.port,
+            max_connections=settings.server.max_connections,
+            connection_timeout=settings.server.connection_timeout,
+        ),
+        tor=TorSection(
+            enabled=settings.tor.enabled,
+            socks_port=settings.tor.socks_port,
+        ),
+        auth=AuthSection(
+            require_auth=settings.auth.require_auth,
+            max_failed_attempts=settings.auth.max_failed_attempts,
+            lockout_duration_minutes=settings.auth.lockout_duration_minutes,
             # The configuration, which is null when nothing was set and each process
             # works its own number out. Reporting this process's figure here presented
             # the API's answer as though it were the proxy's, and they differ: the proxy
             # subtracts the relay buffers it holds and this process does not hold any,
             # so on a tight box it runs one hash where this one would allow two.
-            "max_concurrent_auth": (
+            max_concurrent_auth=(
                 None if settings.auth.sized_from_memory else settings.auth.max_concurrent_auth
             ),
             # What this process will actually run, which is the only effective number it
             # can speak for. The proxy's is in its own startup log.
-            "max_concurrent_auth_api_process": settings.auth.max_concurrent_auth,
+            max_concurrent_auth_api_process=settings.auth.max_concurrent_auth,
             # So the number and where it came from can be read off a running process
             # instead of grepped out of the startup log.
-            "max_concurrent_auth_sized_from_memory": settings.auth.sized_from_memory,
-            "api_workers": api_worker_count(),
-            "memory_budget_mib": budget.usable_bytes // MIB,
-            "memory_budget_source": budget.source,
-            "memory_budget_detail": budget.detail,
+            max_concurrent_auth_sized_from_memory=settings.auth.sized_from_memory,
+            api_workers=api_worker_count(),
+            memory_budget_mib=budget.usable_bytes // MIB,
+            memory_budget_source=budget.source,
+            memory_budget_detail=budget.detail,
             # False when the figures are an assumption because the limit could not be
             # read, which is worth seeing next to the number it produced.
-            "memory_budget_measured": budget.measured,
-        },
-        "security": {
-            "allowed_ports": settings.security.allowed_ports,
-            "rate_limit_per_minute": settings.security.rate_limit_per_minute,
-            "block_private_ranges": settings.security.block_private_ranges,
-            "allow_localhost": settings.security.allow_localhost,
-            "blocked_hosts": settings.security.blocked_hosts,
-        },
-        "log": {
-            "level": settings.log.level,
-            "format": settings.log.format,
-        },
-    }
+            memory_budget_measured=budget.measured,
+        ),
+        security=SecuritySection(
+            allowed_ports=settings.security.allowed_ports,
+            rate_limit_per_minute=settings.security.rate_limit_per_minute,
+            block_private_ranges=settings.security.block_private_ranges,
+            allow_localhost=settings.security.allow_localhost,
+            blocked_hosts=settings.security.blocked_hosts,
+        ),
+        log=LogSection(
+            level=settings.log.level,
+            format=settings.log.format,
+        ),
+        wireguard=WireguardSection(
+            enabled=settings.wireguard.enabled,
+            listen_port=settings.wireguard.listen_port,
+            enrollment_host=settings.wireguard.enrollment_host,
+            enrollment_port=settings.wireguard.enrollment_port,
+            tunnel_network=settings.wireguard.tunnel_network,
+            hub_endpoint=settings.wireguard.hub_endpoint,
+            mtu=settings.wireguard.mtu,
+            dns=settings.wireguard.dns,
+            keepalive=settings.wireguard.keepalive,
+        ),
+    )

@@ -11,14 +11,20 @@ Environment variables use SHADOW9_ prefix:
 - SHADOW9_MASTER_KEY (auth settings)
 """
 
+import ipaddress
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 import yaml
-from pydantic import Field, PrivateAttr, field_validator
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    NoDecode,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from ..memory_budget import (
     MIB,
@@ -27,6 +33,7 @@ from ..memory_budget import (
     choose_hash_permits,
     read_memory_budget,
 )
+from ..config import listener_port_errors
 from ..paths import write_file_safely
 from .logging import get_logger
 
@@ -219,6 +226,134 @@ class ApiSettings(EnvFirstSettings):
     )
 
 
+def _wireguard_tunnel_network_error(value: str) -> Optional[str]:
+    """What is wrong with a wireguard.tunnel_network, or None when nothing is.
+
+    A public range hands peers addresses that belong to someone else, and every packet
+    bound for the real owner of that range is then sent into the tunnel instead of out to
+    the internet, which looks like those sites being down rather than like a config error.
+    """
+    try:
+        network = ipaddress.ip_network(value, strict=True)
+    except ValueError as e:
+        return f"wireguard.tunnel_network is not a network: {value!r} ({e})"
+    # 100.64.0.0/10 is the shared address space of RFC 6598. It is not globally routable,
+    # it is the range Tailscale hands out, and only Python 3.12.4 and later count it as
+    # private, so naming it keeps the answer the same on every interpreter this runs on.
+    shared = ipaddress.ip_network("100.64.0.0/10")
+    if network.is_private or (network.version == 4 and network.subnet_of(shared)):
+        return None
+    return (
+        f"wireguard.tunnel_network must be a private range, got {value}. "
+        f"Use RFC 1918 space such as 10.9.0.0/24, the shared range 100.64.0.0/10, "
+        f"or a random ULA under fd00::/8"
+    )
+
+
+class WireguardSettings(EnvFirstSettings):
+    """WireGuard hub configuration settings.
+
+    Mirrors WireguardConfig in shadow9.config field for field, with the same names, units
+    and defaults. The proxy, the CLI and the wizards read that one; only the API reads
+    this one. A field that lands in one and not the other is read from the file, shown in
+    the interface and then ignored by whichever half was missed.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="SHADOW9_WIREGUARD_",
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=False, description="Enable the WireGuard hub")
+    listen_port: int = Field(
+        default=51820, ge=1, le=65535, description="UDP port the hub listens on"
+    )
+    enrollment_host: str = Field(
+        default="0.0.0.0", description="Address the enrollment listener binds to"
+    )
+    enrollment_port: int = Field(
+        default=8081,
+        ge=1,
+        le=65535,
+        description="TCP port for enrollment, refresh, and node downloads",
+    )
+    tunnel_network: str = Field(
+        default="10.9.0.0/24", description="Private range peer tunnel addresses come from"
+    )
+    hub_endpoint: str = Field(
+        default="",
+        description="host:port peers dial, empty until the hub has a reachable address",
+    )
+    # 1420 is the MTU the kernel gives a fresh WireGuard device. Framing measures 32
+    # bytes, a 16 byte header and a 16 byte Poly1305 tag, over an inner packet padded up
+    # to a multiple of 16; with the outer IPv4 and UDP headers that is 60 bytes, so 1440
+    # is what fits a 1500 byte path. The 20 bytes below that are what an IPv6 underlay
+    # costs, whose outer header is 40 bytes rather than 20. 1280 is the floor because it
+    # is the smallest MTU an IPv6 link is allowed to carry.
+    mtu: int = Field(default=1420, ge=1280, le=1440, description="Tunnel MTU in bytes")
+    # pydantic reads a list from the environment as JSON, so without NoDecode the comma
+    # separated form the proxy half accepts raises before any validator sees the value.
+    dns: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, description="Resolvers handed to peers"
+    )
+    # 25 seconds sits under the 30 second UDP mapping timeout common to NAT and stateful
+    # firewalls, so it refreshes the mapping just before it expires.
+    keepalive: int = Field(
+        default=25,
+        ge=0,
+        le=65535,
+        description="Seconds between peer keepalives, 0 to turn them off",
+    )
+
+    @field_validator("dns", mode="before")
+    @classmethod
+    def split_dns_list(cls, v: Any) -> Any:
+        """Accept the comma separated list the proxy half reads from the environment."""
+        if isinstance(v, str):
+            return [part.strip() for part in v.split(",") if part.strip()]
+        return v
+
+    @field_validator("tunnel_network")
+    @classmethod
+    def validate_tunnel_network(cls, v: str) -> str:
+        """Peer addresses have to come out of a private range."""
+        error = _wireguard_tunnel_network_error(v)
+        if error:
+            raise ValueError(error)
+        return v
+
+
+def _wireguard_setting_errors(settings: WireguardSettings) -> list[str]:
+    """Every problem with a WireguardSettings, empty when there is none.
+
+    Construction already refuses each of these, so only a value assigned afterwards
+    reaches here. The messages match the ones shadow9.config produces, because an
+    operator seeing two different complaints about one setting has to guess which half
+    is talking.
+    """
+    errors = []
+    if not 1 <= settings.listen_port <= 65535:
+        errors.append(
+            f"wireguard.listen_port must be between 1 and 65535, got {settings.listen_port}"
+        )
+    if not 1 <= settings.enrollment_port <= 65535:
+        errors.append(
+            f"wireguard.enrollment_port must be between 1 and 65535, "
+            f"got {settings.enrollment_port}"
+        )
+    network_error = _wireguard_tunnel_network_error(settings.tunnel_network)
+    if network_error:
+        errors.append(network_error)
+    if not 1280 <= settings.mtu <= 1440:
+        errors.append(f"wireguard.mtu must be between 1280 and 1440, got {settings.mtu}")
+    if not 0 <= settings.keepalive <= 65535:
+        errors.append(
+            f"wireguard.keepalive must be between 0 and 65535 seconds, "
+            f"got {settings.keepalive}. 0 turns keepalives off"
+        )
+    return errors
+
+
 class Settings(BaseSettings):
     """
     Main application settings.
@@ -243,11 +378,24 @@ class Settings(BaseSettings):
     log: LogSettings = Field(default_factory=LogSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
+    wireguard: WireguardSettings = Field(default_factory=WireguardSettings)
 
     # Global settings
     master_key: Optional[str] = Field(
         default=None, description="Master key for credential encryption"
     )
+
+    @model_validator(mode="after")
+    def refuse_listener_port_collisions(self) -> "Settings":
+        """Refuse inbound listeners that cannot bind at the same time."""
+        errors = listener_port_errors(
+            self.api.port,
+            self.wireguard.enrollment_port,
+            self.server.port,
+        )
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self
 
     @classmethod
     def load_from_yaml(cls, config_file: Path) -> "Settings":
@@ -273,6 +421,10 @@ class Settings(BaseSettings):
             settings_dict["security"] = SecuritySettings(**data["security"])
         if "api" in data:
             settings_dict["api"] = ApiSettings(**data["api"])
+        # A section missing from this chain is never read out of the file, and nothing
+        # warns about it, so it stays at its defaults while the file says otherwise.
+        if "wireguard" in data:
+            settings_dict["wireguard"] = WireguardSettings(**data["wireguard"])
 
         return cls(**settings_dict)
 
@@ -345,6 +497,20 @@ class Settings(BaseSettings):
                 "port": self.api.port,
                 # Note: api_key is not saved to YAML for security - use api_config module
             },
+            "wireguard": {
+                "enabled": self.wireguard.enabled,
+                "listen_port": self.wireguard.listen_port,
+                "enrollment_host": self.wireguard.enrollment_host,
+                "enrollment_port": self.wireguard.enrollment_port,
+                "tunnel_network": self.wireguard.tunnel_network,
+                "hub_endpoint": self.wireguard.hub_endpoint,
+                "mtu": self.wireguard.mtu,
+                "dns": self.wireguard.dns,
+                "keepalive": self.wireguard.keepalive,
+                # No hub private key here. This file is written 0644 and read by anything
+                # that can see the directory; a hub key belongs with the encrypted
+                # credentials, the way api_key is kept in the api_config module
+            },
         }
 
         for section, values in modelled.items():
@@ -383,6 +549,17 @@ class Settings(BaseSettings):
         for port in self.security.allowed_ports:
             if port < 1 or port > 65535:
                 errors.append(f"Invalid allowed port: {port}")
+
+        # WireGuard validation, reported whether or not the hub is enabled so that turning
+        # it on later cannot be the moment a bad value first shows up
+        errors.extend(_wireguard_setting_errors(self.wireguard))
+        errors.extend(
+            listener_port_errors(
+                self.api.port,
+                self.wireguard.enrollment_port,
+                self.server.port,
+            )
+        )
 
         return errors
 

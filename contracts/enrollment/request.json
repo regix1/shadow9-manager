@@ -1,0 +1,8 @@
+{
+  "token_id": "join-token-id-value",
+  "name": "branch-gateway",
+  "public_key": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+  "routes": ["192.168.1.0/24"],
+  "nonce": "fresh-request-nonce-value",
+  "mac": "3e007a7fc77247fd979e3271ca7ed1ba32d5b1303e6cd0a87d6ca353c440a805"
+}
