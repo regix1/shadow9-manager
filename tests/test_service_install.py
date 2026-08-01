@@ -88,6 +88,47 @@ def install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
     paths.Shadow9Paths._instance = None
 
 
+class TestReadingTheKeyBack:
+    """The install writes the key, reads it back, and stops if they disagree.
+
+    A hand-quoted value made those two disagree while looking identical, so the install
+    refused with a message saying the file did not contain a key it was looking straight at.
+    """
+
+    @pytest.mark.parametrize(
+        ("written", "expected"),
+        [
+            ("SHADOW9_MASTER_KEY=abc123", "abc123"),
+            ('SHADOW9_MASTER_KEY="abc123"', "abc123"),
+            ("SHADOW9_MASTER_KEY='abc123'", "abc123"),
+        ],
+    )
+    def test_a_quoted_value_reads_back_as_the_value(
+        self, tmp_path: Path, written: str, expected: str
+    ) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"{written}\n", encoding="utf-8")
+
+        assert service._read_master_key(env_file) == expected
+
+    @pytest.mark.parametrize(
+        ("written", "expected"),
+        [
+            ('SHADOW9_MASTER_KEY=ab"c123', 'ab"c123'),
+            ('SHADOW9_MASTER_KEY="abc123', '"abc123'),
+            ("SHADOW9_MASTER_KEY=abc123'", "abc123'"),
+        ],
+    )
+    def test_only_a_matched_pair_comes_off(
+        self, tmp_path: Path, written: str, expected: str
+    ) -> None:
+        """A quote that is part of the key, or an unbalanced one, is left where it is."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"{written}\n", encoding="utf-8")
+
+        assert service._read_master_key(env_file) == expected
+
+
 def _run_install() -> Result:
     """Run `service install` against a throwaway app and hand back the runner result."""
     app = Typer()

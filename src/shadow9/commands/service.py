@@ -420,7 +420,14 @@ def _read_master_key(env_file: Path) -> str | None:
 
     for line in env_file.read_text().splitlines():
         if line.strip().startswith("SHADOW9_MASTER_KEY="):
-            return line.split("=", 1)[1].strip()
+            value = line.split("=", 1)[1].strip()
+            # An operator who quoted the value by hand still meant the value. Without this
+            # the read-back check compares '"abc"' against 'abc' and the install stops,
+            # saying the file does not contain the key while looking at the key. Only a
+            # matched pair comes off, so a quote inside a key is left alone.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            return value
     return None
 
 
