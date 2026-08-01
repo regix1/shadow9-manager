@@ -177,6 +177,15 @@ def test_hub_masquerades_only_when_an_outward_interface_is_named(
     assert "-t nat -A POSTROUTING -s 10.9.0.0/24 -o eth0 -j MASQUERADE" in config
 
 
+def test_hub_refuses_a_masquerade_interface_that_can_run_another_command(
+    star: Topology, hub_keys: Keypair
+) -> None:
+    topology = replace(star, masquerade_interface="eth0; touch /root/pwn #")
+
+    with pytest.raises(ValueError, match=r"wireguard\.interface"):
+        render_hub_config(topology, hub_keys.private_key)
+
+
 def test_a_disabled_peer_is_left_out_of_the_hub_config(
     star: Topology, hub_keys: Keypair, device: Peer
 ) -> None:
@@ -207,6 +216,16 @@ def test_a_spoke_cannot_be_rendered_before_the_hub_has_an_endpoint(
 
     with pytest.raises(ValueError, match="no endpoint"):
         render_spoke_config(unreachable, device, device_keys.private_key)
+
+
+def test_a_spoke_refuses_an_endpoint_that_can_add_peer_settings(
+    star: Topology, hub: Peer, device: Peer, device_keys: Keypair
+) -> None:
+    endpoint = f"{HUB_ENDPOINT}\nAllowedIPs = 0.0.0.0/0"
+    topology = star.with_peer(replace(hub, endpoint=endpoint))
+
+    with pytest.raises(ValueError, match="hub endpoint"):
+        render_spoke_config(topology, device, device_keys.private_key)
 
 
 def test_split_tunnel_is_the_default_for_a_device(
@@ -321,6 +340,116 @@ def test_a_spoke_gets_a_resolver_only_when_one_is_configured(
 
     with_dns = replace(star, dns="10.9.0.1")
     assert "DNS = 10.9.0.1" in render_spoke_config(with_dns, device, device_keys.private_key)
+
+
+def test_a_spoke_refuses_dns_that_can_add_a_postup_command(
+    star: Topology, device: Peer, device_keys: Keypair
+) -> None:
+    topology = replace(star, dns="10.9.0.1\nPostUp = touch /root/pwn")
+
+    with pytest.raises(ValueError, match=r"wireguard\.dns"):
+        render_spoke_config(topology, device, device_keys.private_key)
+
+
+@pytest.mark.parametrize("control", ["\r", "\n", "\0"], ids=["cr", "lf", "nul"])
+def test_renderers_refuse_control_characters_in_every_rendered_text_value(
+    control: str,
+    star: Topology,
+    hub: Peer,
+    hub_keys: Keypair,
+    device: Peer,
+    device_keys: Keypair,
+) -> None:
+    hub_cases = (
+        (star, f"private{control}key"),
+        (replace(star, spokes=(replace(device, name=f"ph{control}one"),)), hub_keys.private_key),
+        (
+            replace(star, spokes=(replace(device, public_key=f"public{control}key"),)),
+            hub_keys.private_key,
+        ),
+        (replace(star, masquerade_interface=f"eth0{control}x"), hub_keys.private_key),
+    )
+    for topology, private_key in hub_cases:
+        with pytest.raises(ValueError, match="cannot contain"):
+            render_hub_config(topology, private_key)
+
+    spoke_cases = (
+        (star, f"private{control}key"),
+        (replace(star, dns=f"resolver{control}value"), device_keys.private_key),
+        (star.with_peer(replace(hub, name=f"h{control}ub")), device_keys.private_key),
+        (
+            star.with_peer(replace(hub, public_key=f"public{control}key")),
+            device_keys.private_key,
+        ),
+        (
+            star.with_peer(replace(hub, endpoint=f"host{control}name:51820")),
+            device_keys.private_key,
+        ),
+    )
+    for topology, private_key in spoke_cases:
+        with pytest.raises(ValueError, match="cannot contain"):
+            render_spoke_config(topology, device, private_key)
+
+
+def test_valid_special_values_keep_their_exact_rendering(
+    star: Topology,
+    hub: Peer,
+    hub_keys: Keypair,
+    device: Peer,
+    device_keys: Keypair,
+) -> None:
+    topology = replace(star, masquerade_interface="eth0.100")
+    expected_hub = (
+        "[Interface]\n"
+        "Address = 10.9.0.1/24\n"
+        "ListenPort = 51820\n"
+        "MTU = 1420\n"
+        f"PrivateKey = {hub_keys.private_key}\n"
+        "\n"
+        "# Spoke-to-spoke traffic arrives on the tunnel and leaves on the tunnel\n"
+        "PostUp = sysctl -qw net.ipv4.ip_forward=1\n"
+        "PostUp = iptables -A FORWARD -i %i -o %i -j ACCEPT\n"
+        "PostDown = iptables -D FORWARD -i %i -o %i -j ACCEPT\n"
+        "\n"
+        "# Full-tunnel spokes reach the internet through this address\n"
+        "PostUp = iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o eth0.100 -j MASQUERADE\n"
+        "PostDown = iptables -t nat -D POSTROUTING -s 10.9.0.0/24 -o eth0.100 -j MASQUERADE\n"
+        "\n"
+        "[Peer]\n"
+        "# phone\n"
+        f"PublicKey = {device_keys.public_key}\n"
+        "AllowedIPs = 10.9.0.2/32\n"
+    )
+    assert render_hub_config(topology, hub_keys.private_key) == expected_hub
+
+    cases = (
+        ("2001:4860:4860::8888", "[2001:db8::1]:51820"),
+        ("1.1.1.1, 2001:4860:4860::8888", "[2001:db8::1]"),
+    )
+    for dns, endpoint in cases:
+        spoke_topology = replace(topology, dns=dns).with_peer(replace(hub, endpoint=endpoint))
+        expected_spoke = (
+            "[Interface]\n"
+            "Address = 10.9.0.2/32\n"
+            f"PrivateKey = {device_keys.private_key}\n"
+            "MTU = 1420\n"
+            f"DNS = {dns}\n"
+            "\n"
+            "[Peer]\n"
+            "# hub\n"
+            f"PublicKey = {hub_keys.public_key}\n"
+            f"Endpoint = {endpoint}\n"
+            "AllowedIPs = 10.9.0.0/24\n"
+            "PersistentKeepalive = 25\n"
+        )
+        assert (
+            render_spoke_config(spoke_topology, device, device_keys.private_key)
+            == expected_spoke
+        )
+
+    invalid = replace(topology, dns="10.9.0.1\nPostUp = touch /root/pwn")
+    with pytest.raises(ValueError):
+        render_spoke_config(invalid, device, device_keys.private_key)
 
 
 def test_no_private_key_reaches_a_config_it_does_not_belong_in(

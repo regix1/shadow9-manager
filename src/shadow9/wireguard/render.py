@@ -260,7 +260,12 @@ def render_hub_config(topology: Topology, private_key: str) -> str:
 
     Returns:
         The config file text
+
+    Raises:
+        ValueError: If a text value could add or truncate a config line, or the outward
+            interface is not a valid interface name
     """
+    private_key = _checked_config_value(private_key, "hub private key")
     prefix = topology.tunnel_network.prefixlen
     lines: list[str] = [
         "[Interface]",
@@ -275,13 +280,15 @@ def render_hub_config(topology: Topology, private_key: str) -> str:
 
     for spoke in topology.active_spokes():
         check_peer_routes(topology, spoke)
+        name = _checked_config_value(spoke.name, "peer name")
+        public_key = _checked_config_value(spoke.public_key, "peer public key")
         allowed = (_host_network(spoke.address), *_sorted_networks(set(spoke.routes)))
         lines.extend(
             [
                 "",
                 "[Peer]",
-                f"# {spoke.name}",
-                f"PublicKey = {spoke.public_key}",
+                f"# {name}",
+                f"PublicKey = {public_key}",
                 f"AllowedIPs = {', '.join(str(entry) for entry in allowed)}",
             ]
         )
@@ -313,13 +320,19 @@ def render_spoke_config(
         The config file text
 
     Raises:
-        ValueError: If the hub has no endpoint, since a spoke cannot find it without one
+        ValueError: If the hub has no endpoint, or a text value could add or truncate a
+            config line
     """
-    if not topology.hub.endpoint:
+    endpoint = topology.hub.endpoint
+    if not endpoint:
         raise ValueError(
             "The hub has no endpoint, so a spoke would have nothing to dial. Set the hub "
             "endpoint to the address and port peers can reach it on."
         )
+    endpoint = _checked_config_value(endpoint, "hub endpoint")
+    private_key = _checked_config_value(private_key, "spoke private key")
+    hub_name = _checked_config_value(topology.hub.name, "hub name")
+    hub_public_key = _checked_config_value(topology.hub.public_key, "hub public key")
 
     lines: list[str] = [
         "[Interface]",
@@ -329,7 +342,8 @@ def render_spoke_config(
     if topology.mtu is not None:
         lines.append(f"MTU = {topology.mtu}")
     if topology.dns:
-        lines.append(f"DNS = {topology.dns}")
+        dns = _checked_config_value(topology.dns, "wireguard.dns")
+        lines.append(f"DNS = {dns}")
 
     lines.extend(_gateway_forwarding_lines(peer))
 
@@ -337,9 +351,9 @@ def render_spoke_config(
         [
             "",
             "[Peer]",
-            f"# {topology.hub.name}",
-            f"PublicKey = {topology.hub.public_key}",
-            f"Endpoint = {topology.hub.endpoint}",
+            f"# {hub_name}",
+            f"PublicKey = {hub_public_key}",
+            f"Endpoint = {endpoint}",
             f"AllowedIPs = {', '.join(spoke_allowed_ips(topology, peer, full_tunnel))}",
         ]
     )
@@ -411,6 +425,15 @@ def checked_interface(name: str) -> str:
             "plus signs, periods and hyphens"
         )
     return cleaned
+
+
+def _checked_config_value(value: str, setting: str) -> str:
+    """Refuse characters that can end, add or truncate a WireGuard config line."""
+    if "\r" in value or "\n" in value or "\0" in value:
+        raise ValueError(
+            f"{setting} cannot contain carriage returns, line feeds or NUL bytes"
+        )
+    return value
 
 
 def write_config(path: Path, text: str) -> None:
@@ -495,7 +518,11 @@ def _hub_firewall_lines(topology: Topology) -> list[str]:
         )
 
     if topology.masquerade_interface:
-        out = topology.masquerade_interface
+        out = checked_interface(
+            _checked_config_value(
+                topology.masquerade_interface, "wireguard.masquerade_interface"
+            )
+        )
         network = topology.tunnel_network
         lines.extend(
             [
