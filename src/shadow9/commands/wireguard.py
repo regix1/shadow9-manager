@@ -1267,7 +1267,7 @@ def _print_node_download(url: str) -> None:
         console.print('  [cyan]case "$machine" in[/cyan]')
         console.print("  [cyan]  x86_64) architecture=amd64 ;;[/cyan]")
         console.print("  [cyan]  aarch64) architecture=arm64 ;;[/cyan]")
-        console.print("  [cyan]  mipsel) architecture=mipsle ;;[/cyan]")
+        console.print("  [cyan]  mips*) architecture=mipsle ;;[/cyan]")
         console.print('  [cyan]  *) echo "No shadow9 package matches $machine"; exit 1 ;;[/cyan]')
         console.print("  [cyan]esac[/cyan]")
         console.print('  [cyan]case "$release" in[/cyan]')
@@ -1318,7 +1318,7 @@ def _print_node_download(url: str) -> None:
     console.print('  [cyan]case "$(uname -m)" in[/cyan]')
     console.print("  [cyan]  x86_64) architecture=amd64 ;;[/cyan]")
     console.print("  [cyan]  aarch64) architecture=arm64 ;;[/cyan]")
-    console.print("  [cyan]  mipsel) architecture=mipsle ;;[/cyan]")
+    console.print("  [cyan]  mips*) architecture=mipsle ;;[/cyan]")
     console.print('  [cyan]  *) echo "No shadow9 binary matches $(uname -m)"; exit 1 ;;[/cyan]')
     console.print("  [cyan]esac[/cyan]")
     console.print(

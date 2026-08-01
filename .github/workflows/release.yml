@@ -30,6 +30,8 @@ jobs:
   # release is built exactly the way every push is built.
   build:
     uses: ./.github/workflows/node-packages.yml
+    with:
+      version: ${{ inputs.version }}
 
   publish:
     name: Create the release
@@ -52,25 +54,6 @@ jobs:
           fi
           echo "tag=v$bare" >> "$GITHUB_OUTPUT"
           echo "bare=$bare" >> "$GITHUB_OUTPUT"
-
-      # The package version lives in the OpenWrt recipe, and the binary reports
-      # its own. A tag that disagrees with them ships files that describe
-      # themselves differently to the release they came from, so say so loudly
-      # rather than failing: a patch release of the same package is legitimate.
-      - name: Compare against the packaged version
-        run: |
-          recipe=$(grep -oP '^PKG_VERSION:=\K.*' packaging/openwrt/Makefile || true)
-          echo "release tag:     ${{ steps.version.outputs.bare }}"
-          echo "PKG_VERSION:     ${recipe:-not found}"
-          if [ "$recipe" != "${{ steps.version.outputs.bare }}" ]; then
-            {
-              echo "### Version mismatch"
-              echo ""
-              echo "Releasing \`${{ steps.version.outputs.bare }}\` but the packages are built as"
-              echo "\`${recipe:-unknown}\`, taken from \`PKG_VERSION\` in \`packaging/openwrt/Makefile\`."
-              echo "The attached files will be named after \`${recipe:-unknown}\`."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Gather every built file
         uses: actions/download-artifact@v8
@@ -102,17 +85,47 @@ jobs:
           notes=$(cat <<'EOF'
           OpenWrt node client for the shadow9 WireGuard hub.
 
-          | Router | File |
-          |---|---|
-          | OpenWrt 24.10.x | the `.ipk` matching your architecture, installed with `opkg install` |
-          | OpenWrt 25.12.x | the `.apk` matching your target, installed with `apk add --allow-untrusted` |
+          Install it on an OpenWrt 24.10.x or 25.12.x router:
 
-          `shadow9-node-linux-*` are the raw binaries for installing without a package.
-          `SHA256SUMS` covers every other file here.
+          ```sh
+          release="$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE")"
+          machine="$(uname -m)"
+          case "$machine" in
+            x86_64) ipk_arch=x86_64; apk_arch=x86-64 ;;
+            aarch64) ipk_arch=aarch64_generic; apk_arch=armsr-armv8 ;;
+            mips*) ipk_arch=mipsel_24kc; apk_arch=ramips-mt7621 ;;
+            *) echo "No shadow9 package matches $machine"; exit 1 ;;
+          esac
+          case "$release" in
+            24.10.*) file="shadow9-node___VERSION__-r1_${ipk_arch}.ipk"; package=ipk ;;
+            25.12.*) file="shadow9-node-__VERSION__-r1_${apk_arch}.apk"; package=apk ;;
+            *) echo "No shadow9 package matches OpenWrt $release"; exit 1 ;;
+          esac
+          base="https://github.com/__REPOSITORY__/releases/download/__TAG__"
+          wget -O "/tmp/$file" "$base/$file"
+          wget -O /tmp/SHA256SUMS "$base/SHA256SUMS"
+          checksum="$(grep -F "  $file" /tmp/SHA256SUMS)" || {
+            echo "SHA256SUMS has no entry for $file"
+            exit 1
+          }
+          (cd /tmp && printf '%s\n' "$checksum" | sha256sum -c -) || exit 1
+          case "$package" in
+            ipk) opkg install "/tmp/$file" ;;
+            apk) apk add --allow-untrusted "/tmp/$file" ;;
+          esac
+          ```
 
-          Setup is in `docs/SETUP.md`.
+          Replace the hub address, token, and advertised LAN, then join:
+
+          ```sh
+          shadow9-node join -hub http://<hub>:8081 -token <token> -advertise 192.168.1.0/24
+          ```
           EOF
           )
+          version="${TAG#v}"
+          notes="${notes//__VERSION__/$version}"
+          notes="${notes//__REPOSITORY__/$GITHUB_REPOSITORY}"
+          notes="${notes//__TAG__/$TAG}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "$TAG exists, replacing its files"

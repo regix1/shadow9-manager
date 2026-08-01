@@ -783,7 +783,7 @@ class TestJoinToken:
         assert "/linux-$architecture" in flat
         assert "x86_64) architecture=amd64" in flat
         assert "aarch64) architecture=arm64" in flat
-        assert "mipsel) architecture=mipsle" in flat
+        assert "mips*) architecture=mipsle" in flat
         # A package is saved and checked before either package manager sees it.
         assert flat.index('wget -O "/tmp/shadow9-node.$package"') < flat.index(
             'sha256sum "/tmp/shadow9-node.$package"'
@@ -799,6 +799,23 @@ class TestJoinToken:
         # skipping the comparison actually costs
         assert "anyone on the path between the router and this hub" in flat
         assert "trusting every network in between" in flat
+
+    def test_mips_machine_uses_the_mipsle_package(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        package_checksums: dict[str, str] = {
+            name: f"checksum-{name}"
+            for names in wireguard_service.NODE_PACKAGE_FILES.values()
+            for name in names.values()
+        }
+        monkeypatch.setattr(wg_commands, "node_package_checksums", lambda: package_checksums)
+        monkeypatch.setattr(wg_commands, "node_binary_checksums", lambda: {})
+
+        wg_commands._print_node_download("http://198.51.100.7:8081")
+        flat = _flat(capsys.readouterr().out)
+
+        assert "mips*) architecture=mipsle" in flat
+        assert "mipsel) architecture=mipsle" not in flat
 
     def test_nothing_is_said_about_a_download_that_was_never_built(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path

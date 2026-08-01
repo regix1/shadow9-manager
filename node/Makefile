@@ -22,7 +22,16 @@
 GO ?= go
 GO_TOOLCHAIN := go1.21.13
 DIST ?= dist
-VERSION ?= 0.1.0
+VERSION_FILE := $(dir $(lastword $(MAKEFILE_LIST)))../VERSION
+ifeq ($(origin VERSION), undefined)
+ifeq ($(wildcard $(VERSION_FILE)),)
+$(error missing $(VERSION_FILE))
+endif
+VERSION := $(strip $(shell cat $(VERSION_FILE)))
+ifeq ($(VERSION),)
+$(error $(VERSION_FILE) is empty)
+endif
+endif
 BINARY := shadow9-node
 
 TARGETS := linux-amd64 linux-arm64 linux-mipsle
@@ -33,7 +42,13 @@ CHECKSUMS := $(DIST)/SHA256SUMS
 # FIND.EXE, which fails and leaves this empty, and an empty prerequisite list
 # means an edited source file never triggers a rebuild.
 GO_SOURCES := $(wildcard *.go) $(wildcard internal/*/*.go)
-SOURCES := $(filter-out %_test.go,$(GO_SOURCES)) $(wildcard internal/*/*.json) go.mod
+# VERSION is a prerequisite because it is linked into the binary. Without it,
+# bumping the version and rebuilding leaves the old string baked in and every
+# artifact quietly reports the previous release, which is the exact fault this
+# file's version handling exists to prevent. $(wildcard) so an overriding
+# VERSION= on the command line still works when the file is absent.
+SOURCES := $(filter-out %_test.go,$(GO_SOURCES)) $(wildcard internal/*/*.json) go.mod \
+	$(wildcard $(VERSION_FILE))
 
 # GOTOOLCHAIN selects the exact compiler named in go.mod. With that input fixed,
 # -trimpath removes build-directory names, -buildvcs=false keeps local git state

@@ -16,14 +16,26 @@ on:
       - 'node/**'
       - 'packaging/openwrt/**'
       - 'contracts/enrollment/**'
+      - 'VERSION'
       - '.github/workflows/node-packages.yml'
   pull_request:
     paths:
       - 'node/**'
       - 'packaging/openwrt/**'
       - 'contracts/enrollment/**'
+      - 'VERSION'
   workflow_call:
+    inputs:
+      version:
+        description: 'Version written into binaries and package names'
+        required: false
+        type: string
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version written into binaries and package names; leave empty to use VERSION'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -41,6 +53,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Use the requested version
+        if: ${{ inputs.version != '' }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: printf '%s\n' "$RELEASE_VERSION" > VERSION
 
       - uses: actions/setup-go@v7
         with:
@@ -89,6 +107,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Use the requested version
+        if: ${{ inputs.version != '' }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: printf '%s\n' "$RELEASE_VERSION" > VERSION
 
       - uses: actions/download-artifact@v8
         with:
@@ -161,6 +185,7 @@ jobs:
           sdk="${{ steps.sdk.outputs.dir }}"
           mkdir -p "$sdk/package/shadow9-node"
           cp -r packaging/openwrt/. "$sdk/package/shadow9-node/"
+          cp VERSION "$sdk/package/shadow9-node/VERSION"
           cp node/dist/shadow9-node-linux-* "$sdk/package/shadow9-node/files/"
 
       - name: Feeds

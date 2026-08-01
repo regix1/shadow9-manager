@@ -174,7 +174,7 @@ machine="$(uname -m)"
 case "$machine" in
   x86_64) architecture=amd64 ;;
   aarch64) architecture=arm64 ;;
-  mipsel) architecture=mipsle ;;
+  mips*) architecture=mipsle ;;
   *) echo "No shadow9 package matches $machine"; exit 1 ;;
 esac
 case "$release" in

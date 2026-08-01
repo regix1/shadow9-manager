@@ -11,10 +11,19 @@
 #   make package/shadow9-node/compile V=s
 #
 
+SHADOW9_VERSION_FILE:=$(dir $(lastword $(MAKEFILE_LIST)))VERSION
+ifeq ($(wildcard $(SHADOW9_VERSION_FILE)),)
+$(error missing VERSION beside the shadow9-node package Makefile)
+endif
+SHADOW9_VERSION:=$(strip $(shell cat $(SHADOW9_VERSION_FILE)))
+ifeq ($(SHADOW9_VERSION),)
+$(error VERSION beside the shadow9-node package Makefile is empty)
+endif
+
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=shadow9-node
-PKG_VERSION:=0.1.0
+PKG_VERSION:=$(SHADOW9_VERSION)
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 
