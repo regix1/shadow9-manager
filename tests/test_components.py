@@ -1,5 +1,6 @@
 """Managing Tor and the bridge transports, and telling the truth about which is which."""
 
+import os
 import re
 import subprocess
 
@@ -35,6 +36,23 @@ class _Ran:
 def _pretend_linux(monkeypatch: pytest.MonkeyPatch) -> None:
     """These commands refuse off systemd, and the point here is the behaviour on it."""
     monkeypatch.setattr(components_commands.sys, "platform", "linux")
+
+
+@pytest.fixture(autouse=True)
+def _pretend_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    The assertions below name the bare systemctl call, which is what root runs.
+
+    Anywhere else `privileged` puts sudo in front, so the same command arrives as
+    ['sudo', '-n', 'systemctl', ...] and every one of those assertions misses it. Saying
+    which of the two this is keeps the tests meaning the same thing on a developer's
+    machine, on a build that runs as root, and on one that does not.
+    """
+
+    def root() -> int:
+        return 0
+
+    monkeypatch.setattr(os, "geteuid", root, raising=False)
 
 
 class TestTheTransportsAreNotServices:
