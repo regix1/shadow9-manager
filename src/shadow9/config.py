@@ -5,6 +5,7 @@ Provides secure configuration loading, validation, and storage.
 """
 
 import ipaddress
+import json
 import os
 import secrets
 from collections.abc import Callable
@@ -101,12 +102,83 @@ def _permit_count_error(value: Optional[int]) -> Optional[str]:
     )
 
 
-def _permits_from_env(name: str, raw: str) -> int:
-    """Read a permit count out of the environment, refusing one that cannot work."""
+def _boolean_from_env(name: str, raw: str) -> bool:
+    """Read the boolean forms accepted by pydantic settings."""
+    value = raw.lower()
+    if value in ("1", "on", "t", "true", "y", "yes"):
+        return True
+    if value in ("0", "f", "false", "n", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be true or false, got {raw!r}")
+
+
+def _integer_from_env(
+    name: str,
+    raw: str,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Read a whole number and report the environment variable that supplied it."""
     try:
-        permits = int(raw)
+        value = int(raw)
     except ValueError:
         raise ValueError(f"{name} must be a whole number, got {raw!r}") from None
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}, got {value}")
+    return value
+
+
+def _decimal_from_env(name: str, raw: str, minimum: float | None = None) -> float:
+    """Read a decimal number and report the environment variable that supplied it."""
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from None
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
+def _json_list_from_env(name: str, raw: str) -> list[object]:
+    """Read the JSON list form pydantic settings expect in the environment."""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError(f"{name} must be a JSON list, got {raw!r}") from None
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a JSON list, got {raw!r}")
+    return value
+
+
+def _ports_from_env(name: str, raw: str) -> list[int]:
+    """Read a JSON list of whole-number ports."""
+    ports = []
+    for value in _json_list_from_env(name, raw):
+        if not isinstance(value, (str, int, float)):
+            raise ValueError(f"{name} must be a JSON list of whole numbers")
+        try:
+            port = int(value)
+        except ValueError:
+            raise ValueError(f"{name} must be a JSON list of whole numbers") from None
+        if isinstance(value, float) and value != port:
+            raise ValueError(f"{name} must be a JSON list of whole numbers")
+        ports.append(port)
+    return ports
+
+
+def _hosts_from_env(name: str, raw: str) -> list[str]:
+    """Read a JSON list of host names."""
+    hosts = _json_list_from_env(name, raw)
+    if any(not isinstance(host, str) for host in hosts):
+        raise ValueError(f"{name} must be a JSON list of host names")
+    return [host for host in hosts if isinstance(host, str)]
+
+
+def _permits_from_env(name: str, raw: str) -> int:
+    """Read a permit count out of the environment, refusing one that cannot work."""
+    permits = _integer_from_env(name, raw)
     error = _permit_count_error(permits)
     if error:
         raise ValueError(f"{name}: {error}")
@@ -272,10 +344,7 @@ def _wireguard_number_from_env(
     a config file, so a message quoting only the value sends the operator to the wrong
     place to change it.
     """
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ValueError(f"{name} must be a whole number, got {raw!r}") from None
+    value = _integer_from_env(name, raw)
     error = error_of(value)
     if error:
         raise ValueError(f"{name}: {error}")
@@ -461,63 +530,136 @@ class Config:
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides."""
         # Server overrides
-        if env_val := os.getenv("SHADOW9_HOST"):
+        if (env_val := os.getenv("SHADOW9_HOST")) is not None:
             self.server.host = env_val
-        if env_val := os.getenv("SHADOW9_PORT"):
-            self.server.port = int(env_val)
+        if (env_val := os.getenv("SHADOW9_PORT")) is not None:
+            self.server.port = _integer_from_env(
+                "SHADOW9_PORT", env_val, minimum=1, maximum=65535
+            )
+        if (env_val := os.getenv("SHADOW9_MAX_CONNECTIONS")) is not None:
+            self.server.max_connections = _integer_from_env(
+                "SHADOW9_MAX_CONNECTIONS", env_val, minimum=1
+            )
+        if (env_val := os.getenv("SHADOW9_CONNECTION_TIMEOUT")) is not None:
+            self.server.connection_timeout = _integer_from_env(
+                "SHADOW9_CONNECTION_TIMEOUT", env_val, minimum=1
+            )
 
         # Tor overrides
-        if env_val := os.getenv("SHADOW9_TOR_ENABLED"):
-            self.tor.enabled = env_val.lower() in ("true", "1", "yes")
-        if env_val := os.getenv("SHADOW9_TOR_PORT"):
-            self.tor.socks_port = int(env_val)
+        if (env_val := os.getenv("SHADOW9_TOR_ENABLED")) is not None:
+            self.tor.enabled = _boolean_from_env("SHADOW9_TOR_ENABLED", env_val)
+        tor_port_name = "SHADOW9_TOR_SOCKS_PORT"
+        env_val = os.getenv(tor_port_name)
+        if env_val is None:
+            tor_port_name = "SHADOW9_TOR_PORT"
+            env_val = os.getenv(tor_port_name)
+        if env_val is not None:
+            self.tor.socks_port = _integer_from_env(
+                tor_port_name, env_val, minimum=1, maximum=65535
+            )
+        if (env_val := os.getenv("SHADOW9_TOR_CONTROL_PORT")) is not None:
+            self.tor.control_port = _integer_from_env(
+                "SHADOW9_TOR_CONTROL_PORT", env_val, minimum=1, maximum=65535
+            )
+        if (env_val := os.getenv("SHADOW9_TOR_RETRY_ATTEMPTS")) is not None:
+            self.tor.retry_attempts = _integer_from_env(
+                "SHADOW9_TOR_RETRY_ATTEMPTS", env_val, minimum=1
+            )
+        if (env_val := os.getenv("SHADOW9_TOR_RETRY_DELAY")) is not None:
+            self.tor.retry_delay = _decimal_from_env(
+                "SHADOW9_TOR_RETRY_DELAY", env_val, minimum=0
+            )
 
-        # Auth overrides. The API's settings class reads this same variable under the
-        # same name, so leaving it out here let one process honour a number the other
-        # never saw and size itself independently.
-        if env_val := os.getenv("SHADOW9_AUTH_MAX_CONCURRENT_AUTH"):
+        # Auth overrides
+        if (env_val := os.getenv("SHADOW9_AUTH_REQUIRE_AUTH")) is not None:
+            self.auth.require_auth = _boolean_from_env("SHADOW9_AUTH_REQUIRE_AUTH", env_val)
+        if (env_val := os.getenv("SHADOW9_AUTH_CREDENTIALS_FILE")) is not None:
+            self.auth.credentials_file = env_val
+        if (env_val := os.getenv("SHADOW9_AUTH_MAX_FAILED_ATTEMPTS")) is not None:
+            self.auth.max_failed_attempts = _integer_from_env(
+                "SHADOW9_AUTH_MAX_FAILED_ATTEMPTS", env_val, minimum=1
+            )
+        if (env_val := os.getenv("SHADOW9_AUTH_LOCKOUT_DURATION_MINUTES")) is not None:
+            self.auth.lockout_duration_minutes = _integer_from_env(
+                "SHADOW9_AUTH_LOCKOUT_DURATION_MINUTES", env_val, minimum=0
+            )
+        if (env_val := os.getenv("SHADOW9_AUTH_MAX_CONCURRENT_AUTH")) is not None:
             self.auth.max_concurrent_auth = _permits_from_env(
                 "SHADOW9_AUTH_MAX_CONCURRENT_AUTH", env_val
             )
 
         # Log overrides
-        if env_val := os.getenv("SHADOW9_LOG_LEVEL"):
+        if (env_val := os.getenv("SHADOW9_LOG_LEVEL")) is not None:
             self.log.level = env_val.upper()
+        if (env_val := os.getenv("SHADOW9_LOG_FORMAT")) is not None:
+            self.log.format = env_val
+        if (env_val := os.getenv("SHADOW9_LOG_FILE")) is not None:
+            self.log.file = env_val
+
+        # Security overrides
+        if (env_val := os.getenv("SHADOW9_SECURITY_ALLOWED_PORTS")) is not None:
+            self.security.allowed_ports = _ports_from_env(
+                "SHADOW9_SECURITY_ALLOWED_PORTS", env_val
+            )
+        if (env_val := os.getenv("SHADOW9_SECURITY_BLOCKED_HOSTS")) is not None:
+            self.security.blocked_hosts = _hosts_from_env(
+                "SHADOW9_SECURITY_BLOCKED_HOSTS", env_val
+            )
+        if (env_val := os.getenv("SHADOW9_SECURITY_ALLOW_LOCALHOST")) is not None:
+            self.security.allow_localhost = _boolean_from_env(
+                "SHADOW9_SECURITY_ALLOW_LOCALHOST", env_val
+            )
+        if (env_val := os.getenv("SHADOW9_SECURITY_RATE_LIMIT_PER_MINUTE")) is not None:
+            self.security.rate_limit_per_minute = _integer_from_env(
+                "SHADOW9_SECURITY_RATE_LIMIT_PER_MINUTE", env_val, minimum=1
+            )
+        if (env_val := os.getenv("SHADOW9_SECURITY_BLOCK_PRIVATE_RANGES")) is not None:
+            self.security.block_private_ranges = _boolean_from_env(
+                "SHADOW9_SECURITY_BLOCK_PRIVATE_RANGES", env_val
+            )
 
         # WireGuard overrides. These are the names WireguardSettings derives from its own
         # env prefix, so one variable configures the proxy half and the API half rather
         # than each of them reading a different one. Nothing here is automatic: a variable
         # left out of this block is read by the API and ignored by everything else.
-        if env_val := os.getenv("SHADOW9_WIREGUARD_ENABLED"):
-            self.wireguard.enabled = env_val.lower() in ("true", "1", "yes")
-        if env_val := os.getenv("SHADOW9_WIREGUARD_INTERFACE"):
-            self.wireguard.interface = checked_interface(env_val)
-        if env_val := os.getenv("SHADOW9_WIREGUARD_LISTEN_PORT"):
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_ENABLED")) is not None:
+            self.wireguard.enabled = _boolean_from_env("SHADOW9_WIREGUARD_ENABLED", env_val)
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_INTERFACE")) is not None:
+            try:
+                self.wireguard.interface = checked_interface(env_val)
+            except ValueError as error:
+                raise ValueError(f"SHADOW9_WIREGUARD_INTERFACE: {error}") from None
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_LISTEN_PORT")) is not None:
             self.wireguard.listen_port = _wireguard_number_from_env(
                 "SHADOW9_WIREGUARD_LISTEN_PORT", env_val, _wireguard_listen_port_error
             )
-        if env_val := os.getenv("SHADOW9_WIREGUARD_ENROLLMENT_HOST"):
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_ENROLLMENT_HOST")) is not None:
             self.wireguard.enrollment_host = env_val
-        if env_val := os.getenv("SHADOW9_WIREGUARD_ENROLLMENT_PORT"):
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_ENROLLMENT_PORT")) is not None:
             self.wireguard.enrollment_port = _wireguard_number_from_env(
                 "SHADOW9_WIREGUARD_ENROLLMENT_PORT",
                 env_val,
                 _wireguard_enrollment_port_error,
             )
-        if env_val := os.getenv("SHADOW9_WIREGUARD_TUNNEL_NETWORK"):
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_TUNNEL_NETWORK")) is not None:
             network_error = _wireguard_tunnel_network_error(env_val)
             if network_error:
                 raise ValueError(f"SHADOW9_WIREGUARD_TUNNEL_NETWORK: {network_error}")
             self.wireguard.tunnel_network = env_val
-        if env_val := os.getenv("SHADOW9_WIREGUARD_HUB_ENDPOINT"):
-            self.wireguard.hub_endpoint = env_val
-        if env_val := os.getenv("SHADOW9_WIREGUARD_MTU"):
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_HUB_ENDPOINT")) is not None:
+            from .services.wireguard_service import checked_endpoint
+
+            try:
+                self.wireguard.hub_endpoint = checked_endpoint(env_val)
+            except ValueError as error:
+                raise ValueError(f"SHADOW9_WIREGUARD_HUB_ENDPOINT: {error}") from None
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_MTU")) is not None:
             self.wireguard.mtu = _wireguard_number_from_env(
                 "SHADOW9_WIREGUARD_MTU", env_val, _wireguard_mtu_error
             )
-        if env_val := os.getenv("SHADOW9_WIREGUARD_DNS"):
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_DNS")) is not None:
             self.wireguard.dns = _wireguard_dns_from_env(env_val)
-        if env_val := os.getenv("SHADOW9_WIREGUARD_KEEPALIVE"):
+        if (env_val := os.getenv("SHADOW9_WIREGUARD_KEEPALIVE")) is not None:
             self.wireguard.keepalive = _wireguard_number_from_env(
                 "SHADOW9_WIREGUARD_KEEPALIVE", env_val, _wireguard_keepalive_error
             )

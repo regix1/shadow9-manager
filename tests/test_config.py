@@ -200,6 +200,288 @@ class TestEnvironmentPrecedence:
         assert settings.log.level == "DEBUG"
 
 
+class TestSharedEnvironmentVariables:
+    """The proxy and API read the same environment names and values."""
+
+    @pytest.mark.parametrize(
+        ("name", "section", "field_name", "raw", "expected"),
+        [
+            pytest.param("SHADOW9_HOST", "server", "host", "192.0.2.10", "192.0.2.10", id="host"),
+            pytest.param("SHADOW9_PORT", "server", "port", "1180", 1180, id="port"),
+            pytest.param(
+                "SHADOW9_MAX_CONNECTIONS",
+                "server",
+                "max_connections",
+                "321",
+                321,
+                id="max_connections",
+            ),
+            pytest.param(
+                "SHADOW9_CONNECTION_TIMEOUT",
+                "server",
+                "connection_timeout",
+                "42",
+                42,
+                id="connection_timeout",
+            ),
+            pytest.param(
+                "SHADOW9_TOR_ENABLED", "tor", "enabled", "false", False, id="tor_enabled"
+            ),
+            pytest.param(
+                "SHADOW9_TOR_SOCKS_PORT",
+                "tor",
+                "socks_port",
+                "9150",
+                9150,
+                id="tor_socks_port",
+            ),
+            pytest.param(
+                "SHADOW9_TOR_CONTROL_PORT",
+                "tor",
+                "control_port",
+                "9151",
+                9151,
+                id="tor_control_port",
+            ),
+            pytest.param(
+                "SHADOW9_TOR_RETRY_ATTEMPTS",
+                "tor",
+                "retry_attempts",
+                "7",
+                7,
+                id="tor_retry_attempts",
+            ),
+            pytest.param(
+                "SHADOW9_TOR_RETRY_DELAY",
+                "tor",
+                "retry_delay",
+                "1.25",
+                1.25,
+                id="tor_retry_delay",
+            ),
+            pytest.param(
+                "SHADOW9_AUTH_REQUIRE_AUTH",
+                "auth",
+                "require_auth",
+                "false",
+                False,
+                id="auth_required",
+            ),
+            pytest.param(
+                "SHADOW9_AUTH_CREDENTIALS_FILE",
+                "auth",
+                "credentials_file",
+                "private/users.enc",
+                "private/users.enc",
+                id="credentials_file",
+            ),
+            pytest.param(
+                "SHADOW9_AUTH_MAX_FAILED_ATTEMPTS",
+                "auth",
+                "max_failed_attempts",
+                "8",
+                8,
+                id="max_failed_attempts",
+            ),
+            pytest.param(
+                "SHADOW9_AUTH_LOCKOUT_DURATION_MINUTES",
+                "auth",
+                "lockout_duration_minutes",
+                "0",
+                0,
+                id="lockout_duration",
+            ),
+            pytest.param(
+                "SHADOW9_AUTH_MAX_CONCURRENT_AUTH",
+                "auth",
+                "max_concurrent_auth",
+                "2",
+                2,
+                id="max_concurrent_auth",
+            ),
+            pytest.param(
+                "SHADOW9_LOG_LEVEL", "log", "level", "debug", "DEBUG", id="log_level"
+            ),
+            pytest.param(
+                "SHADOW9_LOG_FORMAT",
+                "log",
+                "format",
+                "console",
+                "console",
+                id="log_format",
+            ),
+            pytest.param(
+                "SHADOW9_LOG_FILE",
+                "log",
+                "file",
+                "logs/test.log",
+                "logs/test.log",
+                id="log_file",
+            ),
+            pytest.param(
+                "SHADOW9_SECURITY_ALLOWED_PORTS",
+                "security",
+                "allowed_ports",
+                "[53, 853]",
+                [53, 853],
+                id="allowed_ports",
+            ),
+            pytest.param(
+                "SHADOW9_SECURITY_BLOCKED_HOSTS",
+                "security",
+                "blocked_hosts",
+                '["example.com", "invalid.example"]',
+                ["example.com", "invalid.example"],
+                id="blocked_hosts",
+            ),
+            pytest.param(
+                "SHADOW9_SECURITY_ALLOW_LOCALHOST",
+                "security",
+                "allow_localhost",
+                "true",
+                True,
+                id="allow_localhost",
+            ),
+            pytest.param(
+                "SHADOW9_SECURITY_RATE_LIMIT_PER_MINUTE",
+                "security",
+                "rate_limit_per_minute",
+                "55",
+                55,
+                id="rate_limit",
+            ),
+            pytest.param(
+                "SHADOW9_SECURITY_BLOCK_PRIVATE_RANGES",
+                "security",
+                "block_private_ranges",
+                "false",
+                False,
+                id="block_private_ranges",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_ENABLED",
+                "wireguard",
+                "enabled",
+                "true",
+                True,
+                id="wireguard_enabled",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_INTERFACE",
+                "wireguard",
+                "interface",
+                "s9hub",
+                "s9hub",
+                id="wireguard_interface",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_LISTEN_PORT",
+                "wireguard",
+                "listen_port",
+                "51999",
+                51999,
+                id="wireguard_listen_port",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_ENROLLMENT_HOST",
+                "wireguard",
+                "enrollment_host",
+                "192.0.2.9",
+                "192.0.2.9",
+                id="wireguard_enrollment_host",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_ENROLLMENT_PORT",
+                "wireguard",
+                "enrollment_port",
+                "8199",
+                8199,
+                id="wireguard_enrollment_port",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_TUNNEL_NETWORK",
+                "wireguard",
+                "tunnel_network",
+                "10.77.0.0/24",
+                "10.77.0.0/24",
+                id="wireguard_tunnel_network",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_HUB_ENDPOINT",
+                "wireguard",
+                "hub_endpoint",
+                "203.0.113.9:51999",
+                "203.0.113.9:51999",
+                id="wireguard_hub_endpoint",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_MTU",
+                "wireguard",
+                "mtu",
+                "1380",
+                1380,
+                id="wireguard_mtu",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_DNS",
+                "wireguard",
+                "dns",
+                "10.77.0.1, 10.77.0.2",
+                ["10.77.0.1", "10.77.0.2"],
+                id="wireguard_dns",
+            ),
+            pytest.param(
+                "SHADOW9_WIREGUARD_KEEPALIVE",
+                "wireguard",
+                "keepalive",
+                "15",
+                15,
+                id="wireguard_keepalive",
+            ),
+        ],
+    )
+    def test_both_config_systems_read_the_same_value(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        name: str,
+        section: str,
+        field_name: str,
+        raw: str,
+        expected: object,
+    ) -> None:
+        monkeypatch.setenv(name, raw)
+        config_file = write_config(tmp_path / "config.yaml", {})
+
+        proxy = Config.load(config_file)
+        api = Settings.load_from_yaml(config_file)
+
+        assert getattr(getattr(proxy, section), field_name) == expected
+        assert getattr(getattr(api, section), field_name) == expected
+
+    @pytest.mark.parametrize(
+        ("name", "bad"),
+        [
+            pytest.param("SHADOW9_MAX_CONNECTIONS", "lots", id="integer"),
+            pytest.param("SHADOW9_TOR_ENABLED", "sometimes", id="boolean"),
+            pytest.param("SHADOW9_TOR_RETRY_DELAY", "soon", id="decimal"),
+            pytest.param("SHADOW9_SECURITY_ALLOWED_PORTS", "not-json", id="list"),
+        ],
+    )
+    def test_a_malformed_value_names_its_variable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        name: str,
+        bad: str,
+    ) -> None:
+        monkeypatch.setenv(name, bad)
+        config_file = write_config(tmp_path / "config.yaml", {})
+
+        with pytest.raises(ValueError, match=name):
+            Config.load(config_file)
+
+
 class TestConfigContract:
     """Both config modules agree on names, units and defaults."""
 
@@ -749,6 +1031,15 @@ class TestTheWireguardEnvironmentVariables:
         config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
 
         with pytest.raises(ValueError, match=name):
+            Config.load(config_file)
+
+    def test_a_hub_endpoint_without_a_host_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("SHADOW9_WIREGUARD_HUB_ENDPOINT", ":51820")
+        config_file = write_config(tmp_path / "config.yaml", FULL_CONFIG)
+
+        with pytest.raises(ValueError, match="port but no address"):
             Config.load(config_file)
 
 
