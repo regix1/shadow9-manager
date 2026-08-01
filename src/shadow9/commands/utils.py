@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Annotated, NamedTuple
 
@@ -139,7 +139,7 @@ def _save_key_backup(root: Path, files: tuple[KeyFile, ...], env_text: str) -> P
                 continue
             staging_dir = candidate
 
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
         entries: list[BackupEntry] = []
         for key_file in files:
             stored_file = staging_dir / key_file.name
@@ -1412,7 +1412,7 @@ def _write_update_record(repo_root: Path, commit: str, version: str) -> None:
     record = UpdateRecord(
         commit=commit,
         version=version,
-        recorded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        recorded_at=datetime.now(UTC).isoformat(timespec="seconds"),
     )
     try:
         write_file_safely(_update_record_path(repo_root), json.dumps(record._asdict()).encode())

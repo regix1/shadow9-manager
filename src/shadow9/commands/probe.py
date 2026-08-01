@@ -36,7 +36,7 @@ async def _something_is_listening(host: str, port: int) -> bool:
         _, writer = await asyncio.wait_for(
             asyncio.open_connection(probe_host, port), timeout=PROBE_TIMEOUT
         )
-    except (OSError, asyncio.TimeoutError) as error:
+    except (TimeoutError, OSError) as error:
         logger.debug(
             "Configured service did not accept a probe connection",
             host=probe_host,
@@ -48,7 +48,7 @@ async def _something_is_listening(host: str, port: int) -> bool:
     writer.close()
     try:
         await asyncio.wait_for(writer.wait_closed(), timeout=PROBE_TIMEOUT)
-    except (OSError, asyncio.TimeoutError):
+    except (TimeoutError, OSError):
         pass
     return True
 

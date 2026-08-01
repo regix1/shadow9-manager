@@ -182,7 +182,7 @@ class TestSocks5Server:
         # Connection should be closed
         try:
             await asyncio.wait_for(reader.read(100), timeout=1.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         writer.close()
@@ -260,7 +260,7 @@ class TestSocks5ServerResources:
                 try:
                     if await asyncio.wait_for(reader.read(1), timeout=0.2) == b"":
                         refused += 1
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
             assert refused == client_count - max_connections

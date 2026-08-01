@@ -19,7 +19,7 @@ rendered from the same Topology cannot disagree about which subnets exist.
 
 import os
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 import structlog
@@ -56,7 +56,7 @@ CONFIG_FILE_MODE = 0o600
 CONFIG_DIR_MODE = 0o700
 
 
-class PeerRole(str, Enum):
+class PeerRole(StrEnum):
     """What a peer is in the star."""
 
     # The cloud server: the reachable endpoint every spoke dials

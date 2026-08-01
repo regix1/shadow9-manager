@@ -619,7 +619,7 @@ class TorBridgeConnector:
             await asyncio.wait_for(
                 run_tests(), timeout=BRIDGE_SELECTION_TIMEOUT_SECONDS
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "Bridge speed tests reached the selection deadline",
                 timeout=BRIDGE_SELECTION_TIMEOUT_SECONDS,
@@ -1004,7 +1004,7 @@ class TorBridgeConnector:
                             "Tor bootstrap complete (connection test)", socks_port=self.socks_port
                         )
                         return
-                except (ConnectionRefusedError, asyncio.TimeoutError):
+                except (TimeoutError, ConnectionRefusedError):
                     pass
 
             await asyncio.sleep(1)

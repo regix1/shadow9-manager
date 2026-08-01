@@ -15,7 +15,7 @@ from contextlib import suppress
 from datetime import datetime
 from enum import IntEnum
 from dataclasses import dataclass
-from typing import Optional, Callable, Awaitable, TypeVar
+from typing import Optional, Callable, Awaitable
 from ipaddress import ip_address, IPv4Address, IPv6Address
 
 import structlog
@@ -99,13 +99,9 @@ class RateLimitState:
     window_start: float = 0.0
 
 
-_TrackingKey = TypeVar("_TrackingKey")
-_TrackingValue = TypeVar("_TrackingValue")
-
-
-def _prune_tracking(
-    tracked: dict[_TrackingKey, _TrackingValue],
-    touched_at: Callable[[_TrackingValue], float],
+def _prune_tracking[K, V](
+    tracked: dict[K, V],
+    touched_at: Callable[[V], float],
     expiry_cutoff: float,
     max_entries: int,
 ) -> None:
@@ -642,7 +638,7 @@ class Socks5Server:
                 await asyncio.wait_for(
                     self.refresh_blocked_addresses(), timeout=self.CONNECTION_TIMEOUT
                 )
-            except (asyncio.TimeoutError, OSError) as e:
+            except (TimeoutError, OSError) as e:
                 logger.warning(
                     "Blocked hosts were not resolved before the server opened",
                     error=str(e),
@@ -1027,7 +1023,7 @@ class Socks5Server:
             # Relay data between client and target
             await self._relay(reader, writer, target_reader, target_writer, conn_info, dpi_bypass)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._log_if_allowed("warning", "Connection timeout", username=username, client=conn_id)
             await self._send_reply(writer, Socks5Reply.TTL_EXPIRED)
         except asyncio.IncompleteReadError:
@@ -1593,7 +1589,7 @@ class Socks5Server:
             try:
                 writer.write_eof()
                 await asyncio.wait_for(writer.drain(), timeout=self.CONNECTION_TIMEOUT)
-            except (asyncio.TimeoutError, ConnectionError, OSError, NotImplementedError):
+            except (TimeoutError, ConnectionError, OSError, NotImplementedError):
                 writer.close()
 
         async def relay_to_target() -> None:
@@ -1636,7 +1632,7 @@ class Socks5Server:
                                         ),
                                         timeout=remaining_time,
                                     )
-                                except asyncio.TimeoutError:
+                                except TimeoutError:
                                     break
                                 if not more:
                                     break
@@ -1659,7 +1655,7 @@ class Socks5Server:
                                                 client_reader.read(record_size - len(first_record)),
                                                 timeout=remaining_time,
                                             )
-                                        except asyncio.TimeoutError:
+                                        except TimeoutError:
                                             break
                                         if not more:
                                             break
@@ -1690,7 +1686,7 @@ class Socks5Server:
                         )
                         conn_info.bytes_sent += len(data)
                 await send_eof(target_writer)
-            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+            except (TimeoutError, ConnectionError, OSError) as e:
                 self._log_if_allowed(
                     "debug",
                     "Relay to target ended",
@@ -1715,7 +1711,7 @@ class Socks5Server:
                     await asyncio.wait_for(client_writer.drain(), timeout=self.CONNECTION_TIMEOUT)
                     conn_info.bytes_received += len(data)
                 await send_eof(client_writer)
-            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+            except (TimeoutError, ConnectionError, OSError) as e:
                 self._log_if_allowed(
                     "debug",
                     "Relay to client ended",
@@ -1850,7 +1846,7 @@ class Socks5Server:
                     loop.getaddrinfo(entry, None, type=socket.SOCK_STREAM),
                     timeout=self.BLOCKED_HOST_RESOLVE_TIMEOUT,
                 )
-        except (OSError, asyncio.TimeoutError) as e:
+        except (TimeoutError, OSError) as e:
             logger.warning(
                 "Blocked host did not resolve, keeping its last known addresses",
                 host=entry,
@@ -2012,10 +2008,10 @@ class Socks5Server:
             self.max_failed_attempts * self.ACCOUNT_ATTEMPT_FACTOR,
         )
 
-    def _spent_attempts(
+    def _spent_attempts[K](
         self,
-        tracked: dict[_TrackingKey, LockoutState],
-        key: _TrackingKey,
+        tracked: dict[K, LockoutState],
+        key: K,
         limit: int,
     ) -> bool:
         """Whether this key is over the attempt limit and still inside the lockout window."""

@@ -4,8 +4,8 @@ User domain models with strong typing using Pydantic.
 These models provide runtime validation and type safety for user-related data.
 """
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import datetime, UTC
+from enum import StrEnum
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -17,7 +17,7 @@ from ..wireguard.render import PeerRole
 
 def utc_now() -> datetime:
     """The current time, carrying UTC rather than leaving the zone to be guessed."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _stored_time(value: datetime) -> str:
@@ -30,17 +30,17 @@ def _stored_time(value: datetime) -> str:
     keeps the bytes on disk identical while the models stay zone-aware.
     """
     if value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        value = value.astimezone(UTC).replace(tzinfo=None)
     return value.isoformat()
 
 
 def _loaded_time(value: str) -> datetime:
     """Read a stored timestamp back, reading a missing zone as the UTC it always was."""
     parsed = datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-class SecurityLevel(str, Enum):
+class SecurityLevel(StrEnum):
     """Security/evasion levels for traffic analysis protection."""
 
     NONE = "none"
@@ -49,7 +49,7 @@ class SecurityLevel(str, Enum):
     PARANOID = "paranoid"
 
 
-class BridgeType(str, Enum):
+class BridgeType(StrEnum):
     """Tor bridge types for bypassing censorship."""
 
     NONE = "none"

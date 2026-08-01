@@ -3,7 +3,7 @@ Tests for Pydantic domain models.
 """
 
 import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from pydantic import ValidationError
 
 from shadow9.auth import Credential as StoredCredential
@@ -167,7 +167,7 @@ class TestUserModels:
         cred = Credential(
             username="test_user",
             password_hash="hash123",
-            created_at=datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 15, 10, 30, tzinfo=UTC),
         )
         data = cred.to_dict()
 
@@ -184,7 +184,7 @@ class TestUserModels:
             }
         )
 
-        assert cred.created_at == datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc)
+        assert cred.created_at == datetime(2024, 1, 15, 10, 30, tzinfo=UTC)
 
 
 class TestServerModels:
@@ -348,7 +348,7 @@ class TestPeerSettingsOnTheUserModel:
         )
 
         assert credential.wg_role is PeerRole.NODE
-        assert credential.wg_expires_at == datetime(2027, 1, 1, tzinfo=timezone.utc)
+        assert credential.wg_expires_at == datetime(2027, 1, 1, tzinfo=UTC)
         assert credential.wg_address == "10.9.0.2"
 
     def test_a_user_who_is_not_a_peer_round_trips_with_no_peer_settings(self):

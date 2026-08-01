@@ -11,7 +11,7 @@ from typing import Iterator
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Optional
 
 from fastapi.testclient import TestClient
@@ -35,7 +35,7 @@ def _utc_now() -> datetime:
     "+00:00" offset that the model does not, so a record built here with one would be a
     shape the application never writes.
     """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class TestListenerLaunch:

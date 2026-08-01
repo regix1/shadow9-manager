@@ -104,7 +104,7 @@ class Socks5Client:
                 target=f"{target_host}:{target_port}",
             )
 
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise Socks5ConnectionError("Connection timeout") from e
         except Exception:
             await self.close()

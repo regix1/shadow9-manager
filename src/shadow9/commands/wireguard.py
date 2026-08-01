@@ -26,7 +26,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Optional, cast
@@ -1930,7 +1930,7 @@ def _latest_handshakes(interface: str) -> dict[str, str]:
         if seconds <= 0:
             handshakes[parts[0]] = "never"
         else:
-            handshakes[parts[0]] = datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+            handshakes[parts[0]] = datetime.fromtimestamp(seconds, UTC).isoformat()
 
     return handshakes
 

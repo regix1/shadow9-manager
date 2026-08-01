@@ -196,7 +196,7 @@ class TorConnector:
             writer.close()
             await writer.wait_closed()
             return True
-        except (ConnectionRefusedError, asyncio.TimeoutError, OSError):
+        except (TimeoutError, ConnectionRefusedError, OSError):
             return False
 
     async def _verify_tor_connection(self) -> None:

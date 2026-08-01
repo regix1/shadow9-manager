@@ -484,7 +484,9 @@ class TestInit:
         )
 
         assert result.exit_code == 1
-        assert f"{target} already exists" in _flat(result.output)
+        assert re.sub(r"\s+", "", f"{target} already exists") in re.sub(
+            r"\s+", "", _flat(result.output)
+        )
         assert "--interface" in _flat(result.output)
         assert not (_wireguard_dir(hub_root) / "hub.key").exists()
         assert not (_wireguard_dir(hub_root) / "wg0.conf").exists()

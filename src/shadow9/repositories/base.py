@@ -3,16 +3,12 @@ Base repository interface defining CRUD operations.
 """
 
 from abc import ABC, abstractmethod
-from typing import Generic, Optional, TypeVar
+from typing import Optional
 
 from pydantic import BaseModel
 
 
-T = TypeVar("T", bound=BaseModel)
-ID = TypeVar("ID")
-
-
-class Repository(ABC, Generic[T, ID]):
+class Repository[T: BaseModel, ID](ABC):
     """
     Abstract base repository defining standard CRUD operations.
 

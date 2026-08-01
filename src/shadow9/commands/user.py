@@ -6,7 +6,7 @@ Contains all user subcommands: generate, remove, list, info, modify, enable, dis
 
 from pathlib import Path
 from typing import Optional, Annotated
-from enum import Enum
+from enum import StrEnum
 
 import typer
 from rich.console import Console
@@ -22,14 +22,14 @@ from ..wizards import run_user_modify_wizard, run_user_list_wizard, display_user
 console = Console()
 
 
-class SecurityChoice(str, Enum):
+class SecurityChoice(StrEnum):
     none = "none"
     basic = "basic"
     moderate = "moderate"
     paranoid = "paranoid"
 
 
-class BridgeChoice(str, Enum):
+class BridgeChoice(StrEnum):
     none = "none"
     obfs4 = "obfs4"
     snowflake = "snowflake"

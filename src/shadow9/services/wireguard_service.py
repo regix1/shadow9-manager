@@ -25,7 +25,7 @@ import re
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, fields, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from json import JSONDecodeError, dumps, loads
 from operator import attrgetter
 from pathlib import Path
@@ -340,7 +340,7 @@ def utc_now() -> datetime:
     Returns:
         An aware datetime in UTC
     """
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def hub_key_path() -> Path:
@@ -1629,7 +1629,7 @@ def _expiry_passed(expires_at: str) -> bool:
         return True
 
     if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=timezone.utc)
+        deadline = deadline.replace(tzinfo=UTC)
     return deadline <= utc_now()
 
 

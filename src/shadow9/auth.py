@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 from dataclasses import dataclass, asdict, field, fields, replace
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from argon2 import PasswordHasher, extract_parameters
 from argon2.exceptions import VerifyMismatchError, InvalidHash
@@ -212,7 +212,7 @@ def _utc_now_text() -> str:
     without one whatever the clock said. Dropping the offset keeps the stored bytes
     identical to what is already on disk.
     """
-    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    return datetime.now(UTC).replace(tzinfo=None).isoformat()
 
 
 def _checked_timestamp(value: object, field: str) -> str:
@@ -250,7 +250,7 @@ def _checked_timestamp(value: object, field: str) -> str:
         raise ValueError(f"{field} is not a time: {value!r}") from None
 
     if moment.tzinfo is not None:
-        moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+        moment = moment.astimezone(UTC).replace(tzinfo=None)
 
     return moment.isoformat()
 

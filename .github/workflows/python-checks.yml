@@ -31,7 +31,7 @@ jobs:
     name: Check Python
     runs-on: ubuntu-latest
     env:
-      RUFF_CEILING: 561
+      RUFF_CEILING: 524
       MYPY_CEILING: 90
     steps:
       - uses: actions/checkout@v7
