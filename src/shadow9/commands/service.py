@@ -7,7 +7,6 @@ Manages Shadow9 as a systemd service on Linux.
 import os
 import sys
 import subprocess
-import shutil
 from pathlib import Path
 from typing import Annotated
 
@@ -52,15 +51,7 @@ def register_service_commands(app: typer.Typer):
         paths = get_paths()
         install_path = str(paths.root)
 
-        # Find Python executable - prefer venv if it exists, otherwise use system Python
-        venv_python = Path(install_path) / "venv" / "bin" / "python"
-        if venv_python.exists():
-            python_exec = str(venv_python)
-            python_path = f"{install_path}/venv/bin:/usr/local/bin:/usr/bin:/bin"
-        else:
-            # Use system Python
-            python_exec = shutil.which("python3") or shutil.which("python") or sys.executable
-            python_path = "/usr/local/bin:/usr/bin:/bin"
+        python_path = f"{install_path}/venv/bin:/usr/local/bin:/usr/bin:/bin"
 
         # Get master key from paths module (checks env var and .env file)
         master_key = load_master_key()
@@ -139,7 +130,7 @@ Environment="PYTHONPATH={install_path}/src"
 Environment="SHADOW9_HOME={install_path}"
 # The unit is world readable, so the key stays in the 0600 file systemd reads as root.
 EnvironmentFile={paths.env_file}
-ExecStart={python_exec} -m shadow9.cli serve --host {host} --port {port}
+ExecStart={install_path}/shadow9 serve --host {host} --port {port}
 # a clean exit must also come back, so on-failure is not enough
 Restart=always
 RestartSec=5
@@ -200,7 +191,8 @@ WantedBy=multi-user.target
                 symlink_path.unlink()
             elif symlink_path.exists():
                 console.print(
-                    f"[yellow]Warning: {symlink_path} exists and is not a symlink, skipping[/yellow]"
+                    f"[yellow]Warning: {symlink_path} exists and is not a symlink, "
+                    "skipping[/yellow]"
                 )
                 global_cmd = False
 
@@ -236,9 +228,8 @@ WantedBy=multi-user.target
             console.print("[yellow]Service is not installed[/yellow]")
             raise typer.Exit(0)
 
-        if not yes:
-            if not typer.confirm("Uninstall Shadow9 service?"):
-                raise typer.Abort()
+        if not yes and not typer.confirm("Uninstall Shadow9 service?"):
+            raise typer.Abort()
 
         # Stop and disable service
         subprocess.run(["systemctl", "stop", SERVICE_NAME], capture_output=True)

@@ -117,6 +117,10 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "shadow9"\nversion = "1.2.3"\n', encoding="utf-8"
     )
+    venv_python = utils._venv_python(tmp_path)
+    venv_python.parent.mkdir(parents=True)
+    venv_python.touch()
+    monkeypatch.setattr(utils, "SERVICE_FILE", str(tmp_path / "shadow9.service"))
 
     def find_repo_root() -> Path:
         return tmp_path
@@ -708,10 +712,40 @@ class TestDependencies:
         tools: set[str],
         repo: Path,
     ) -> None:
-        """Packages land in the interpreter that will run the server, not on PATH."""
+        """Packages land in the checkout environment that will run the server."""
         update_command()
 
-        assert [sys.executable, "-m", "pip", "install", "-e", ".", "-q"] in stub.calls
+        assert [
+            str(utils._venv_python(repo)),
+            "-m",
+            "pip",
+            "install",
+            "-e",
+            ".",
+            "-q",
+        ] in stub.calls
+
+    def test_an_unsupported_python_stops_before_local_work_is_discarded(
+        self,
+        update_command: Callable[..., None],
+        stub: StubProcess,
+        tools: set[str],
+        repo: Path,
+    ) -> None:
+        """The incoming floor is checked while the checkout and server are untouched."""
+        stub.outcome(
+            "show origin/main:pyproject.toml",
+            0,
+            '[project]\nrequires-python = ">=99.0"\n',
+        )
+        stub.outcome("status --porcelain", 0, " M setup\n")
+
+        with pytest.raises(typer.Exit):
+            update_command(force=True)
+
+        assert calls_with(stub, "status --porcelain") == []
+        assert calls_with(stub, "reset --hard") == []
+        assert calls_with(stub, "systemctl stop") == []
 
     def test_install_retries_for_a_distro_managed_interpreter(
         self,
@@ -720,15 +754,53 @@ class TestDependencies:
         tools: set[str],
         repo: Path,
     ) -> None:
-        """A refused system install is retried with the flag that allows it."""
-        stub.outcome("pip install", 1, "", "externally-managed-environment")
-        stub.outcome("pip install", 0)
+        """Debian's split-out venv support is installed before creation is retried."""
+        utils._venv_python(repo).unlink()
+        tools.add("apt-get")
+        stub.outcome("-m venv", 1, "", "ensurepip is not available")
+        stub.outcome("-m venv", 0)
 
         update_command()
 
-        retried = calls_with(stub, "--break-system-packages")
-        assert len(retried) == 1
-        assert retried[0][0] == sys.executable
+        assert calls_with(stub, "apt-get install -y python3-venv")
+        assert len(calls_with(stub, "-m venv")) == 2
+        assert calls_with(stub, "--break-system-packages") == []
+
+    def test_a_failed_venv_install_does_not_write_to_the_system_interpreter(
+        self,
+        update_command: Callable[..., None],
+        stub: StubProcess,
+        tools: set[str],
+        repo: Path,
+    ) -> None:
+        """PEP 668 remains intact even when dependency installation fails."""
+        stub.outcome("pip install", 1, "", "externally-managed-environment")
+
+        with pytest.raises(typer.Exit):
+            update_command()
+
+        assert calls_with(stub, "--break-system-packages") == []
+
+    def test_an_existing_service_is_moved_to_the_checkout_wrapper(
+        self,
+        update_command: Callable[..., None],
+        stub: StubProcess,
+        tools: set[str],
+        repo: Path,
+    ) -> None:
+        """The service enters through the wrapper so it uses the same venv as the command."""
+        service_file = Path(utils.SERVICE_FILE)
+        service_file.write_text(
+            f"WorkingDirectory={repo}\n"
+            "ExecStart=/usr/bin/python3 -m shadow9.cli serve --host 127.0.0.1 --port 1080\n",
+            encoding="utf-8",
+        )
+
+        update_command()
+
+        unit = service_file.read_text(encoding="utf-8")
+        assert f"ExecStart={repo / 'shadow9'} serve --host 127.0.0.1 --port 1080" in unit
+        assert calls_with(stub, "systemctl daemon-reload")
 
     def test_install_happens_after_the_pull(
         self,

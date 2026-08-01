@@ -10,7 +10,6 @@ import os
 import secrets
 from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass, field, fields, asdict
 
 import yaml
@@ -80,13 +79,13 @@ class TorConfig:
     socks_host: str = "127.0.0.1"
     socks_port: int = 9050
     control_port: int = 9051
-    control_password: Optional[str] = None
+    control_password: str | None = None
     auto_detect: bool = True
     retry_attempts: int = 3
     retry_delay: float = 5.0
 
 
-def _permit_count_error(value: Optional[int]) -> Optional[str]:
+def _permit_count_error(value: int | None) -> str | None:
     """What is wrong with an auth.max_concurrent_auth, or None when nothing is.
 
     Zero builds a permit pool nothing can ever take from, so the proxy binds its port,
@@ -190,7 +189,7 @@ class AuthConfig:
     """Authentication configuration."""
 
     require_auth: bool = True
-    credentials_file: Optional[str] = None  # None = use paths module default
+    credentials_file: str | None = None  # None = use paths module default
     master_key_env: str = "SHADOW9_MASTER_KEY"
     max_failed_attempts: int = 5
     lockout_duration_minutes: int = 15
@@ -198,7 +197,7 @@ class AuthConfig:
     # times 64 MB is the peak password hashing can reach. None means work it out from
     # the memory this process is allowed to use, which is the only answer that is right
     # on both a 1 GB VPS and a 64 GB host. A number set here is used exactly as written.
-    max_concurrent_auth: Optional[int] = None
+    max_concurrent_auth: int | None = None
 
     def __post_init__(self) -> None:
         # Refused at the boundary rather than reported by validate(), which returns a
@@ -216,7 +215,7 @@ class LogConfig:
 
     level: str = "INFO"
     format: str = "json"  # json or console
-    file: Optional[str] = None
+    file: str | None = None
     max_size_mb: int = 10
     backup_count: int = 3
 
@@ -243,14 +242,14 @@ class SecurityConfig:
     max_request_size: int = 1048576  # 1MB
 
 
-def _wireguard_listen_port_error(value: int) -> Optional[str]:
+def _wireguard_listen_port_error(value: int) -> str | None:
     """What is wrong with a wireguard.listen_port, or None when nothing is."""
     if 1 <= value <= 65535:
         return None
     return f"wireguard.listen_port must be between 1 and 65535, got {value}"
 
 
-def _wireguard_enrollment_port_error(value: int) -> Optional[str]:
+def _wireguard_enrollment_port_error(value: int) -> str | None:
     """What is wrong with a wireguard.enrollment_port, or None when nothing is."""
     if 1 <= value <= 65535:
         return None
@@ -258,7 +257,7 @@ def _wireguard_enrollment_port_error(value: int) -> Optional[str]:
 
 
 def listener_port_errors(
-    api_port: Optional[int], enrollment_port: int, socks_port: int
+    api_port: int | None, enrollment_port: int, socks_port: int
 ) -> list[str]:
     """Name every pair of inbound listeners configured on the same port."""
     listeners = [
@@ -282,17 +281,24 @@ def listener_port_errors(
 def _is_private_tunnel_range(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
     """Whether peer addresses may be handed out of this network.
 
-    100.64.0.0/10 is the shared address space of RFC 6598. It is not globally routable, it
-    is the range Tailscale hands out, and only Python 3.12.4 and later count it as
-    private, so naming it here keeps the answer the same on every interpreter this runs on.
+    ``ipaddress.is_private`` changed its answer for the default route between supported
+    Python releases. Naming the ranges that are valid for a tunnel keeps a public route
+    from becoming valid or invalid when the host Python is upgraded.
     """
-    if network.is_private:
-        return True
-    shared = ipaddress.ip_network("100.64.0.0/10")
-    return network.version == 4 and network.subnet_of(shared)
+    private_ranges = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+        ipaddress.ip_network("100.64.0.0/10"),
+        ipaddress.ip_network("fc00::/7"),
+    )
+    return any(
+        network.version == private.version and network.subnet_of(private)
+        for private in private_ranges
+    )
 
 
-def _wireguard_tunnel_network_error(value: str) -> Optional[str]:
+def _wireguard_tunnel_network_error(value: str) -> str | None:
     """What is wrong with a wireguard.tunnel_network, or None when nothing is.
 
     A public range hands peers addresses that belong to someone else, and every packet
@@ -312,7 +318,7 @@ def _wireguard_tunnel_network_error(value: str) -> Optional[str]:
     )
 
 
-def _wireguard_mtu_error(value: int) -> Optional[str]:
+def _wireguard_mtu_error(value: int) -> str | None:
     """What is wrong with a wireguard.mtu, or None when nothing is.
 
     1280 is the smallest MTU an IPv6 link is allowed to carry, so below it the tunnel
@@ -325,7 +331,7 @@ def _wireguard_mtu_error(value: int) -> Optional[str]:
     return f"wireguard.mtu must be between 1280 and 1440, got {value}"
 
 
-def _wireguard_keepalive_error(value: int) -> Optional[str]:
+def _wireguard_keepalive_error(value: int) -> str | None:
     """What is wrong with a wireguard.keepalive, or None when nothing is."""
     if 0 <= value <= 65535:
         return None
@@ -336,7 +342,7 @@ def _wireguard_keepalive_error(value: int) -> Optional[str]:
 
 
 def _wireguard_number_from_env(
-    name: str, raw: str, error_of: Callable[[int], Optional[str]]
+    name: str, raw: str, error_of: Callable[[int], str | None]
 ) -> int:
     """Read a WireGuard number out of the environment, refusing what a file would refuse.
 
@@ -461,7 +467,7 @@ class Config:
         return self.resolve_path(self.auth.credentials_file)
 
     @classmethod
-    def load(cls, config_file: Optional[Path] = None) -> "Config":
+    def load(cls, config_file: Path | None = None) -> "Config":
         """
         Load configuration from file.
 
@@ -475,7 +481,7 @@ class Config:
 
         if config_file and config_file.exists():
             try:
-                with open(config_file, "r") as f:
+                with open(config_file) as f:
                     data = yaml.safe_load(f)
 
                 if data:
@@ -709,9 +715,8 @@ class Config:
             errors.append("max_connections must be positive")
 
         # Validate tor config
-        if self.tor.enabled:
-            if self.tor.socks_port < 1 or self.tor.socks_port > 65535:
-                errors.append(f"Invalid Tor SOCKS port: {self.tor.socks_port}")
+        if self.tor.enabled and (self.tor.socks_port < 1 or self.tor.socks_port > 65535):
+            errors.append(f"Invalid Tor SOCKS port: {self.tor.socks_port}")
 
         # Validate auth config
         if self.auth.require_auth and self.auth.max_failed_attempts < 1:

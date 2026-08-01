@@ -31,14 +31,14 @@ jobs:
     name: Check Python
     runs-on: ubuntu-latest
     env:
-      RUFF_CEILING: 524
+      RUFF_CEILING: 455
       MYPY_CEILING: 90
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
       - name: Install tools
         run: python -m pip install '.[dev]' 'ruff==0.16.1' 'mypy==2.3.0'

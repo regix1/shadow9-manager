@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Annotated, NamedTuple
@@ -29,7 +30,7 @@ from ..tor_connector import TorConnector, TorConfig
 from ..wizards import run_init_wizard, show_config_summary, show_master_key
 from ..ui import console, header, dependency_table
 from ..ui import success as ui_success, error as ui_error
-from .service import SERVICE_NAME
+from .service import SERVICE_FILE, SERVICE_NAME
 from . import probe
 
 # How old a half-written backup has to be before the next rotation clears it away. It is
@@ -313,9 +314,10 @@ def register_util_commands(app: typer.Typer) -> None:
         """Write a configuration file, asking what to put in it unless quick is set."""
         output_path = Path(output)
 
-        if output_path.exists():
-            if not typer.confirm(f"Configuration file {output} already exists. Overwrite?"):
-                raise typer.Abort()
+        if output_path.exists() and not typer.confirm(
+            f"Configuration file {output} already exists. Overwrite?"
+        ):
+            raise typer.Abort()
 
         # Quick mode: just generate defaults
         if quick:
@@ -436,7 +438,9 @@ def register_util_commands(app: typer.Typer) -> None:
         console.print(
             header(
                 "Shadow9 Proxy Setup",
-                "Installing Tor and bridge transports for\nanonymous SOCKS5 proxy routing.\n\n[dim]sudo may be required[/dim]",
+                "Installing Tor and bridge transports for\n"
+                "anonymous SOCKS5 proxy routing.\n\n"
+                "[dim]sudo may be required[/dim]",
             )
         )
 
@@ -663,6 +667,12 @@ def register_util_commands(app: typer.Typer) -> None:
         if "pyproject.toml" in changed_paths:
             console.print("[yellow]Dependencies changed in this update.[/yellow]")
 
+        python_error = _target_python_error(repo_root, target)
+        if python_error is not None:
+            console.print(f"[red]Error: {python_error}[/red]")
+            console.print("[dim]Nothing was changed and the server was not touched.[/dim]")
+            raise typer.Exit(1)
+
         if check:
             console.print(
                 f"\n[dim]On {version} ({_short(current_commit)}). "
@@ -729,6 +739,12 @@ def register_util_commands(app: typer.Typer) -> None:
         # them, so the install is part of the update rather than a step afterwards.
         console.print("[>] Reinstalling package...")
         if not _install_package(repo_root):
+            console.print("[yellow]Going back to the version that was installed before.[/yellow]")
+            _roll_back(repo_root, current_commit)
+            _start_and_check(repo_root, running)
+            raise typer.Exit(1)
+
+        if not _use_checkout_for_service(repo_root):
             console.print("[yellow]Going back to the version that was installed before.[/yellow]")
             _roll_back(repo_root, current_commit)
             _start_and_check(repo_root, running)
@@ -1382,20 +1398,124 @@ def _start_and_check(repo_root: Path, running: RunningServer) -> bool:
     return False
 
 
-def _install_package(repo_root: Path) -> bool:
-    """Install the checkout into the interpreter that will run the server."""
-    install = [sys.executable, "-m", "pip", "install", "-e", ".", "-q"]
-    result = subprocess.run(install, cwd=repo_root, capture_output=True, text=True)
-    if result.returncode != 0:
-        # A distro-managed interpreter refuses every install without this.
-        result = subprocess.run(
-            [*install, "--break-system-packages"], cwd=repo_root, capture_output=True, text=True
+def _venv_python(repo_root: Path) -> Path:
+    """The interpreter owned by this checkout."""
+    if sys.platform == "win32":
+        return repo_root / "venv" / "Scripts" / "python.exe"
+    return repo_root / "venv" / "bin" / "python"
+
+
+def _target_python_error(repo_root: Path, target: str) -> str | None:
+    """Explain when this interpreter is below the incoming package's declared floor."""
+    result = _git(repo_root, "show", f"{target}:pyproject.toml")
+    if result.returncode != 0 or not result.stdout:
+        return None
+    try:
+        project = tomllib.loads(result.stdout)["project"]
+        requirement = str(project["requires-python"])
+    except (KeyError, TypeError, tomllib.TOMLDecodeError):
+        return None
+
+    floors = [
+        tuple(int(part) for part in match.groups(default="0"))
+        for match in re.finditer(r"(?:^|,)\s*>=\s*(\d+)\.(\d+)(?:\.(\d+))?", requirement)
+    ]
+    if not floors or sys.version_info[:3] >= max(floors):
+        return None
+    current = ".".join(str(part) for part in sys.version_info[:3])
+    return f"the update requires Python {requirement}, but this install uses Python {current}"
+
+
+def _create_venv(repo_root: Path) -> bool:
+    """Create the checkout environment, adding Debian's split-out venv support if needed."""
+    python = _venv_python(repo_root)
+    if python.exists():
+        return True
+
+    create = [sys.executable, "-m", "venv", str(repo_root / "venv")]
+    result = subprocess.run(create, cwd=repo_root, capture_output=True, text=True)
+    if (
+        result.returncode != 0
+        and "ensurepip is not available" in f"{result.stdout}\n{result.stderr}".lower()
+        and shutil.which("apt-get")
+    ):
+        console.print("[>] Installing Python virtual-environment support...")
+        package = subprocess.run(
+            privileged(["apt-get", "install", "-y", "python3-venv"]),
+            capture_output=True,
+            text=True,
         )
+        if package.returncode == 0:
+            result = subprocess.run(create, cwd=repo_root, capture_output=True, text=True)
+        else:
+            result = package
+    if result.returncode == 0:
+        return True
+
+    console.print(
+        f"[red]Error: could not create {repo_root / 'venv'}: {result.stderr.strip()}[/red]"
+    )
+    console.print(f"[dim]Install Python's venv support, then run: {' '.join(create)}[/dim]")
+    return False
+
+
+def _install_package(repo_root: Path) -> bool:
+    """Install the checkout into its virtual environment."""
+    if not _create_venv(repo_root):
+        return False
+
+    install = [str(_venv_python(repo_root)), "-m", "pip", "install", "-e", ".", "-q"]
+    result = subprocess.run(install, cwd=repo_root, capture_output=True, text=True)
     if result.returncode == 0:
         return True
 
     console.print(f"[red]Error: dependency install failed: {result.stderr.strip()}[/red]")
     console.print(f"[dim]Run in {repo_root}: {' '.join(install)}[/dim]")
+    return False
+
+
+def _use_checkout_for_service(repo_root: Path) -> bool:
+    """Make an installed service enter through the wrapper that selects the checkout venv."""
+    service_file = Path(SERVICE_FILE)
+    if not service_file.exists():
+        return True
+
+    try:
+        content = service_file.read_text(encoding="utf-8")
+    except OSError as e:
+        console.print(f"[red]Error: cannot read {service_file}: {e}[/red]")
+        return False
+
+    old = next(
+        (
+            line
+            for line in content.splitlines()
+            if line.startswith("ExecStart=") and " serve" in line
+        ),
+        None,
+    )
+    wrapper = str(repo_root / "shadow9")
+    if old is None or old.startswith(f"ExecStart={wrapper} serve"):
+        return True
+
+    serve_args = old.split(" serve", 1)[1]
+    replacement = f"ExecStart={wrapper} serve{serve_args}"
+    try:
+        write_file_safely(
+            service_file,
+            content.replace(old, replacement, 1).encode("utf-8"),
+            mode=0o644,
+        )
+    except OSError as e:
+        console.print(f"[red]Error: cannot update {service_file}: {e}[/red]")
+        return False
+
+    result = subprocess.run(
+        privileged(["systemctl", "daemon-reload"]), capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        return True
+    console.print(f"[red]Error reloading the service unit: {result.stderr.strip()}[/red]")
     return False
 
 

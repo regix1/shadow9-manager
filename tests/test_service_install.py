@@ -155,6 +155,7 @@ def test_installed_unit_does_not_carry_the_master_key(
     assert "SHADOW9_MASTER_KEY=" not in unit
     env_file = paths.get_paths().env_file
     assert f"EnvironmentFile={env_file}" in unit
+    assert f"ExecStart={install_root}/shadow9 serve --host 127.0.0.1 --port 1080" in unit
     assert _saved_master_key(env_file) == MASTER_KEY
 
 

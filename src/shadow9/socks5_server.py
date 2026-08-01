@@ -15,7 +15,8 @@ from contextlib import suppress
 from datetime import datetime
 from enum import IntEnum
 from dataclasses import dataclass
-from typing import Optional, Callable, Awaitable
+from typing import TypeVar
+from collections.abc import Callable, Awaitable
 from ipaddress import ip_address, IPv4Address, IPv6Address
 
 import structlog
@@ -99,7 +100,11 @@ class RateLimitState:
     window_start: float = 0.0
 
 
-def _prune_tracking[K, V](
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+def _prune_tracking(
     tracked: dict[K, V],
     touched_at: Callable[[V], float],
     expiry_cutoff: float,
@@ -126,7 +131,7 @@ class ConnectionInfo:
     client_addr: tuple[str, int]
     target_addr: str
     target_port: int
-    username: Optional[str] = None
+    username: str | None = None
     bytes_sent: int = 0
     bytes_received: int = 0
     # User settings (populated from auth manager)
@@ -212,19 +217,19 @@ class Socks5Server:
         self,
         host: str = "0.0.0.0",
         port: int = 1080,
-        auth_manager: Optional[AuthManager] = None,
-        upstream_proxy: Optional[tuple[str, int]] = None,
-        upstream_proxies: Optional[dict[str, tuple[str, int]]] = None,
-        allowed_commands: Optional[set[Socks5Command]] = None,
+        auth_manager: AuthManager | None = None,
+        upstream_proxy: tuple[str, int] | None = None,
+        upstream_proxies: dict[str, tuple[str, int]] | None = None,
+        allowed_commands: set[Socks5Command] | None = None,
         bridge_base_port: int = 9100,
         max_connections: int = 100,
         connection_timeout: int | None = None,
         relay_timeout: int | None = None,
         buffer_size: int | None = None,
-        max_concurrent_auth: Optional[int] = None,
+        max_concurrent_auth: int | None = None,
         block_private_ranges: bool = True,
         allow_localhost: bool = False,
-        blocked_hosts: Optional[list[str]] = None,
+        blocked_hosts: list[str] | None = None,
         max_failed_attempts: int = 5,
         lockout_duration_minutes: float = 15,
         rate_limit_per_minute: int = 100,
@@ -286,16 +291,16 @@ class Socks5Server:
         # request.
         self._blocked_addresses_by_host: dict[str, frozenset[str]] = {}
         self._blocked_addresses: frozenset[str] = frozenset()
-        self._blocked_host_watch: Optional[asyncio.Task[None]] = None
+        self._blocked_host_watch: asyncio.Task[None] | None = None
         self.max_failed_attempts = max_failed_attempts
         self.rate_limit_per_minute = rate_limit_per_minute
         self._lockout_seconds = lockout_duration_minutes * 60
 
-        self._server: Optional[asyncio.Server] = None
+        self._server: asyncio.Server | None = None
         self._handler_tasks: dict[asyncio.Future[None], asyncio.StreamWriter] = {}
         self._connections: dict[str, ConnectionInfo] = {}
         self._running = False
-        self._started_at: Optional[datetime] = None
+        self._started_at: datetime | None = None
 
         # Each handler holds a slot for its whole lifetime, including the argon2 hash,
         # which reserves 64 MB per verification. Without the cap N simultaneous clients
@@ -330,7 +335,7 @@ class Socks5Server:
         self._auth_slots_initial = self.max_concurrent_auth
         self._parked_auth_slots = 0
         self._budget_watch_stop = threading.Event()
-        self._budget_watch: Optional[threading.Thread] = None
+        self._budget_watch: threading.Thread | None = None
         # One resize at a time. Two of them interleaved would both move
         # _parked_auth_slots and both release the same BoundedSemaphore, and the second
         # release past the initial value raises ValueError inside a daemon thread nobody
@@ -358,7 +363,7 @@ class Socks5Server:
         )
 
         # Connection callback for monitoring
-        self._on_connection: Optional[Callable[[ConnectionInfo], Awaitable[None]]] = None
+        self._on_connection: Callable[[ConnectionInfo], Awaitable[None]] | None = None
 
         # User-specific listeners: port -> (server, username)
         self._user_listeners: dict[int, tuple[asyncio.Server, str]] = {}
@@ -392,7 +397,7 @@ class Socks5Server:
         # User-aware logger for respecting per-user logging preferences
         self._user_logger = UserAwareLogger(auth_manager) if auth_manager else None
 
-    def _should_log_user(self, username: Optional[str]) -> bool:
+    def _should_log_user(self, username: str | None) -> bool:
         """Check if logging is enabled for a user."""
         if username is None or self.auth_manager is None:
             return True
@@ -400,7 +405,7 @@ class Socks5Server:
         return logging_enabled if logging_enabled is not None else True
 
     def _log_if_allowed(
-        self, level: str, event: str, username: Optional[str] = None, **kwargs
+        self, level: str, event: str, username: str | None = None, **kwargs
     ) -> None:
         """Log a message only if the user allows logging."""
         if not self._should_log_user(username):
@@ -755,7 +760,7 @@ class Socks5Server:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-        allowed_user: Optional[str] = None,
+        allowed_user: str | None = None,
     ) -> None:
         """
         Handle a new client connection.
@@ -767,8 +772,8 @@ class Socks5Server:
         """
         client_addr = writer.get_extra_info("peername")
         conn_id = f"{client_addr[0]}:{client_addr[1]}"
-        username: Optional[str] = None
-        target_writer: Optional[asyncio.StreamWriter] = None
+        username: str | None = None
+        target_writer: asyncio.StreamWriter | None = None
 
         # Only log new connection if no user restriction (can't filter yet)
         # For user-specific listeners, we defer logging until we know the user
@@ -787,10 +792,8 @@ class Socks5Server:
                 max_connections=self.max_connections,
             )
             writer.close()
-            try:
+            with suppress(Exception):
                 await writer.wait_closed()
-            except Exception:
-                pass
             return
 
         # Acquired outside the try so a cancelled wait never reaches the release below
@@ -1069,14 +1072,12 @@ class Socks5Server:
                 with suppress(Exception):
                     await target_writer.wait_closed()
             writer.close()
-            try:
+            with suppress(Exception):
                 await writer.wait_closed()
-            except Exception:
-                pass
 
     async def _socks5_handshake(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Perform SOCKS5 handshake with authentication.
 
@@ -1112,7 +1113,7 @@ class Socks5Server:
 
     async def _authenticate(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Perform username/password authentication (RFC 1929).
 
@@ -1210,7 +1211,7 @@ class Socks5Server:
 
     async def _socks5_request(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> Optional[tuple[str, int]]:
+    ) -> tuple[str, int] | None:
         """
         Parse SOCKS5 connection request.
 
@@ -1311,9 +1312,9 @@ class Socks5Server:
         self,
         target_host: str,
         target_port: int,
-        proxy: Optional[tuple[str, int]] = None,
-        socks_username: Optional[str] = None,
-        socks_password: Optional[str] = None,
+        proxy: tuple[str, int] | None = None,
+        socks_username: str | None = None,
+        socks_password: str | None = None,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Connect to target via upstream SOCKS5 proxy.
 
@@ -1448,7 +1449,7 @@ class Socks5Server:
 
         return reader, writer
 
-    async def _get_or_create_bridge_proxy(self, bridge_type: str) -> Optional[tuple[str, int]]:
+    async def _get_or_create_bridge_proxy(self, bridge_type: str) -> tuple[str, int] | None:
         """
         Get existing proxy for bridge_type or create a new Tor instance on demand.
 
@@ -1542,10 +1543,8 @@ class Socks5Server:
                 if self._next_bridge_port == bridge_port + 1:
                     self._next_bridge_port = bridge_port
                 # Cleanup on failure
-                try:
+                with suppress(Exception):
                     await connector.stop()
-                except Exception:
-                    pass
                 return None
 
     async def _drop_bridge_proxy(self, bridge_type: str) -> None:
@@ -1577,7 +1576,7 @@ class Socks5Server:
         target_reader: asyncio.StreamReader,
         target_writer: asyncio.StreamWriter,
         conn_info: ConnectionInfo,
-        dpi_bypass: Optional[DPIBypass] = None,
+        dpi_bypass: DPIBypass | None = None,
     ) -> None:
         """Relay data between client and target with optional DPI bypass."""
 
@@ -1908,8 +1907,8 @@ class Socks5Server:
                 logger.warning("Could not re-resolve the blocked hosts", error=str(e))
 
     async def _resolve_allowed_address(
-        self, host: str, port: int, username: Optional[str]
-    ) -> Optional[list[str]]:
+        self, host: str, port: int, username: str | None
+    ) -> list[str] | None:
         """Resolve a host and return the addresses to connect to, or None if policy
         refuses it.
 
@@ -1967,7 +1966,7 @@ class Socks5Server:
         the resolver happens to list first fails with Network is unreachable, for every
         such name, even though the other family works.
         """
-        last_error: Optional[OSError] = None
+        last_error: OSError | None = None
         for address in addresses:
             try:
                 return await asyncio.open_connection(address, port)
@@ -2008,7 +2007,7 @@ class Socks5Server:
             self.max_failed_attempts * self.ACCOUNT_ATTEMPT_FACTOR,
         )
 
-    def _spent_attempts[K](
+    def _spent_attempts(
         self,
         tracked: dict[K, LockoutState],
         key: K,
@@ -2125,6 +2124,6 @@ class Socks5Server:
         return len(self._connections)
 
     @property
-    def started_at(self) -> Optional[datetime]:
+    def started_at(self) -> datetime | None:
         """When the server started accepting connections, or None while it is stopped."""
         return self._started_at

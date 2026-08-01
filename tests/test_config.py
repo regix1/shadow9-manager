@@ -1048,10 +1048,10 @@ class TestWireguardValuesThatCannotWork:
 
     @pytest.mark.parametrize("interface", ["", "name with spaces", "sixteencharslong", "túnel"])
     def test_an_interface_name_wireguard_cannot_use_is_refused(self, interface):
-        with pytest.raises(ValueError, match="wireguard.interface"):
+        with pytest.raises(ValueError, match=r"wireguard\.interface"):
             WireguardConfig(interface=interface)
 
-        with pytest.raises(ValidationError, match="wireguard.interface"):
+        with pytest.raises(ValidationError, match=r"wireguard\.interface"):
             WireguardSettings(interface=interface)
 
     @pytest.mark.parametrize("network", ["8.8.8.0/24", "1.1.1.0/24", "0.0.0.0/0"])
@@ -1073,10 +1073,20 @@ class TestWireguardValuesThatCannotWork:
         "network", ["10.9.0.0/24", "172.20.0.0/14", "100.64.0.0/10", "fd09:9::/64"]
     )
     def test_the_ranges_an_operator_would_reach_for_are_allowed(self, network):
-        """100.64.0.0/10 is RFC 6598 shared space, not globally routable, and only some
-        Python versions call it private, so it is named rather than inferred."""
+        """The explicit private, shared, and local ranges work on every Python version."""
         assert WireguardConfig(tunnel_network=network).tunnel_network == network
         assert WireguardSettings(tunnel_network=network).tunnel_network == network
+
+    @pytest.mark.parametrize(
+        "network", ["127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/64"]
+    )
+    def test_ranges_reserved_for_the_host_or_link_are_refused(self, network):
+        """A tunnel must use private address space, not a host-only or link-only range."""
+        with pytest.raises(ValueError, match=network):
+            WireguardConfig(tunnel_network=network)
+
+        with pytest.raises(ValidationError, match="private range"):
+            WireguardSettings(tunnel_network=network)
 
     @pytest.mark.parametrize("network", ["10.9.0.1/24", "not-a-network", ""])
     def test_a_tunnel_network_that_is_not_a_network_is_refused(self, network):

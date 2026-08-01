@@ -15,7 +15,7 @@ import ipaddress
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 import yaml
 from pydantic import Field, PrivateAttr, field_validator, model_validator
@@ -33,7 +33,7 @@ from ..memory_budget import (
     choose_hash_permits,
     read_memory_budget,
 )
-from ..config import listener_port_errors
+from ..config import _is_private_tunnel_range, listener_port_errors
 from ..paths import write_file_safely
 from ..wireguard import DEFAULT_INTERFACE, checked_interface
 from .logging import get_logger
@@ -110,7 +110,7 @@ class AuthSettings(EnvFirstSettings):
     )
 
     require_auth: bool = Field(default=True, description="Require authentication")
-    credentials_file: Optional[str] = Field(
+    credentials_file: str | None = Field(
         default=None, description="Path to credentials file (relative to project root)"
     )
     max_failed_attempts: int = Field(
@@ -119,7 +119,7 @@ class AuthSettings(EnvFirstSettings):
     lockout_duration_minutes: int = Field(
         default=15, ge=0, description="Lockout duration in minutes"
     )
-    max_concurrent_auth: Optional[int] = Field(
+    max_concurrent_auth: int | None = Field(
         default=None,
         ge=1,
         description=(
@@ -167,7 +167,7 @@ class LogSettings(EnvFirstSettings):
 
     level: str = Field(default="INFO", description="Log level")
     format: str = Field(default="json", description="Log format (json, console)")
-    file: Optional[str] = Field(default=None, description="Log file path")
+    file: str | None = Field(default=None, description="Log file path")
 
     @field_validator("level")
     @classmethod
@@ -222,12 +222,12 @@ class ApiSettings(EnvFirstSettings):
     enabled: bool = Field(default=False, description="Enable API server")
     host: str = Field(default="127.0.0.1", description="API host address")
     port: int = Field(default=8080, ge=1, le=65535, description="API port")
-    api_key: Optional[str] = Field(
+    api_key: str | None = Field(
         default=None, description="API key for authentication (stored encrypted)"
     )
 
 
-def _wireguard_tunnel_network_error(value: str) -> Optional[str]:
+def _wireguard_tunnel_network_error(value: str) -> str | None:
     """What is wrong with a wireguard.tunnel_network, or None when nothing is.
 
     A public range hands peers addresses that belong to someone else, and every packet
@@ -238,11 +238,7 @@ def _wireguard_tunnel_network_error(value: str) -> Optional[str]:
         network = ipaddress.ip_network(value, strict=True)
     except ValueError as e:
         return f"wireguard.tunnel_network is not a network: {value!r} ({e})"
-    # 100.64.0.0/10 is the shared address space of RFC 6598. It is not globally routable,
-    # it is the range Tailscale hands out, and only Python 3.12.4 and later count it as
-    # private, so naming it keeps the answer the same on every interpreter this runs on.
-    shared = ipaddress.ip_network("100.64.0.0/10")
-    if network.is_private or (network.version == 4 and network.subnet_of(shared)):
+    if _is_private_tunnel_range(network):
         return None
     return (
         f"wireguard.tunnel_network must be a private range, got {value}. "
@@ -395,7 +391,7 @@ class Settings(BaseSettings):
     wireguard: WireguardSettings = Field(default_factory=WireguardSettings)
 
     # Global settings
-    master_key: Optional[str] = Field(
+    master_key: str | None = Field(
         default=None, description="Master key for credential encryption"
     )
 
@@ -417,7 +413,7 @@ class Settings(BaseSettings):
         data = {}
 
         if config_file.exists():
-            with open(config_file, "r") as f:
+            with open(config_file) as f:
                 data = yaml.safe_load(f) or {}
 
         # Create nested settings from YAML data
@@ -464,7 +460,7 @@ class Settings(BaseSettings):
         """
         data: dict = {}
         if config_file.exists():
-            with open(config_file, "r") as f:
+            with open(config_file) as f:
                 data = yaml.safe_load(f) or {}
 
         modelled = {
@@ -556,9 +552,8 @@ class Settings(BaseSettings):
         if self.server.port < 1 or self.server.port > 65535:
             errors.append(f"Invalid server port: {self.server.port}")
 
-        if self.tor.enabled:
-            if self.tor.socks_port < 1 or self.tor.socks_port > 65535:
-                errors.append(f"Invalid Tor SOCKS port: {self.tor.socks_port}")
+        if self.tor.enabled and (self.tor.socks_port < 1 or self.tor.socks_port > 65535):
+            errors.append(f"Invalid Tor SOCKS port: {self.tor.socks_port}")
 
         # Security validation
         for port in self.security.allowed_ports:
@@ -596,7 +591,7 @@ def api_worker_count() -> int:
     return max(1, workers)
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     """
     Get application settings (cached singleton).
@@ -611,10 +606,7 @@ def get_settings() -> Settings:
     """
     config_file = get_project_root() / "config" / "config.yaml"
 
-    if config_file.exists():
-        settings = Settings.load_from_yaml(config_file)
-    else:
-        settings = Settings()
+    settings = Settings.load_from_yaml(config_file) if config_file.exists() else Settings()
 
     # This process serves the admin API and holds no relay buffers, so nothing is
     # reserved for them here. The budget is divided by the worker count first: this

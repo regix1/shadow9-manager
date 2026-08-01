@@ -3,12 +3,16 @@ Base repository interface defining CRUD operations.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Generic, TypeVar
 
 from pydantic import BaseModel
 
 
-class Repository[T: BaseModel, ID](ABC):
+T = TypeVar("T", bound=BaseModel)
+ID = TypeVar("ID")
+
+
+class Repository(ABC, Generic[T, ID]):
     """
     Abstract base repository defining standard CRUD operations.
 
@@ -33,7 +37,7 @@ class Repository[T: BaseModel, ID](ABC):
         pass
 
     @abstractmethod
-    async def get(self, id: ID) -> Optional[T]:
+    async def get(self, id: ID) -> T | None:
         """
         Get an entity by ID.
 
@@ -46,7 +50,7 @@ class Repository[T: BaseModel, ID](ABC):
         pass
 
     @abstractmethod
-    async def list(self, skip: int = 0, limit: Optional[int] = 100) -> list[T]:
+    async def list(self, skip: int = 0, limit: int | None = 100) -> list[T]:
         """
         List entities with pagination.
 
@@ -60,7 +64,7 @@ class Repository[T: BaseModel, ID](ABC):
         pass
 
     @abstractmethod
-    async def update(self, id: ID, data: dict) -> Optional[T]:
+    async def update(self, id: ID, data: dict) -> T | None:
         """
         Update an entity.
 

@@ -90,7 +90,7 @@ fi
 case "$OS" in
     ubuntu|debian|linuxmint|pop)
         run_privileged apt-get update -qq
-        run_privileged apt-get install -y -qq python3 python3-pip curl 2>/dev/null
+        run_privileged apt-get install -y -qq python3 python3-pip python3-venv curl 2>/dev/null
         ;;
     fedora)
         run_privileged dnf install -y -q python3 python3-pip curl 2>/dev/null
@@ -109,7 +109,9 @@ case "$OS" in
         ;;
     *)
         if [[ "$OS_LIKE" == *"debian"* ]]; then
-            run_privileged apt-get update -qq && run_privileged apt-get install -y -qq python3 python3-pip curl 2>/dev/null
+            run_privileged apt-get update -qq && \
+                run_privileged apt-get install -y -qq \
+                    python3 python3-pip python3-venv curl 2>/dev/null
         elif [[ "$OS_LIKE" == *"rhel"* ]] || [[ "$OS_LIKE" == *"fedora"* ]]; then
             run_privileged yum install -y -q python3 python3-pip curl 2>/dev/null || \
             run_privileged dnf install -y -q python3 python3-pip curl 2>/dev/null
@@ -124,27 +126,23 @@ print_status "$SUCCESS" "System packages ready"
 print_step 2 4 "Python Check"
 PYTHON_CMD="python3"
 command -v python3 &>/dev/null || PYTHON_CMD="python"
-command -v $PYTHON_CMD &>/dev/null || { print_status "$ERROR" "Python 3.10+ required"; exit 1; }
+command -v $PYTHON_CMD &>/dev/null || { print_status "$ERROR" "Python 3.11+ required"; exit 1; }
 
 PYTHON_VER=$($PYTHON_CMD -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 MAJOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.major)')
 MINOR=$($PYTHON_CMD -c 'import sys; print(sys.version_info.minor)')
-[ "$MAJOR" -lt 3 ] || ([ "$MAJOR" -eq 3 ] && [ "$MINOR" -lt 10 ]) && { print_status "$ERROR" "Python 3.10+ required (found $PYTHON_VER)"; exit 1; }
+[ "$MAJOR" -lt 3 ] || ([ "$MAJOR" -eq 3 ] && [ "$MINOR" -lt 11 ]) && { print_status "$ERROR" "Python 3.11+ required (found $PYTHON_VER)"; exit 1; }
 print_status "$SUCCESS" "Python $PYTHON_VER detected"
 
 # Step 3: Install shadow9
 print_step 3 4 "Installing Shadow9"
-PIP_ARGS=""
-pip3 install --help 2>&1 | grep -q "break-system-packages" && PIP_ARGS="--break-system-packages"
-pip3 uninstall shadow9-manager -y 2>/dev/null || true
-
-if is_root; then
-    pip3 install $PIP_ARGS -q -e "$SCRIPT_DIR" 2>/dev/null || pip3 install $PIP_ARGS -e "$SCRIPT_DIR"
-else
-    pip3 install $PIP_ARGS --user -q -e "$SCRIPT_DIR" 2>/dev/null || \
-    sudo pip3 install $PIP_ARGS -q -e "$SCRIPT_DIR" 2>/dev/null || \
-    sudo pip3 install $PIP_ARGS -e "$SCRIPT_DIR"
+VENV_DIR="$SCRIPT_DIR/venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
+if [ ! -x "$VENV_PYTHON" ]; then
+    "$PYTHON_CMD" -m venv "$VENV_DIR" 2>/dev/null || "$PYTHON_CMD" -m venv "$VENV_DIR"
 fi
+"$VENV_PYTHON" -m pip install -q -e "$SCRIPT_DIR" 2>/dev/null || \
+    "$VENV_PYTHON" -m pip install -e "$SCRIPT_DIR"
 mkdir -p config
 print_status "$SUCCESS" "Package installed"
 
@@ -153,19 +151,20 @@ print_step 4 4 "Encryption Key"
 if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
     print_status "$SUCCESS" "Master key exists"
 else
-    shadow9 master-key generate
+    "$SCRIPT_DIR/shadow9" master-key generate
 fi
 
-# Verify
-if command -v shadow9 &>/dev/null; then
-    print_status "$SUCCESS" "shadow9 command available"
+# Keep the command on the checkout wrapper so it selects this virtual environment after
+# every update instead of whichever system Python happened to run setup.
+if is_root; then
+    INSTALL_DIR="/usr/local/bin"
 else
-    print_status "$ARROW" "Adding shadow9 to PATH..."
     INSTALL_DIR="${HOME}/.local/bin"
-    mkdir -p "$INSTALL_DIR"
-    ln -sf "$SCRIPT_DIR/shadow9" "$INSTALL_DIR/shadow9"
-    [[ ":$PATH:" != *":$INSTALL_DIR:"* ]] && echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> ~/.bashrc 2>/dev/null || true
 fi
+mkdir -p "$INSTALL_DIR"
+ln -sf "$SCRIPT_DIR/shadow9" "$INSTALL_DIR/shadow9"
+[[ ":$PATH:" != *":$INSTALL_DIR:"* ]] && echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> ~/.bashrc 2>/dev/null || true
+print_status "$SUCCESS" "shadow9 command available"
 
 print_complete
 
