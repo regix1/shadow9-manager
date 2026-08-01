@@ -41,13 +41,14 @@ define Package/shadow9-node
   SECTION:=net
   CATEGORY:=Network
   TITLE:=shadow9 WireGuard node client
-  DEPENDS:=+wireguard-tools +luci-proto-wireguard +ca-bundle
+  DEPENDS:=+wireguard-tools +luci-proto-wireguard +ca-bundle +pbr
 endef
 
 define Package/shadow9-node/description
   Enrolls this router as a node on a shadow9 WireGuard hub and writes the
-  matching UCI network and firewall configuration, so the tunnel appears in
-  LuCI as a real WireGuard interface with status and a peer list.
+  matching UCI network, firewall and policy-routing configuration, so the
+  tunnel appears in LuCI as a real WireGuard interface with status and a peer
+  list.
 endef
 
 # Nothing to fetch and nothing to build. PKGARCH is deliberately left alone:
@@ -65,6 +66,15 @@ endef
 define Package/shadow9-node/conffiles
 /etc/config/shadow9
 /etc/shadow9.token
+endef
+
+# A package upgrade keeps the enrolled tunnel. A real removal runs the same
+# ownership-checked cleanup available to the operator from the command line.
+define Package/shadow9-node/prerm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+[ "$${PKG_UPGRADE}" = "1" ] && exit 0
+[ ! -x /usr/sbin/shadow9-node ] || /usr/sbin/shadow9-node uninstall -quiet
 endef
 
 define Package/shadow9-node/install

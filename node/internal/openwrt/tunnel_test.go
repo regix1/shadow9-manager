@@ -126,6 +126,218 @@ func TestSiteGatewayRoutesItsAllowedIPs(t *testing.T) {
 	}
 }
 
+func TestPolicyTableKeepsTheDefaultRouteSeparate(t *testing.T) {
+	tunnel := siteGateway()
+	tunnel.Address = "10.9.0.7/24"
+	tunnel.AllowedIPs = []string{DefaultIPv4Route}
+	tunnel.Table = 51820
+	shell := writeGateway(t, tunnel)
+	for _, check := range []struct {
+		text string
+		want string
+	}{
+		{shell.render("network"), "option ip4table '51820'"},
+		{shell.render("network"), "list allowed_ips '0.0.0.0/0'"},
+		{shell.render("firewall"), "option masq '1'"},
+		{shell.render("shadow9"), "option table '51820'"},
+	} {
+		if !strings.Contains(check.text, check.want) {
+			t.Errorf("the policy-ready config has no %s:\n%s", check.want, check.text)
+		}
+	}
+}
+
+func TestPolicyTableFollowsTheTunnelAddressFamily(t *testing.T) {
+	tunnel := siteGateway()
+	tunnel.Address = "fd09::7/64"
+	tunnel.AllowedIPs = []string{DefaultIPv6Route}
+	tunnel.Table = 51820
+	shell := writeGateway(t, tunnel)
+	for _, check := range []struct {
+		text string
+		want string
+	}{
+		{shell.render("network"), "option ip6table '51820'"},
+		{shell.render("network"), "list allowed_ips '::/0'"},
+		{shell.render("firewall"), "option masq6 '1'"},
+	} {
+		if !strings.Contains(check.text, check.want) {
+			t.Errorf("the IPv6 policy config has no %s:\n%s", check.want, check.text)
+		}
+	}
+}
+
+func TestRemoveTunnelDeletesOnlyShadow9Sections(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		table int
+	}{
+		{"site-only", 0},
+		{"policy-routing", 51820},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tunnel := siteGateway()
+			tunnel.Table = tc.table
+			if tc.table != 0 {
+				tunnel.Address = "10.9.0.7/24"
+				tunnel.AllowedIPs = []string{DefaultIPv4Route}
+			}
+			shell := writeGateway(t, tunnel)
+			if err := (Router{Shell: shell}).WriteIdentity("branch-gateway", tunnel.PrivateKey); err != nil {
+				t.Fatalf("WriteIdentity: %v", err)
+			}
+			shell.addSection("network", "wg1", "interface", map[string][]string{
+				"proto":       {"wireguard"},
+				"private_key": {"operator-key"},
+			})
+			shell.addSection("firewall", "vpn", "zone", map[string][]string{
+				"name":    {"vpn"},
+				"network": {"wg1"},
+			})
+			shell.addSection("pbr", "operator", "policy", map[string][]string{
+				"name":      {"operator policy"},
+				"interface": {"wg1"},
+			})
+
+			removed, err := (Router{Shell: shell}).RemoveTunnel()
+			if err != nil {
+				t.Fatalf("RemoveTunnel: %v", err)
+			}
+			if !removed {
+				t.Fatal("RemoveTunnel did not report removing the managed tunnel")
+			}
+			if strings.Contains(shell.render("network"), "config interface 'wg0'") ||
+				strings.Contains(shell.render("network"), "config wireguard_wg0 'wg0_hub'") {
+				t.Errorf("the Shadow9 network sections remain:\n%s", shell.render("network"))
+			}
+			if strings.Contains(shell.render("firewall"), "config zone 'wgvpn'") {
+				t.Errorf("the Shadow9 firewall zone remains:\n%s", shell.render("firewall"))
+			}
+			if !strings.Contains(shell.render("network"), "config interface 'wg1'") ||
+				!strings.Contains(shell.render("firewall"), "config zone 'vpn'") ||
+				!strings.Contains(shell.render("pbr"), "operator policy") {
+				t.Error("uninstall changed configuration that Shadow9 does not own")
+			}
+			if strings.Contains(shell.render("shadow9"), "config node 'node'") {
+				t.Errorf("the enrollment settings remain:\n%s", shell.render("shadow9"))
+			}
+		})
+	}
+}
+
+func TestRemoveTunnelRefusesAnInterfaceItCannotProveItOwns(t *testing.T) {
+	shell := newFakeShell("shadow9")
+	shell.addSection("network", "wg1", "interface", map[string][]string{
+		"proto":       {"wireguard"},
+		"private_key": {"operator-key"},
+	})
+	shell.addSection("shadow9", "node", "node", map[string][]string{
+		"interface":   {"wg1"},
+		"zone":        {"wgvpn"},
+		"lan_zone":    {"lan"},
+		"private_key": {siteGateway().PrivateKey},
+	})
+	want := shell.render("network")
+
+	removed, err := (Router{Shell: shell}).RemoveTunnel()
+	if err == nil || !strings.Contains(err.Error(), "cannot be proven") {
+		t.Fatalf("RemoveTunnel returned removed=%t, err=%v", removed, err)
+	}
+	if removed || shell.render("network") != want {
+		t.Error("an interface without Shadow9's key was changed")
+	}
+}
+
+func TestRemoveTunnelDoesNotTouchTheDefaultInterfaceBeforeEnrollment(t *testing.T) {
+	shell := newFakeShell("shadow9")
+	shell.addSection("network", "wg0", "interface", map[string][]string{
+		"proto":       {"wireguard"},
+		"private_key": {"operator-key"},
+	})
+	shell.addSection("shadow9", "node", "node", map[string][]string{
+		"interface": {"wg0"},
+		"zone":      {"wgvpn"},
+		"lan_zone":  {"lan"},
+	})
+	want := shell.render("network")
+
+	removed, err := (Router{Shell: shell}).RemoveTunnel()
+	if err != nil {
+		t.Fatalf("RemoveTunnel: %v", err)
+	}
+	if removed || shell.render("network") != want {
+		t.Error("the package defaults caused a user-created wg0 to be changed")
+	}
+	if strings.Contains(shell.render("shadow9"), "config node 'node'") {
+		t.Error("the unused package defaults remain after uninstall")
+	}
+}
+
+func TestRemoveTunnelRefusesAZoneThatContainsAUserNetwork(t *testing.T) {
+	tunnel := siteGateway()
+	shell := writeGateway(t, tunnel)
+	router := Router{Shell: shell}
+	if err := router.WriteIdentity("branch-gateway", tunnel.PrivateKey); err != nil {
+		t.Fatalf("WriteIdentity: %v", err)
+	}
+	if err := router.Apply([]Command{addList("firewall.wgvpn.network", "guest")}); err != nil {
+		t.Fatalf("adding the user network: %v", err)
+	}
+	if err := router.Commit("firewall"); err != nil {
+		t.Fatalf("committing the user network: %v", err)
+	}
+	want := shell.render("firewall")
+
+	removed, err := router.RemoveTunnel()
+	if err == nil || !strings.Contains(err.Error(), "cannot be proven") {
+		t.Fatalf("RemoveTunnel returned removed=%t, err=%v", removed, err)
+	}
+	if removed || shell.render("firewall") != want {
+		t.Error("a firewall zone containing a user network was changed")
+	}
+}
+
+func TestRemoveTunnelRestoresEverythingWhenACommitFails(t *testing.T) {
+	shell := writeGateway(t, siteGateway())
+	if err := (Router{Shell: shell}).WriteIdentity("branch-gateway", siteGateway().PrivateKey); err != nil {
+		t.Fatalf("WriteIdentity: %v", err)
+	}
+	wantNetwork := shell.render("network")
+	wantFirewall := shell.render("firewall")
+	wantSettings := shell.render("shadow9")
+	shell.failures["uci commit firewall"] = 1
+
+	removed, err := (Router{Shell: shell}).RemoveTunnel()
+	if err == nil {
+		t.Fatal("RemoveTunnel succeeded despite a failed commit")
+	}
+	if removed {
+		t.Error("RemoveTunnel reported success after restoring the old configuration")
+	}
+	if shell.render("network") != wantNetwork || shell.render("firewall") != wantFirewall ||
+		shell.render("shadow9") != wantSettings {
+		t.Error("a failed uninstall did not restore every UCI package")
+	}
+}
+
+func TestUninstallSupportUsesOnlyPackageOwnedFiles(t *testing.T) {
+	shell := newFakeShell()
+	router := Router{Shell: shell}
+	if err := router.DisableRefresh(); err != nil {
+		t.Fatalf("DisableRefresh: %v", err)
+	}
+	if err := router.RemoveEnrollmentFiles(); err != nil {
+		t.Fatalf("RemoveEnrollmentFiles: %v", err)
+	}
+	calls := strings.Join(shell.calls, "\n")
+	if !strings.Contains(calls, InitScript+" disable") {
+		t.Errorf("the boot service was not disabled:\n%s", calls)
+	}
+	if !strings.Contains(calls, "rm -f "+TokenPath+" "+DefaultsPath) {
+		t.Errorf("the package-owned enrollment files were not removed:\n%s", calls)
+	}
+}
+
 // A dial-out node has no listen port, and then it needs no inbound rule
 // either, because its return traffic is conntracked.
 func TestDialOutNodeWritesNoListenPortAndNoInboundRule(t *testing.T) {
@@ -319,6 +531,8 @@ func TestValidateRejectsAResponseThatWouldWriteABrokenTunnel(t *testing.T) {
 		{"no allowed ips", func(t *Tunnel) { t.AllowedIPs = nil }, "no allowed IPs"},
 		{"no private key", func(t *Tunnel) { t.PrivateKey = "" }, "private key is empty"},
 		{"long zone name", func(t *Tunnel) { t.Zone = "averylongzonename" }, "working maximum"},
+		{"negative routing table", func(t *Tunnel) { t.Table = -1 }, "cannot be negative"},
+		{"reserved routing table", func(t *Tunnel) { t.Table = 254 }, "reserved by Linux"},
 		{
 			"a private key that would end the batch line",
 			func(t *Tunnel) { t.PrivateKey = "x'\nset network.lan.proto='none" },
@@ -545,5 +759,9 @@ func TestTakesOverTheDefaultRouteSpotsAFullTunnel(t *testing.T) {
 	tunnel.AllowedIPs = []string{"0.0.0.0/0", "::/0"}
 	if !tunnel.TakesOverTheDefaultRoute() {
 		t.Error("a default route in allowed_ips was not spotted")
+	}
+	tunnel.Table = 51820
+	if tunnel.TakesOverTheDefaultRoute() {
+		t.Error("a default route in a separate table was reported as taking over main")
 	}
 }

@@ -9,25 +9,42 @@ import (
 )
 
 // AddressWithPrefix turns the plain address the hub hands out into the form
-// the addresses list takes.
-//
-// A node gets a host route, not the whole tunnel subnet: with a /24 here the
-// router would treat every other peer as on-link and answer ARP for addresses
-// that are actually on the far side of the tunnel.
-func AddressWithPrefix(address string) (string, error) {
+// the addresses list takes. When a tunnel network is supplied, its prefix lets
+// netifd add destination rules for the isolated routing table.
+func AddressWithPrefix(address string, network ...string) (string, error) {
+	if len(network) > 1 {
+		return "", fmt.Errorf("only one tunnel network may supply the prefix")
+	}
 	address = strings.TrimSpace(address)
 	if address == "" {
 		return "", fmt.Errorf("the address is empty")
 	}
+	var parsed net.IP
 	if strings.Contains(address, "/") {
-		if _, _, err := net.ParseCIDR(address); err != nil {
+		var err error
+		parsed, _, err = net.ParseCIDR(address)
+		if err != nil {
 			return "", fmt.Errorf("%q is not an address: %w", address, err)
 		}
-		return address, nil
+		if len(network) == 0 {
+			return address, nil
+		}
+	} else {
+		parsed = net.ParseIP(address)
+		if parsed == nil {
+			return "", fmt.Errorf("%q is not an address", address)
+		}
 	}
-	parsed := net.ParseIP(address)
-	if parsed == nil {
-		return "", fmt.Errorf("%q is not an address", address)
+	if len(network) == 1 {
+		_, subnet, err := net.ParseCIDR(strings.TrimSpace(network[0]))
+		if err != nil {
+			return "", fmt.Errorf("%q is not a tunnel network: %w", network[0], err)
+		}
+		if !subnet.Contains(parsed) {
+			return "", fmt.Errorf("%s is outside tunnel network %s", parsed, subnet)
+		}
+		ones, _ := subnet.Mask.Size()
+		return parsed.String() + "/" + strconv.Itoa(ones), nil
 	}
 	if parsed.To4() != nil {
 		return address + "/32", nil

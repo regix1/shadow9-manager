@@ -79,6 +79,7 @@ type fakeShell struct {
 	absent    map[string]bool   // commands not on PATH
 	failing   map[string]string // "uci set network.wg0.mtu" and the like
 	failures  map[string]int
+	output    map[string]string
 	calls     []string
 	stdin     []Stdin
 	deadlines []time.Duration
@@ -96,7 +97,8 @@ func newFakeShell(existing ...string) *fakeShell {
 		absent:    map[string]bool{},
 		failing:   map[string]string{},
 		failures:  map[string]int{},
-		installed: map[string]bool{ProtocolPackage: true},
+		output:    map[string]string{},
+		installed: map[string]bool{ProtocolPackage: true, PolicyPackage: true},
 		snapshots: map[string]*fakePackage{},
 	}
 	for _, pkg := range append([]string{"network", "firewall", "system"}, existing...) {
@@ -184,6 +186,9 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 			return []byte(message), fmt.Errorf("exit status 1")
 		}
 	}
+	if output, ok := f.output[call]; ok {
+		return []byte(output), nil
+	}
 	switch name {
 	case "uci":
 		if len(args) == 1 && args[0] == "batch" {
@@ -222,6 +227,8 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 			}
 		}
 		return nil, nil
+	case "rm":
+		return nil, nil
 	case "apk", "opkg":
 		if f.noManager {
 			return nil, fmt.Errorf("exit status 127")
@@ -234,9 +241,14 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 	case "ifstatus":
 		return []byte(`{"up":true,"pending":false}`), nil
 	}
-	if strings.HasPrefix(name, "/etc/init.d/") && len(args) == 1 && args[0] == "reload" {
-		f.reloaded = append(f.reloaded, strings.TrimPrefix(name, "/etc/init.d/"))
-		return nil, nil
+	if strings.HasPrefix(name, "/etc/init.d/") && len(args) == 1 {
+		if args[0] == "reload" {
+			f.reloaded = append(f.reloaded, strings.TrimPrefix(name, "/etc/init.d/"))
+			return nil, nil
+		}
+		if args[0] == "disable" {
+			return nil, nil
+		}
 	}
 	return nil, fmt.Errorf("%s: not found", name)
 }

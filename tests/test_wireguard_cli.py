@@ -202,6 +202,12 @@ class TestInit:
         assert "shadow9-node wg join" not in flat
         assert "shadow9-node join --url" not in flat
         assert "Both commands contain the same one-use token. Run only one." in flat
+        assert (
+            "0.0.0.0/0 route stays in the first unused table at or above 51820"
+            in flat
+        )
+        assert "client verifies pbr is installed" in flat
+        assert "-site-only" in flat
         assert "host firewall and the cloud firewall or security group" in flat
         assert "TCP 8081" in flat
         assert "UDP 51820" in flat

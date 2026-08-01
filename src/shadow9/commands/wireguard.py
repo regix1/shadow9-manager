@@ -1569,6 +1569,12 @@ def _print_join_command(cfg: Config, public_key: str, api_url: Optional[str], ho
         "-advertise 192.168.1.0/24 to choose it explicitly, or -no-routes if "
         "this router should not be a site gateway.[/dim]"
     )
+    console.print(
+        "[dim]Its 0.0.0.0/0 route stays in the first unused table at or above "
+        "51820, so WAN remains the main default and PBR selects tunnel traffic. "
+        "The client verifies pbr is installed. Add -site-only for only the tunnel "
+        "and advertised sites, or -table <id> to pin a table.[/dim]"
+    )
 
     console.print("\n[bold]On another host with Shadow9 Manager installed:[/bold]")
     console.print(f"  [cyan]shadow9 wg join --url {url} --token {issued}[/cyan]", soft_wrap=True)

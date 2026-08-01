@@ -205,6 +205,21 @@ as a fallback because it does not install dependencies, the boot service, or the
 that survives `sysupgrade`. See [the router setup steps](docs/SETUP.md#5-add-a-router-as-a-site-gateway)
 for the package filenames and join command.
 
+New OpenWrt joins put `0.0.0.0/0` in the first unused routing table at or above `51820`,
+leaving the WAN default untouched until PBR selects traffic for `wg0`. The client checks
+UCI and the active IPv4 and IPv6 rules and routes before choosing. Use
+`shadow9-node join --site-only ...` for the earlier tunnel-and-sites-only behavior, or
+`--table <id>` to pin a specific table.
+
+The OpenWrt package declares `pbr` as a dependency, so `opkg` or `apk` keeps an installed
+copy and fetches it only when it is missing. A policy-ready join also checks for `pbr`
+before changing UCI; `--site-only` does not require it.
+
+`shadow9-node uninstall` removes only the interface and UCI sections whose ownership is
+proven by Shadow9's saved identity. It leaves other WireGuard interfaces, routing tables,
+PBR policies, firewall zones, and packages untouched. Removing the OpenWrt package runs
+the same cleanup, while upgrading it keeps the enrolled tunnel.
+
 ---
 
 ## Usage

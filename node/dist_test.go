@@ -77,3 +77,21 @@ func TestDistChecksumsMatchTheBinaries(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenWrtPackageRemovalKeepsAnUpgradeEnrolled(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "packaging", "openwrt", "Makefile"))
+	if err != nil {
+		t.Fatalf("reading the OpenWrt package Makefile: %v", err)
+	}
+	makefile := string(contents)
+	upgradeGuard := `[ "$${PKG_UPGRADE}" = "1" ] && exit 0`
+	uninstall := `/usr/sbin/shadow9-node uninstall -quiet`
+	guardAt := strings.Index(makefile, upgradeGuard)
+	uninstallAt := strings.Index(makefile, uninstall)
+	if guardAt == -1 || uninstallAt == -1 || guardAt > uninstallAt {
+		t.Error("package removal does not guard the tunnel cleanup during an upgrade")
+	}
+	if !strings.Contains(makefile, "DEPENDS:=+wireguard-tools +luci-proto-wireguard +ca-bundle +pbr") {
+		t.Error("the OpenWrt package does not install its policy-routing dependency")
+	}
+}

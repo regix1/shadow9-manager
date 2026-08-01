@@ -21,8 +21,8 @@ On the hub:
 
 On a router that will be a site gateway:
 
-- OpenWrt 24.10 or later, with `wireguard-tools` and `luci-proto-wireguard`. Both are
-  pulled in by the package.
+- OpenWrt 24.10 or later, with `wireguard-tools`, `luci-proto-wireguard`, and `pbr`.
+  All three are pulled in by the package.
 
 ---
 
@@ -275,6 +275,42 @@ shadow9-node join -hub http://203.0.113.10:8081 \
 Use `-token-file /etc/shadow9.token` instead of `-token` to keep it out of shell
 history; the package ships that file as a conffile so it survives `sysupgrade`.
 
+The OpenWrt client is policy-ready by default. Its hub peer accepts `0.0.0.0/0`, but
+netifd installs that default in a separate routing table, not the main table. Ordinary
+traffic therefore keeps using WAN until a PBR policy selects `wg0`. The interface uses
+the tunnel network's prefix so netifd also creates the source and destination rules that
+let the router itself reach the hub. Selected LAN traffic is masqueraded to the node's
+tunnel address; the hub can then apply its tunnel-range masquerade on the way out.
+
+Use `--site-only` to keep the earlier behavior: a `/32` node address, no separate routing
+table, and only the tunnel plus LANs advertised by other sites in `AllowedIPs`. Otherwise,
+the client checks UCI and the active IPv4 and IPv6 rules and routes, then uses the first
+unused numeric table at or above `51820`. Use `--table <id>` to pin a specific table. The
+Go flag parser accepts both one and two dashes. A refresh keeps the table chosen at join
+time, and a repeated join reuses the table still owned by that Shadow9 interface. An
+existing node that predates this setting stays site-only rather than changing routes
+during an upgrade. To opt that node into policy routing, issue a new token and join again
+with `--keep-key`.
+
+The package declares `pbr` as a dependency. `opkg` or `apk` detects whether it is already
+installed and only fetches it when missing. Before a policy-ready join writes UCI, the
+client also verifies that `pbr` is installed, which gives a clear error for a raw binary
+copied onto a router without its dependencies. A `--site-only` join does not require PBR.
+
+Remove only the configuration owned by this client with:
+
+```sh
+shadow9-node uninstall
+```
+
+The command verifies the saved private key against the exact interface before deleting
+anything. It removes that interface, Shadow9's named hub peer, firewall zone and
+forwardings, enrollment settings, token file, and boot refresh hook. Other WireGuard
+interfaces, routing tables, PBR policies, firewall zones, and packages are left alone.
+It works the same for policy-routing and `--site-only` joins and refuses to guess if the
+ownership check fails. `opkg remove shadow9-node` and `apk del shadow9-node` run the same
+cleanup for a real package removal; a package upgrade keeps the tunnel enrolled.
+
 The router generates its own keypair and the hub never sees the private half. The
 tunnel then appears in LuCI under Network then Interfaces as a real WireGuard interface
 with handshake time and transfer counters.
@@ -304,7 +340,8 @@ Unlike the hub, this one applies its own configuration and runs `wg-quick` for y
 | `shadow9 wg token` | Another single-use join token |
 | `shadow9 wg remove <name>` | Removes the peer and reissues every config it appeared in |
 | `shadow9 wg hub set-endpoint <addr>` | Changes the address peers dial and bumps the topology revision |
-| `shadow9-node refresh` | On a router: pulls current routes, endpoint, MTU and keepalive |
+| `shadow9-node refresh` | On a router: pulls current settings while keeping its routing mode and table |
+| `shadow9-node uninstall` | Removes only the OpenWrt configuration proven to belong to Shadow9 |
 
 Nodes are pull-based. The hub never held their private keys, so it cannot push them a
 new config. A changed hub endpoint, or a second gateway's LAN, reaches a node on its
@@ -317,8 +354,9 @@ Hub-held configs, meaning devices, are reissued immediately on any topology chan
 
 ## Known limits
 
-- **Nothing here has run on real OpenWrt hardware.** The UCI write, commit, reload and
-  revert paths are tested against a fake `uci`.
+- **Automated tests do not boot an OpenWrt image.** The UCI write, commit, reload and
+  revert paths use a fake `uci`; the packaged join path has also been exercised manually
+  on OpenWrt 24.10 hardware.
 - **A git clone has no CI packages.** Put the `node-packages` artifact under
   `node/packages`, or use the release link the hub prints.
 - **The admin API is plain HTTP with a cleartext key.** The split listener means it

@@ -48,18 +48,21 @@ func TestBuildTunnelTurnsTheHubsAnswerIntoUciValues(t *testing.T) {
 		Keepalive:     &keepalive,
 		Protocol:      &protocol,
 	}
-	tunnel, err := buildTunnel(answer, private, "wg0", "wgvpn", 0, -1, -1)
+	tunnel, err := buildTunnel(answer, private, "wg0", "wgvpn", 0, -1, -1, defaultTable)
 	if err != nil {
 		t.Fatalf("buildTunnel: %v", err)
 	}
-	if tunnel.Address != "10.9.0.7/32" {
-		t.Errorf("the address came out as %q, want a host route", tunnel.Address)
+	if tunnel.Address != "10.9.0.7/24" {
+		t.Errorf("the address came out as %q, want the tunnel prefix", tunnel.Address)
 	}
 	if tunnel.EndpointHost != "203.0.113.10" || tunnel.EndpointPort != 51820 {
 		t.Errorf("the endpoint came out as %s:%d", tunnel.EndpointHost, tunnel.EndpointPort)
 	}
-	if len(tunnel.AllowedIPs) != 1 || tunnel.AllowedIPs[0] != "10.9.0.0/24" {
+	if len(tunnel.AllowedIPs) != 1 || tunnel.AllowedIPs[0] != openwrt.DefaultIPv4Route {
 		t.Errorf("the allowed IPs came out as %v", tunnel.AllowedIPs)
+	}
+	if tunnel.Table != defaultTable {
+		t.Errorf("the routing table is %d, want %d", tunnel.Table, defaultTable)
 	}
 	if tunnel.PrivateKey != private.String() {
 		t.Error("the private key did not reach the tunnel")
@@ -69,6 +72,64 @@ func TestBuildTunnelTurnsTheHubsAnswerIntoUciValues(t *testing.T) {
 	}
 	if err := tunnel.Validate(); err != nil {
 		t.Errorf("the tunnel built from a good answer does not validate: %v", err)
+	}
+}
+
+func TestBuildTunnelKeepsSiteOnlyRoutesWhenRequested(t *testing.T) {
+	private, _, err := wgkey.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	mtu, keepalive, protocol := 1412, 20, enroll.Protocol
+	answer := enroll.Response{
+		Address:       "10.9.0.7",
+		HubPublicKey:  "hR3n0oPxK9zLm2vQwE4tYuIoP1aSdF6gH8jKlZxCvB0=",
+		HubEndpoint:   "203.0.113.10:51820",
+		TunnelNetwork: "10.9.0.0/24",
+		MTU:           &mtu,
+		Keepalive:     &keepalive,
+		Protocol:      &protocol,
+	}
+
+	tunnel, err := buildTunnel(answer, private, "wg0", "wgvpn", 0, -1, -1, 0)
+	if err != nil {
+		t.Fatalf("buildTunnel: %v", err)
+	}
+	if tunnel.Address != "10.9.0.7/32" {
+		t.Errorf("the address came out as %q, want a host route", tunnel.Address)
+	}
+	if len(tunnel.AllowedIPs) != 1 || tunnel.AllowedIPs[0] != answer.TunnelNetwork {
+		t.Errorf("site-only AllowedIPs came out as %v", tunnel.AllowedIPs)
+	}
+	if tunnel.Table != 0 {
+		t.Errorf("site-only routing table came out as %d", tunnel.Table)
+	}
+}
+
+func TestBuildTunnelUsesTheIPv6PolicyRouteForAnIPv6Hub(t *testing.T) {
+	private, _, err := wgkey.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	mtu, keepalive, protocol := 1412, 20, enroll.Protocol
+	answer := enroll.Response{
+		Address:       "fd09::7",
+		HubPublicKey:  "hR3n0oPxK9zLm2vQwE4tYuIoP1aSdF6gH8jKlZxCvB0=",
+		HubEndpoint:   "[2001:db8::10]:51820",
+		TunnelNetwork: "fd09::/64",
+		MTU:           &mtu,
+		Keepalive:     &keepalive,
+		Protocol:      &protocol,
+	}
+
+	tunnel, err := buildTunnel(answer, private, "wg0", "wgvpn", 0, -1, -1, defaultTable)
+	if err != nil {
+		t.Fatalf("buildTunnel: %v", err)
+	}
+	if tunnel.Address != "fd09::7/64" || len(tunnel.AllowedIPs) != 1 ||
+		tunnel.AllowedIPs[0] != openwrt.DefaultIPv6Route {
+		t.Errorf("the IPv6 policy route came out as address %s, AllowedIPs %v",
+			tunnel.Address, tunnel.AllowedIPs)
 	}
 }
 
@@ -88,7 +149,7 @@ func TestBuildTunnelLetsFlagsOverrideTheHubSettings(t *testing.T) {
 		Protocol:      &protocol,
 	}
 
-	tunnel, err := buildTunnel(answer, private, "wg0", "wgvpn", 0, 1280, 0)
+	tunnel, err := buildTunnel(answer, private, "wg0", "wgvpn", 0, 1280, 0, defaultTable)
 	if err != nil {
 		t.Fatalf("buildTunnel: %v", err)
 	}
@@ -109,7 +170,7 @@ func TestBuildRefreshTunnelUsesTheCompleteAllowedIPs(t *testing.T) {
 		AllowedIPs: []string{"10.9.0.0/24", "192.168.2.0/24"},
 		MTU:        &mtu, Keepalive: &keepalive, Protocol: &protocol, Revision: &revision,
 	}
-	tunnel, err := buildRefreshTunnel(answer, private, "wg0", "wgvpn", 0, nil, nil)
+	tunnel, err := buildRefreshTunnel(answer, private, "wg0", "wgvpn", 0, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("buildRefreshTunnel: %v", err)
 	}
@@ -118,6 +179,31 @@ func TestBuildRefreshTunnelUsesTheCompleteAllowedIPs(t *testing.T) {
 	}
 	if tunnel.Revision != revision {
 		t.Errorf("revision is %d, want %d", tunnel.Revision, revision)
+	}
+}
+
+func TestBuildRefreshTunnelKeepsThePolicyTable(t *testing.T) {
+	private, _, err := wgkey.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	mtu, keepalive, protocol, revision := 1412, 20, enroll.Protocol, 8
+	answer := enroll.RefreshResponse{
+		Address: "10.9.0.7", HubPublicKey: "hR3n0oPxK9zLm2vQwE4tYuIoP1aSdF6gH8jKlZxCvB0=",
+		HubEndpoint: "203.0.113.10:51820", TunnelNetwork: "10.9.0.0/24",
+		AllowedIPs: []string{"10.9.0.0/24", "192.168.2.0/24"},
+		MTU:        &mtu, Keepalive: &keepalive, Protocol: &protocol, Revision: &revision,
+	}
+	tunnel, err := buildRefreshTunnel(
+		answer, private, "wg0", "wgvpn", 0, nil, nil, defaultTable)
+	if err != nil {
+		t.Fatalf("buildRefreshTunnel: %v", err)
+	}
+	if got := strings.Join(tunnel.AllowedIPs, ","); got != openwrt.DefaultIPv4Route {
+		t.Errorf("the allowed IPs are %s", got)
+	}
+	if tunnel.Address != "10.9.0.7/24" || tunnel.Table != defaultTable {
+		t.Errorf("refresh produced address %s in table %d", tunnel.Address, tunnel.Table)
 	}
 }
 
@@ -134,7 +220,7 @@ func TestBuildRefreshTunnelKeepsLocalOverrides(t *testing.T) {
 		MTU: &mtu, Keepalive: &keepalive, Protocol: &protocol, Revision: &revision,
 	}
 	tunnel, err := buildRefreshTunnel(
-		answer, private, "wg0", "wgvpn", 0, &mtuOverride, &keepaliveOverride)
+		answer, private, "wg0", "wgvpn", 0, &mtuOverride, &keepaliveOverride, 0)
 	if err != nil {
 		t.Fatalf("buildRefreshTunnel: %v", err)
 	}
@@ -163,7 +249,7 @@ func TestBuildTunnelRefusesAnAnswerItCannotUse(t *testing.T) {
 			MTU: &mtu, Keepalive: &keepalive}, "endpoint"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := buildTunnel(tc.answer, private, "wg0", "wgvpn", 0, -1, -1)
+			_, err := buildTunnel(tc.answer, private, "wg0", "wgvpn", 0, -1, -1, 0)
 			if err == nil {
 				t.Fatal("buildTunnel accepted it")
 			}
@@ -351,7 +437,7 @@ func TestChooseLanZoneFindsTheZoneCarryingTheLan(t *testing.T) {
 }
 
 func TestANodeListensOnNoPortByDefault(t *testing.T) {
-	flags, _ := joinFlags()
+	flags, options := joinFlags()
 	listen := flags.Lookup("listen-port")
 	if listen == nil || listen.DefValue != "0" {
 		t.Errorf("the node's listen-port default is not zero")
@@ -361,5 +447,48 @@ func TestANodeListensOnNoPortByDefault(t *testing.T) {
 		if option == nil || option.DefValue != "-1" {
 			t.Errorf("-%s does not default to the hub's enrollment response", restored)
 		}
+	}
+	if options.table != 0 || options.siteOnly {
+		t.Errorf("join defaults to table %d with site-only %t", options.table, options.siteOnly)
+	}
+	if err := flags.Parse([]string{"--site-only"}); err != nil {
+		t.Fatalf("the compatibility option did not parse: %v", err)
+	}
+	if !options.siteOnly {
+		t.Error("--site-only did not select the compatibility mode")
+	}
+}
+
+func TestChooseTableReusesTheTableSavedForThisInterface(t *testing.T) {
+	router := routerAnswering(map[string]string{
+		"shadow9.node.interface": "wg0",
+		"shadow9.node.table":     "51827",
+		"network.wg0.ip4table":   "51827",
+	})
+	table, err := chooseTable(0, false, "wg0", router)
+	if err != nil {
+		t.Fatalf("chooseTable: %v", err)
+	}
+	if table != 51827 {
+		t.Errorf("chooseTable returned %d, want the saved table", table)
+	}
+}
+
+func TestChooseTableHonorsExplicitAndSiteOnlyModes(t *testing.T) {
+	router := routerAnswering(nil)
+	table, err := chooseTable(60000, false, "wg0", router)
+	if err != nil || table != 60000 {
+		t.Fatalf("the explicit table came out as %d, err=%v", table, err)
+	}
+	table, err = chooseTable(60000, true, "wg0", router)
+	if err != nil || table != 0 {
+		t.Fatalf("site-only came out as table %d, err=%v", table, err)
+	}
+}
+
+func TestJoinRejectsAReservedRoutingTableBeforeEnrollment(t *testing.T) {
+	err := join([]string{"-hub", "http://203.0.113.10:8081", "-table", "254"})
+	if err == nil || !strings.Contains(err.Error(), "reserved by Linux") {
+		t.Fatalf("join returned %v", err)
 	}
 }

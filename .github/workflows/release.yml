@@ -158,6 +158,13 @@ jobs:
           ```sh
           shadow9-node join -hub http://<hub>:8081 -token <token> -advertise 192.168.1.0/24
           ```
+
+          The default route is isolated in the first unused table at or above 51820 for
+          PBR; normal WAN traffic is unchanged until a policy selects wg0. Add
+          `-site-only` for only the tunnel and advertised sites, or `-table <id>` to pin a
+          specific table. Policy mode verifies that pbr is installed before changing UCI.
+          `shadow9-node uninstall` removes only Shadow9-owned UCI sections; other
+          WireGuard interfaces and PBR policies are left unchanged.
           EOF
           )
           version="${TAG#v}"

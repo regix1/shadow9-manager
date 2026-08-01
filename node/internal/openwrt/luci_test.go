@@ -71,6 +71,24 @@ func TestOnlyOnePackageManagerPresentStillAnswers(t *testing.T) {
 	}
 }
 
+func TestPolicyPackageIsCheckedBeforeAPolicyJoin(t *testing.T) {
+	shell := newFakeShell()
+	router := Router{Shell: shell}
+	if err := router.RequirePolicyPackage(); err != nil {
+		t.Fatalf("RequirePolicyPackage rejected an installed package: %v", err)
+	}
+	shell.installed[PolicyPackage] = false
+	err := router.RequirePolicyPackage()
+	if err == nil {
+		t.Fatal("RequirePolicyPackage accepted a missing package")
+	}
+	for _, want := range []string{PolicyPackage, "apk add", "opkg install"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the missing-package error does not mention %q: %v", want, err)
+		}
+	}
+}
+
 func TestRequireNamesThePackageToInstall(t *testing.T) {
 	shell := newFakeShell()
 	shell.absent["wg"] = true

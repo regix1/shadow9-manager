@@ -32,6 +32,28 @@ func TestAddressWithPrefixGivesAHostRoute(t *testing.T) {
 	}
 }
 
+func TestAddressWithPrefixCanUseTheTunnelNetwork(t *testing.T) {
+	for _, tc := range []struct{ address, network, want string }{
+		{"10.9.0.7", "10.9.0.0/24", "10.9.0.7/24"},
+		{"fd00:9::7", "fd00:9::/64", "fd00:9::7/64"},
+	} {
+		got, err := AddressWithPrefix(tc.address, tc.network)
+		if err != nil {
+			t.Errorf("AddressWithPrefix(%q, %q): %v", tc.address, tc.network, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("AddressWithPrefix(%q, %q) is %q, want %q",
+				tc.address, tc.network, got, tc.want)
+		}
+	}
+	for _, network := range []string{"not-a-network", "10.8.0.0/24"} {
+		if got, err := AddressWithPrefix("10.9.0.7", network); err == nil {
+			t.Errorf("AddressWithPrefix accepted %q and returned %q", network, got)
+		}
+	}
+}
+
 func TestSplitEndpointSeparatesHostFromPort(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

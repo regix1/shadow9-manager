@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -153,6 +154,67 @@ func (r Router) Require(name, packageName string) error {
 		return fmt.Errorf("%s was not found on PATH, install %s first", name, packageName)
 	}
 	return nil
+}
+
+// NextTable returns the first unused numeric routing table at or above start.
+// It checks persistent UCI interface settings plus the IPv4 and IPv6 tables
+// currently referenced by kernel rules and routes.
+func (r Router) NextTable(start int) (int, error) {
+	if start <= 0 {
+		return 0, fmt.Errorf("the first routing table must be positive")
+	}
+	used := map[int]bool{253: true, 254: true, 255: true}
+	record := func(text string) {
+		value, err := strconv.Atoi(strings.Trim(strings.TrimSpace(text), "'\""))
+		if err == nil && value > 0 {
+			used[value] = true
+		}
+	}
+
+	out, err := r.run(uciTimeout, "", "uci", "-q", "show", "network")
+	if err != nil {
+		return 0, fmt.Errorf("reading routing tables from UCI: %w: %s", err, bytes.TrimSpace(out))
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, ".ip4table=") || strings.Contains(line, ".ip6table=") {
+			if _, value, found := strings.Cut(line, "="); found {
+				record(value)
+			}
+		}
+	}
+
+	for _, check := range []struct {
+		family string
+		kind   string
+		marker string
+		args   []string
+	}{
+		{"IPv4", "rules", "lookup", []string{"-4", "rule", "show"}},
+		{"IPv6", "rules", "lookup", []string{"-6", "rule", "show"}},
+		{"IPv4", "routes", "table", []string{"-4", "route", "show", "table", "all"}},
+		{"IPv6", "routes", "table", []string{"-6", "route", "show", "table", "all"}},
+	} {
+		out, err := r.run(uciTimeout, "", "ip", check.args...)
+		if err != nil {
+			return 0, fmt.Errorf("reading %s routing %s: %w: %s",
+				check.family, check.kind, err, bytes.TrimSpace(out))
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			for i, field := range fields {
+				if field == check.marker && i+1 < len(fields) {
+					record(fields[i+1])
+				}
+			}
+		}
+	}
+
+	for table := start; table < start+4096; table++ {
+		if !used[table] {
+			return table, nil
+		}
+	}
+	return 0, fmt.Errorf("no free routing table was found from %d through %d", start, start+4095)
 }
 
 // ClearPeers deletes every peer section on an interface, whether this client

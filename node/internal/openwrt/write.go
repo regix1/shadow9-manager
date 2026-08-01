@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"shadow9-node/internal/wgkey"
@@ -14,6 +15,12 @@ import (
 // declared as a conffile by the OpenWrt package, which is what makes it
 // survive a sysupgrade.
 const SettingsPath = "/etc/config/shadow9"
+
+const (
+	TokenPath    = "/etc/shadow9.token"
+	DefaultsPath = "/etc/uci-defaults/99-shadow9-node"
+	InitScript   = "/etc/init.d/shadow9-node"
+)
 
 // packages is every UCI package a join touches, in commit order.
 var packages = []string{"network", "firewall", "shadow9"}
@@ -152,6 +159,184 @@ func (r Router) WriteTunnel(tunnel Tunnel, hub string) error {
 	}
 	if err := r.waitForTunnel(tunnel.Interface); err != nil {
 		return r.restoreAfter(err, snapshots)
+	}
+	return nil
+}
+
+// RemoveTunnel deletes only the UCI sections whose ownership can be proven by
+// the interface key and names saved during enrollment. Other WireGuard
+// interfaces, firewall zones, routing tables and PBR policies are untouched.
+func (r Router) RemoveTunnel() (bool, error) {
+	iface, err := r.Get(nodeSection + ".interface")
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading the shadow9 interface before uninstalling: %w", err)
+	}
+	zone, err := r.Get(nodeSection + ".zone")
+	if err != nil {
+		return false, fmt.Errorf("reading the shadow9 firewall zone before uninstalling: %w", err)
+	}
+	lanZone, err := r.Get(nodeSection + ".lan_zone")
+	if err != nil {
+		return false, fmt.Errorf("reading the shadow9 LAN zone before uninstalling: %w", err)
+	}
+
+	sectionType, err := r.Get("network." + iface)
+	if errors.Is(err, ErrNotFound) {
+		return false, r.removeSettings()
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking the shadow9 interface before uninstalling: %w", err)
+	}
+	if sectionType != "interface" {
+		return false, fmt.Errorf("network.%s is not a Shadow9-managed interface; no changes were made", iface)
+	}
+	savedKey, savedErr := r.Get(nodeSection + ".private_key")
+	if errors.Is(savedErr, ErrNotFound) {
+		return false, r.removeSettings()
+	}
+	if savedErr != nil {
+		return false, fmt.Errorf("checking the saved Shadow9 identity before uninstalling: %w", savedErr)
+	}
+	if savedKey == "" {
+		return false, r.removeSettings()
+	}
+	interfaceKey, interfaceErr := r.Get("network." + iface + ".private_key")
+	if interfaceErr != nil || interfaceKey != savedKey {
+		return false, fmt.Errorf("ownership of network.%s cannot be proven; no changes were made", iface)
+	}
+	if _, err := wgkey.Parse(savedKey); err != nil {
+		return false, fmt.Errorf("ownership of network.%s cannot be proven; no changes were made", iface)
+	}
+
+	peer := "network." + PeerSectionName(iface)
+	peerType, err := r.Get(peer)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return false, fmt.Errorf("checking the shadow9 peer before uninstalling: %w", err)
+	}
+	if err == nil && peerType != PeerSectionType(iface) {
+		return false, fmt.Errorf("ownership of %s cannot be proven; no changes were made", peer)
+	}
+
+	zonePath := "firewall." + zone
+	zoneType, err := r.Get(zonePath)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return false, fmt.Errorf("checking the shadow9 firewall zone before uninstalling: %w", err)
+	}
+	if err == nil {
+		zoneName, nameErr := r.Get(zonePath + ".name")
+		networks, networkErr := r.Get(zonePath + ".network")
+		owned := zoneType == "zone" && nameErr == nil && zoneName == zone && networkErr == nil
+		if owned {
+			members := strings.Fields(networks)
+			owned = len(members) == 1 && members[0] == iface
+		}
+		if !owned {
+			return false, fmt.Errorf("ownership of %s cannot be proven; no changes were made", zonePath)
+		}
+	}
+
+	for _, forwarding := range []struct {
+		path string
+		src  string
+		dest string
+	}{
+		{"firewall." + zone + "_to_" + lanZone, zone, lanZone},
+		{"firewall." + lanZone + "_to_" + zone, lanZone, zone},
+	} {
+		kind, err := r.Get(forwarding.path)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("checking %s before uninstalling: %w", forwarding.path, err)
+		}
+		src, srcErr := r.Get(forwarding.path + ".src")
+		dest, destErr := r.Get(forwarding.path + ".dest")
+		if kind != "forwarding" || srcErr != nil || destErr != nil ||
+			src != forwarding.src || dest != forwarding.dest {
+			return false, fmt.Errorf("ownership of %s cannot be proven; no changes were made", forwarding.path)
+		}
+	}
+
+	inbound := "firewall." + zone + "_in"
+	kind, err := r.Get(inbound)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return false, fmt.Errorf("checking %s before uninstalling: %w", inbound, err)
+	}
+	if err == nil {
+		name, nameErr := r.Get(inbound + ".name")
+		src, srcErr := r.Get(inbound + ".src")
+		target, targetErr := r.Get(inbound + ".target")
+		if kind != "rule" || nameErr != nil || srcErr != nil || targetErr != nil ||
+			name != "Allow-"+zone || src != "wan" || target != "ACCEPT" {
+			return false, fmt.Errorf("ownership of %s cannot be proven; no changes were made", inbound)
+		}
+	}
+
+	snapshots, err := r.snapshot()
+	if err != nil {
+		return false, err
+	}
+	staged := [][]Command{
+		{remove("network." + iface), remove(peer)},
+		{
+			remove(zonePath),
+			remove("firewall." + zone + "_to_" + lanZone),
+			remove("firewall." + lanZone + "_to_" + zone),
+			remove(inbound),
+		},
+		{remove(nodeSection)},
+	}
+	for _, commands := range staged {
+		if err := r.Apply(commands); err != nil {
+			return false, r.revertAll(err)
+		}
+	}
+	for _, pkg := range packages {
+		if err := r.Commit(pkg); err != nil {
+			return false, r.restoreAfter(err, snapshots)
+		}
+	}
+	for _, service := range []string{"network", "firewall"} {
+		if err := r.Reload(service); err != nil {
+			return false, r.restoreAfter(err, snapshots)
+		}
+	}
+	return true, nil
+}
+
+func (r Router) removeSettings() error {
+	if err := r.Apply([]Command{remove(nodeSection)}); err != nil {
+		return err
+	}
+	if err := r.Commit("shadow9"); err != nil {
+		_, _ = r.run(uciTimeout, "", "uci", "-q", "revert", "shadow9")
+		return err
+	}
+	return nil
+}
+
+// DisableRefresh keeps an uninstalled node from being recreated at boot.
+func (r Router) DisableRefresh() error {
+	if err := r.Shell.Look(InitScript); err != nil {
+		return nil
+	}
+	out, err := r.run(fileTimeout, "", InitScript, "disable")
+	if err != nil {
+		return fmt.Errorf("disabling the shadow9-node boot service: %w: %s", err, out)
+	}
+	return nil
+}
+
+// RemoveEnrollmentFiles deletes package-owned enrollment inputs that could
+// recreate the tunnel. The binary and package dependencies remain installed.
+func (r Router) RemoveEnrollmentFiles() error {
+	out, err := r.run(fileTimeout, "", "rm", "-f", TokenPath, DefaultsPath)
+	if err != nil {
+		return fmt.Errorf("removing Shadow9 enrollment files: %w: %s", err, out)
 	}
 	return nil
 }

@@ -31,6 +31,7 @@ type Tunnel struct {
 	Revision          int
 	MTUOverride       *int
 	KeepaliveOverride *int
+	Table             int
 
 	HubPublicKey   string
 	PresharedKey   string
@@ -47,6 +48,8 @@ const (
 	DefaultInterface = "wg0"
 	DefaultZone      = "wgvpn"
 	DefaultLanZone   = "lan"
+	DefaultIPv4Route = "0.0.0.0/0"
+	DefaultIPv6Route = "::/0"
 	nodeSection      = "shadow9.node"
 )
 
@@ -70,6 +73,10 @@ func (t Tunnel) Validate() error {
 		return fmt.Errorf("the private key is empty")
 	case t.Address == "":
 		return fmt.Errorf("the hub gave no address for this interface")
+	case t.Table < 0:
+		return fmt.Errorf("the routing table cannot be negative")
+	case t.Table >= 253 && t.Table <= 255:
+		return fmt.Errorf("routing table %d is reserved by Linux", t.Table)
 	case t.HubPublicKey == "":
 		return fmt.Errorf("the hub gave no public key")
 	case t.EndpointHost == "":
@@ -102,8 +109,11 @@ func (t Tunnel) Validate() error {
 // default route. Combined with route_allowed_ips this sends everything,
 // including the operator's own way back in, through the tunnel.
 func (t Tunnel) TakesOverTheDefaultRoute() bool {
+	if t.Table != 0 {
+		return false
+	}
 	for _, a := range t.AllowedIPs {
-		if a == "0.0.0.0/0" || a == "::/0" {
+		if a == DefaultIPv4Route || a == DefaultIPv6Route {
 			return true
 		}
 	}
@@ -125,6 +135,13 @@ func (t Tunnel) NetworkCommands() []Command {
 		set(iface, "interface"),
 		set(iface+".proto", "wireguard"),
 		setSecret(iface+".private_key", t.PrivateKey),
+	}
+	if t.Table != 0 {
+		table := ".ip4table"
+		if strings.Contains(t.Address, ":") {
+			table = ".ip6table"
+		}
+		commands = append(commands, set(iface+table, strconv.Itoa(t.Table)))
 	}
 	if t.ListenPort != 0 {
 		commands = append(commands, set(iface+".listen_port", strconv.Itoa(t.ListenPort)))
@@ -170,6 +187,16 @@ func (t Tunnel) NetworkCommands() []Command {
 // hand-written nftables rule is gone on the next firewall reload.
 func (t Tunnel) FirewallCommands() []Command {
 	zone := "firewall." + t.Zone
+	masqueradeOption := ".masq"
+	if strings.Contains(t.Address, ":") {
+		masqueradeOption = ".masq6"
+	}
+	masquerade := "0"
+	if t.Table != 0 {
+		// Policy-routed LAN traffic must enter the hub as this node's tunnel
+		// address so the hub's tunnel-range masquerade covers internet access.
+		masquerade = "1"
+	}
 	commands := []Command{
 		remove(zone),
 		set(zone, "zone"),
@@ -177,8 +204,7 @@ func (t Tunnel) FirewallCommands() []Command {
 		set(zone+".input", "ACCEPT"),
 		set(zone+".output", "ACCEPT"),
 		set(zone+".forward", "ACCEPT"),
-		// Straight routing is the point, so the hub sees real LAN addresses.
-		set(zone+".masq", "0"),
+		set(zone+masqueradeOption, masquerade),
 		// Clamps TCP MSS on forwarded traffic, which is what stops the case
 		// where ping and SSH work but some HTTPS connections hang.
 		set(zone+".mtu_fix", "1"),
@@ -233,7 +259,11 @@ func (t Tunnel) SettingsCommands(hub string) []Command {
 	commands = append(commands,
 		remove(nodeSection+".mtu_override"),
 		remove(nodeSection+".keepalive_override"),
+		remove(nodeSection+".table"),
 	)
+	if t.Table != 0 {
+		commands = append(commands, set(nodeSection+".table", strconv.Itoa(t.Table)))
+	}
 	if t.MTUOverride != nil {
 		commands = append(commands, set(nodeSection+".mtu_override", strconv.Itoa(*t.MTUOverride)))
 	}

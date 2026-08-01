@@ -31,6 +31,8 @@ import (
 // version is set at build time by the Makefile.
 var version = "dev"
 
+const defaultTable = 51820
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -44,6 +46,11 @@ func main() {
 		}
 	case "refresh":
 		if err := refresh(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "shadow9-node: %v\n", err)
+			os.Exit(1)
+		}
+	case "uninstall":
+		if err := uninstall(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "shadow9-node: %v\n", err)
 			os.Exit(1)
 		}
@@ -63,11 +70,47 @@ func usage() {
 
   shadow9-node join -hub URL -token-file PATH [options]
   shadow9-node refresh [options]
+  shadow9-node uninstall
   shadow9-node version
 
-Enrolls or refreshes this router on a shadow9 WireGuard hub and writes the
-matching UCI network and firewall configuration.
+Enrolls, refreshes or removes this router's Shadow9-managed WireGuard
+configuration. Other interfaces and routing policies are left alone.
 `, version)
+}
+
+func uninstall(args []string) error {
+	flags := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	quiet := flags.Bool("quiet", false, "do not print the removal summary")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("uninstall takes no arguments")
+	}
+
+	router := openwrt.Router{Shell: openwrt.SystemShell{}}
+	if err := router.Require("uci", "the OpenWrt base system"); err != nil {
+		return fmt.Errorf("%w. This does not look like an OpenWrt router", err)
+	}
+	removed, err := router.RemoveTunnel()
+	if err != nil {
+		return err
+	}
+	if err := router.DisableRefresh(); err != nil {
+		return err
+	}
+	if err := router.RemoveEnrollmentFiles(); err != nil {
+		return err
+	}
+	if !*quiet {
+		if removed {
+			fmt.Println("Removed the Shadow9-managed tunnel and firewall configuration.")
+		} else {
+			fmt.Println("No Shadow9-managed tunnel was installed.")
+		}
+		fmt.Println("Other WireGuard interfaces, routing tables, PBR policies and packages were left unchanged.")
+	}
+	return nil
 }
 
 // joinOptions is everything the join command takes from the command line.
@@ -85,6 +128,8 @@ type joinOptions struct {
 	listenPort int
 	mtu        int
 	keepalive  int
+	table      int
+	siteOnly   bool
 	timeout    time.Duration
 }
 
@@ -120,6 +165,10 @@ func joinFlags() (*flag.FlagSet, *joinOptions) {
 		"override the hub's interface MTU")
 	flags.IntVar(&options.keepalive, "keepalive", -1,
 		"override the hub's keepalive seconds; 0 turns keepalives off")
+	flags.IntVar(&options.table, "table", 0,
+		"routing table to use; 0 automatically selects one from 51820 upward")
+	flags.BoolVar(&options.siteOnly, "site-only", false,
+		"route only the tunnel and other sites, without a policy-routing default")
 	flags.DurationVar(&options.timeout, "timeout", 20*time.Second,
 		"how long to wait on the hub")
 	return flags, options
@@ -130,6 +179,15 @@ func join(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if options.hub == "" {
+		return fmt.Errorf("-hub is required")
+	}
+	if !options.siteOnly && options.table < 0 {
+		return fmt.Errorf("-table cannot be negative")
+	}
+	if !options.siteOnly && options.table >= 253 && options.table <= 255 {
+		return fmt.Errorf("-table %d is reserved by Linux", options.table)
+	}
 
 	tokenText, err := readToken(options.token, options.tokenFile)
 	if err != nil {
@@ -139,15 +197,21 @@ func join(args []string) error {
 	if err != nil {
 		return err
 	}
-	if options.hub == "" {
-		return fmt.Errorf("-hub is required")
-	}
 
 	router := openwrt.Router{Shell: openwrt.SystemShell{}}
 	if err := router.Require("uci", "the OpenWrt base system"); err != nil {
 		return fmt.Errorf("%w. This does not look like an OpenWrt router", err)
 	}
 	if err := router.Require("wg", "wireguard-tools"); err != nil {
+		return err
+	}
+	if !options.siteOnly {
+		if err := router.RequirePolicyPackage(); err != nil {
+			return err
+		}
+	}
+	table, err := chooseTable(options.table, options.siteOnly, options.iface, router)
+	if err != nil {
 		return err
 	}
 	// Said before anything is written, so the operator learns about it while
@@ -194,6 +258,7 @@ func join(args []string) error {
 		options.listenPort,
 		options.mtu,
 		options.keepalive,
+		table,
 	)
 	if err != nil {
 		return err
@@ -216,6 +281,10 @@ func join(args []string) error {
 	fmt.Printf("Joined %s as %s.\n", strings.TrimSuffix(options.hub, "/"), peerName)
 	fmt.Printf("    %s is %s, hub at %s:%d.\n",
 		tunnel.Interface, tunnel.Address, tunnel.EndpointHost, tunnel.EndpointPort)
+	if tunnel.Table != 0 {
+		fmt.Printf("    Internet routes are ready in table %d; PBR selects what uses them.\n",
+			tunnel.Table)
+	}
 	if len(routes) > 0 {
 		fmt.Printf("    Announcing %s to the rest of the tunnel.\n", strings.Join(routes, ", "))
 	}
@@ -333,8 +402,16 @@ func refresh(args []string) error {
 	if err != nil {
 		return err
 	}
+	tableText, err := savedValue(router, "shadow9.node.table")
+	if err != nil {
+		return err
+	}
+	table, err := savedNumber(tableText, "routing table")
+	if err != nil {
+		return err
+	}
 	tunnel, err := buildRefreshTunnel(
-		answer, privateKey, iface, zone, listenPort, mtuOverride, keepaliveOverride)
+		answer, privateKey, iface, zone, listenPort, mtuOverride, keepaliveOverride, table)
 	if err != nil {
 		return err
 	}
@@ -344,6 +421,44 @@ func refresh(args []string) error {
 	}
 	fmt.Printf("Refreshed %s to revision %d.\n", name, tunnel.Revision)
 	return nil
+}
+
+func chooseTable(requested int, siteOnly bool, iface string, router openwrt.Router) (int, error) {
+	if siteOnly {
+		return 0, nil
+	}
+	if requested != 0 {
+		return requested, nil
+	}
+	savedInterface, err := savedValue(router, "shadow9.node.interface")
+	if err != nil {
+		return 0, fmt.Errorf("reading the saved interface before selecting a routing table: %w", err)
+	}
+	if savedInterface == iface {
+		text, err := savedValue(router, "shadow9.node.table")
+		if err != nil {
+			return 0, fmt.Errorf("reading the saved routing table: %w", err)
+		}
+		table, err := savedNumber(text, "routing table")
+		if err != nil {
+			return 0, err
+		}
+		if table != 0 {
+			if table >= 253 && table <= 255 {
+				return 0, fmt.Errorf("the saved routing table %d is reserved by Linux", table)
+			}
+			for _, family := range []string{"ip4table", "ip6table"} {
+				current, err := savedValue(router, "network."+iface+"."+family)
+				if err != nil {
+					return 0, fmt.Errorf("reading network.%s.%s: %w", iface, family, err)
+				}
+				if strings.TrimSpace(current) == strconv.Itoa(table) {
+					return table, nil
+				}
+			}
+		}
+	}
+	return router.NextTable(defaultTable)
 }
 
 func savedNumber(text, name string) (int, error) {
@@ -484,7 +599,7 @@ func chooseLanZone(given string, router openwrt.Router) (string, error) {
 }
 
 func buildTunnel(answer enroll.Response, privateKey wgkey.Key,
-	iface, zone string, listenPort, mtu, keepalive int) (openwrt.Tunnel, error) {
+	iface, zone string, listenPort, mtu, keepalive, table int) (openwrt.Tunnel, error) {
 
 	if answer.MTU == nil || answer.Keepalive == nil {
 		return openwrt.Tunnel{}, fmt.Errorf("the hub's answer has no tunnel settings")
@@ -504,16 +619,19 @@ func buildTunnel(answer enroll.Response, privateKey wgkey.Key,
 	} else {
 		keepaliveOverride = &keepalive
 	}
+	allowedIPs := []string{answer.TunnelNetwork}
 	return tunnelFor(tunnelSettings{
 		address: answer.Address, hubPublicKey: answer.HubPublicKey,
-		hubEndpoint: answer.HubEndpoint, allowedIPs: []string{answer.TunnelNetwork},
+		tunnelNetwork: answer.TunnelNetwork,
+		hubEndpoint:   answer.HubEndpoint, allowedIPs: allowedIPs,
 		mtu: mtu, keepalive: keepalive,
-		mtuOverride: mtuOverride, keepaliveOverride: keepaliveOverride,
+		mtuOverride: mtuOverride, keepaliveOverride: keepaliveOverride, table: table,
 	}, privateKey, iface, zone, listenPort)
 }
 
 type tunnelSettings struct {
 	address           string
+	tunnelNetwork     string
 	hubPublicKey      string
 	hubEndpoint       string
 	allowedIPs        []string
@@ -522,10 +640,12 @@ type tunnelSettings struct {
 	revision          int
 	mtuOverride       *int
 	keepaliveOverride *int
+	table             int
 }
 
 func buildRefreshTunnel(answer enroll.RefreshResponse, privateKey wgkey.Key,
-	iface, zone string, listenPort int, mtuOverride, keepaliveOverride *int) (openwrt.Tunnel, error) {
+	iface, zone string, listenPort int, mtuOverride, keepaliveOverride *int,
+	table int) (openwrt.Tunnel, error) {
 	if answer.MTU == nil || answer.Keepalive == nil || answer.Revision == nil {
 		return openwrt.Tunnel{}, fmt.Errorf("the hub's answer has no tunnel settings")
 	}
@@ -536,23 +656,40 @@ func buildRefreshTunnel(answer enroll.RefreshResponse, privateKey wgkey.Key,
 	if keepaliveOverride != nil {
 		keepalive = *keepaliveOverride
 	}
+	allowedIPs := answer.AllowedIPs
 	return tunnelFor(tunnelSettings{
 		address: answer.Address, hubPublicKey: answer.HubPublicKey,
-		hubEndpoint: answer.HubEndpoint, allowedIPs: answer.AllowedIPs,
+		tunnelNetwork: answer.TunnelNetwork,
+		hubEndpoint:   answer.HubEndpoint, allowedIPs: allowedIPs,
 		mtu: mtu, keepalive: keepalive, revision: *answer.Revision,
 		mtuOverride: mtuOverride, keepaliveOverride: keepaliveOverride,
+		table: table,
 	}, privateKey, iface, zone, listenPort)
 }
 
 func tunnelFor(settings tunnelSettings, privateKey wgkey.Key,
 	iface, zone string, listenPort int) (openwrt.Tunnel, error) {
-	address, err := openwrt.AddressWithPrefix(settings.address)
+	var address string
+	var err error
+	if settings.table == 0 {
+		address, err = openwrt.AddressWithPrefix(settings.address)
+	} else {
+		address, err = openwrt.AddressWithPrefix(settings.address, settings.tunnelNetwork)
+	}
 	if err != nil {
 		return openwrt.Tunnel{}, fmt.Errorf("the address the hub gave is unusable: %w", err)
 	}
 	host, port, err := openwrt.SplitEndpoint(settings.hubEndpoint)
 	if err != nil {
 		return openwrt.Tunnel{}, fmt.Errorf("the endpoint the hub gave is unusable: %w", err)
+	}
+	allowedIPs := settings.allowedIPs
+	if settings.table != 0 {
+		defaultRoute := openwrt.DefaultIPv4Route
+		if strings.Contains(address, ":") {
+			defaultRoute = openwrt.DefaultIPv6Route
+		}
+		allowedIPs = []string{defaultRoute}
 	}
 	return openwrt.Tunnel{
 		Interface:         iface,
@@ -565,11 +702,12 @@ func tunnelFor(settings tunnelSettings, privateKey wgkey.Key,
 		Revision:          settings.revision,
 		MTUOverride:       settings.mtuOverride,
 		KeepaliveOverride: settings.keepaliveOverride,
+		Table:             settings.table,
 
 		HubPublicKey: settings.hubPublicKey,
 		EndpointHost: host,
 		EndpointPort: port,
 		Keepalive:    settings.keepalive,
-		AllowedIPs:   settings.allowedIPs,
+		AllowedIPs:   allowedIPs,
 	}, nil
 }
