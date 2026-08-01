@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ..config import Config, ServerConfig, TorConfig, LogConfig, SecurityConfig, AuthConfig
-from ..config import generate_master_key
+from ..paths import load_master_key
 
 console = Console()
 
@@ -143,7 +143,7 @@ def show_config_summary(config: Config) -> None:
     Args:
         config: The configuration to display
     """
-    table = Table(title="Configuration Summary", show_header=True)
+    table = Table(title="Server Configuration", show_header=True)
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
@@ -156,22 +156,53 @@ def show_config_summary(config: Config) -> None:
     table.add_row("Tor Control Port", str(config.tor.control_port))
     table.add_row("Tor Routing", "Per-user (IsolateSOCKSAuth)")
     table.add_row("", "")
-    table.add_row("Allowed Ports", ", ".join(map(str, config.security.allowed_ports)))
-    table.add_row("Rate Limit", f"{config.security.rate_limit_per_minute}/min")
-    table.add_row("", "")
     table.add_row("Log Level", config.log.level)
     table.add_row("Log Format", config.log.format)
 
     console.print("\n")
     console.print(table)
 
+    security_table = Table(title="Security Configuration", show_header=True)
+    security_table.add_column("Setting", style="cyan")
+    security_table.add_column("Value", style="green")
+    security_table.add_row("Max Failed Attempts", str(config.auth.max_failed_attempts))
+    security_table.add_row(
+        "Lockout Duration", f"{config.auth.lockout_duration_minutes} min"
+    )
+    security_table.add_row("Allowed Ports", ", ".join(map(str, config.security.allowed_ports)))
+    security_table.add_row("Rate Limit", f"{config.security.rate_limit_per_minute}/min")
 
-def show_master_key() -> None:
-    """Display a newly generated master key."""
-    key = generate_master_key()
+    console.print()
+    console.print(security_table)
+
+    wireguard_table = Table(title="WireGuard Configuration", show_header=True)
+    wireguard_table.add_column("Setting", style="cyan")
+    wireguard_table.add_column("Value", style="green")
+    wireguard_table.add_row("Enabled", str(config.wireguard.enabled))
+    wireguard_table.add_row("Listen Port", str(config.wireguard.listen_port))
+    wireguard_table.add_row("Enrollment Host", config.wireguard.enrollment_host)
+    wireguard_table.add_row("Enrollment Port", str(config.wireguard.enrollment_port))
+    wireguard_table.add_row("Tunnel Network", config.wireguard.tunnel_network)
+    wireguard_table.add_row("Hub Endpoint", config.wireguard.hub_endpoint)
+    wireguard_table.add_row("MTU", str(config.wireguard.mtu))
+    wireguard_table.add_row("DNS", ", ".join(config.wireguard.dns))
+    wireguard_table.add_row("Keepalive", f"{config.wireguard.keepalive}s")
+
+    console.print()
+    console.print(wireguard_table)
+
+
+def show_master_key(key: str | None = None) -> None:
+    """Display a new key or the key currently used for credential encryption."""
+    key = key or load_master_key()
+    if key is None:
+        console.print("[red]Master key not found. Run 'shadow9 init' to generate one.[/red]")
+        return
+
     console.print(
         Panel(
-            f"[bold yellow]Master Key (save this securely!):[/bold yellow]\n\n"
+            "[bold yellow]Keep this key secure! Anyone with this key can decrypt credentials."
+            "[/bold yellow]\n\n"
             f"[cyan]{key}[/cyan]\n\n"
             f"Set as environment variable:\n"
             f'[dim]export SHADOW9_MASTER_KEY="{key}"[/dim]',

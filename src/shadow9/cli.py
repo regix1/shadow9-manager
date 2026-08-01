@@ -53,8 +53,6 @@ from .commands import (
     register_api_commands,
     register_wireguard_commands,
 )
-from .menu import run_interactive_menu
-
 console = Console()
 
 # Create the main app
@@ -82,22 +80,15 @@ def main(
             "--version", callback=version_callback, is_eager=True, help="Show version and exit."
         ),
     ] = False,
-):
+) -> None:
     """
     Shadow9 Manager - Secure SOCKS5 Proxy with Tor Support
 
     A security-focused SOCKS5 proxy server that supports Tor network
     connectivity for accessing .onion addresses.
     """
-    # If no command given, launch interactive menu
     if ctx.invoked_subcommand is None:
-        run_interactive_menu()
-
-
-@app.command("menu")
-def menu_command():
-    """Launch the interactive menu."""
-    run_interactive_menu()
+        console.print(ctx.get_help())
 
 
 # Register all commands from submodules

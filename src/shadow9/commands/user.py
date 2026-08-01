@@ -35,6 +35,14 @@ class BridgeChoice(str, Enum):
     snowflake = "snowflake"
 
 
+def _credentials_for(
+    auth_manager: AuthManager, username: Optional[str], password: Optional[str]
+) -> tuple[str, str]:
+    """Return supplied credentials with secure random values filling any blanks."""
+    random_user, random_pass = auth_manager.generate_credentials()
+    return username or random_user, password or random_pass
+
+
 def _offer_service_restart(reason: str = "Changes will apply after restart.") -> None:
     """Check if service is running and offer to restart it."""
     import subprocess
@@ -146,6 +154,12 @@ def register_user_commands(app: typer.Typer) -> None:
             Optional[bool],
             typer.Option("--logging/--no-logging", help="Enable or disable activity logging"),
         ] = None,
+        dry_run: Annotated[
+            bool,
+            typer.Option(
+                "--dry-run", help="Print the username and password without creating a user"
+            ),
+        ] = False,
         config: Annotated[
             str, typer.Option("--config", "-c", help="Path to configuration file")
         ] = "config/config.yaml",
@@ -165,6 +179,7 @@ def register_user_commands(app: typer.Typer) -> None:
                 rate_limit,
                 bind_port,
                 logging,
+                dry_run,
                 config,
             )
         except KeyboardInterrupt:
@@ -182,10 +197,35 @@ def register_user_commands(app: typer.Typer) -> None:
         rate_limit: Optional[int],
         bind_port: Optional[int],
         logging: Optional[bool],
+        dry_run: bool,
         config: str,
     ) -> None:
         """Implementation of user_generate command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
+
+        if dry_run:
+            auth_manager = AuthManager(
+                credentials_file=cfg.get_credentials_file(),
+                master_key=load_master_key(),
+                tunnel_network=cfg.wireguard.tunnel_network,
+            )
+            final_username, final_password = _credentials_for(
+                auth_manager, username, password
+            )
+            console.print(
+                Panel(
+                    "\n".join(
+                        [
+                            "[bold yellow]No user was created.[/bold yellow]\n",
+                            f"Username: [cyan]{final_username}[/cyan]",
+                            f"Password: [cyan]{final_password}[/cyan]",
+                        ]
+                    ),
+                    title="Generated Credentials",
+                    border_style="yellow",
+                )
+            )
+            return
 
         # Prompt for username if not specified
         if username is None:
@@ -303,9 +343,7 @@ def register_user_commands(app: typer.Typer) -> None:
         )
 
         # Generate random values for any not provided
-        random_user, random_pass = auth_manager.generate_credentials()
-        final_username = username if username else random_user
-        final_password = password if password else random_pass
+        final_username, final_password = _credentials_for(auth_manager, username, password)
 
         routing = "Tor" if use_tor else "Direct"
         if bridge != BridgeChoice.none:

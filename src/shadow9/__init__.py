@@ -10,6 +10,14 @@ A security-focused SOCKS5 proxy implementation with:
 from importlib.metadata import PackageNotFoundError, version as installed_version
 from pathlib import Path
 
+from .socks5_server import Socks5Server
+from .socks5_client import Socks5Client
+from .tor_connector import TorConnector
+from .auth import AuthManager
+from .config import Config
+from .security import SecurityLevel, SecurityConfig, get_security_preset
+from .bridges import BridgeType, BridgeConfig, get_bridge_preset
+
 
 def _read_version() -> str:
     """
@@ -32,14 +40,6 @@ def _read_version() -> str:
 
 __version__ = _read_version()
 __author__ = "Shadow9 Team"
-
-from .socks5_server import Socks5Server
-from .socks5_client import Socks5Client
-from .tor_connector import TorConnector
-from .auth import AuthManager
-from .config import Config
-from .security import SecurityLevel, SecurityConfig, get_security_preset
-from .bridges import BridgeType, BridgeConfig, get_bridge_preset
 
 __all__ = [
     "Socks5Server",

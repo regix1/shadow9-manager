@@ -45,9 +45,9 @@ class Keypair:
     A private key and the public key derived from it.
 
     The private half is kept out of both string forms on purpose. Error messages, log
-    events, `rich` tables and the interactive menu all reach for str() or repr() before
-    anyone thinks about it, and a private key that reaches a log file has to be treated as
-    spent. Read `private_key` explicitly when you actually need it.
+    events and `rich` tables all reach for str() or repr() before anyone thinks about it,
+    and a private key that reaches a log file has to be treated as spent. Read
+    `private_key` explicitly when you actually need it.
     """
 
     private_key: str

@@ -21,17 +21,51 @@ import typer
 from rich.table import Table
 from rich.panel import Panel
 
-from ..config import Config, generate_default_config
-from ..paths import write_file_safely
+from ..config import Config, generate_default_config, generate_master_key
+from ..paths import get_paths, write_file_safely
 from ..tor_connector import TorConnector, TorConfig
 from ..wizards import run_init_wizard, show_config_summary, show_master_key
 from ..ui import console, header, dependency_table
 from ..ui import success as ui_success, error as ui_error
 from .service import SERVICE_NAME
+from . import probe
 
 
 def register_util_commands(app: typer.Typer):
     """Register utility commands with the main app."""
+
+    show_app = typer.Typer(help="Show current settings and paths.")
+    app.add_typer(show_app, name="show")
+
+    @show_app.command("config")
+    def show_config() -> None:
+        """Show the server, security, and WireGuard configuration."""
+        paths = get_paths()
+        try:
+            config = Config.load(paths.config_file)
+        except Exception as error:
+            console.print(f"[red]Error loading configuration: {error}[/red]")
+            raise typer.Exit(1) from error
+        show_config_summary(config)
+
+    @show_app.command("paths")
+    def show_paths() -> None:
+        """Show the files and directories used by Shadow9."""
+        paths = get_paths()
+        table = Table(title="Shadow9 Paths", show_header=True)
+        table.add_column("Path Type", style="cyan")
+        table.add_column("Location", style="green")
+        table.add_row("Root Directory", str(paths.root))
+        table.add_row("Config File", str(paths.config_file))
+        table.add_row("Credentials File", str(paths.credentials_file))
+        table.add_row("Users Directory", str(paths.users_dir))
+        table.add_row("Logs Directory", str(paths.logs_dir))
+        console.print(table)
+
+    @show_app.command("key")
+    def show_key() -> None:
+        """Show the master key used to encrypt credentials."""
+        show_master_key()
 
     @app.command()
     def init(
@@ -53,7 +87,7 @@ def register_util_commands(app: typer.Typer):
         if quick:
             generate_default_config(output_path)
             console.print(f"[green]Configuration file created: {output}[/green]")
-            show_master_key()
+            show_master_key(generate_master_key())
             return
 
         # Interactive wizard
@@ -79,7 +113,7 @@ def register_util_commands(app: typer.Typer):
             # Quick start - just use defaults
             generate_default_config(output_path)
             console.print(f"\n[green]Configuration file created: {output}[/green]")
-            show_master_key()
+            show_master_key(generate_master_key())
             return
 
         # Custom configuration
@@ -94,7 +128,7 @@ def register_util_commands(app: typer.Typer):
 
         config.save(output_path)
         console.print(f"\n[green]Configuration file created: {output}[/green]")
-        show_master_key()
+        show_master_key(generate_master_key())
 
     @app.command("check-tor")
     def check_tor(
@@ -229,9 +263,10 @@ def register_util_commands(app: typer.Typer):
             )
 
     @app.command()
-    def status():
-        """Show proxy status and Tor connectivity."""
+    def status() -> None:
+        """Show proxy status, listening ports, and Tor connectivity."""
         from ..setup import check_setup
+        from .api import _read_api_config
 
         console.print("\n[bold cyan]Shadow9 Proxy Status[/bold cyan]\n")
 
@@ -250,6 +285,26 @@ def register_util_commands(app: typer.Typer):
         ]
 
         console.print(dependency_table(deps_list, title="Proxy Components"))
+
+        paths = get_paths()
+        config = Config.load(paths.config_file)
+        api_config = _read_api_config(str(paths.config_dir / "api.yaml")) or {}
+        services: list[tuple[str, str, int]] = [
+            ("Proxy", config.server.host, config.server.port),
+            (
+                "API",
+                str(api_config.get("host", "127.0.0.1")),
+                int(api_config.get("port", 8080)),
+            ),
+        ]
+
+        console.print("\n[bold cyan]Listening Ports[/bold cyan]")
+        for name, host, port in services:
+            listening = asyncio.run(probe._something_is_listening(host, port))
+            if listening:
+                ui_success(f"{name} listening on {host}:{port}")
+            else:
+                ui_error(f"{name} not listening on {host}:{port}")
 
         # Check Tor connectivity
         console.print("\n[bold cyan]Tor Connection[/bold cyan]")

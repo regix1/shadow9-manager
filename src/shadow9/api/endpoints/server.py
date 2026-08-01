@@ -4,12 +4,10 @@ Server management endpoints.
 RESTful API for server status and control.
 """
 
-import asyncio
-
 from fastapi import APIRouter, Depends
 
+from ...commands.probe import _something_is_listening
 from ...core.config import api_worker_count, get_settings, Settings
-from ...core.logging import get_logger
 from ...memory_budget import MIB, read_memory_budget
 from ...schemas.server import (
     AuthSection,
@@ -25,51 +23,7 @@ from ...services.user_service import UserService
 from ..deps import get_current_admin, get_user_service
 
 
-logger = get_logger(__name__)
-
 router = APIRouter(prefix="/server", tags=["server"])
-
-# a status probe must answer quickly even when the proxy host drops packets
-PROXY_PROBE_TIMEOUT = 1.0
-
-
-async def _something_is_listening(host: str, port: int) -> bool:
-    """
-    Check whether a TCP connection to the configured proxy address is accepted.
-
-    This observes exactly one thing: that some process accepted a connection at that
-    host and port. It does not prove the listener is the proxy, and it does not prove
-    the proxy can serve anyone, since a proxy with an empty credential store accepts
-    connections and then fails every authentication. The API runs in a different
-    process, so this is as much as it can honestly establish.
-
-    Args:
-        host: The proxy's configured bind address
-        port: The proxy's configured bind port
-
-    Returns:
-        True if a TCP connection was accepted, False otherwise
-    """
-    # a wildcard bind is not a connectable address, so probe the loopback it covers
-    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-
-    try:
-        _, writer = await asyncio.wait_for(
-            asyncio.open_connection(probe_host, port), timeout=PROXY_PROBE_TIMEOUT
-        )
-    except (OSError, asyncio.TimeoutError) as e:
-        logger.debug(
-            "Proxy did not accept a probe connection", host=probe_host, port=port, error=str(e)
-        )
-        return False
-
-    writer.close()
-    try:
-        # a status endpoint must answer even if the peer never finishes the close
-        await asyncio.wait_for(writer.wait_closed(), timeout=PROXY_PROBE_TIMEOUT)
-    except (OSError, asyncio.TimeoutError):
-        pass
-    return True
 
 
 @router.get(

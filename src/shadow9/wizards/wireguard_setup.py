@@ -17,7 +17,6 @@ from rich.table import Table
 
 from ..config import Config
 from ..services.wireguard_service import (
-    CLEARTEXT_API_NOTICE,
     DEFAULT_TOKEN_HOURS,
     checked_endpoint,
     is_public_endpoint_host,
@@ -114,35 +113,6 @@ def run_wireguard_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> Option
     )
 
     return answers
-
-
-def show_wireguard_summary(config_path: str = DEFAULT_CONFIG_PATH) -> None:
-    """
-    Show the hub settings as they now stand.
-
-    Args:
-        config_path: The configuration file to read
-    """
-    cfg = _load_config(config_path)
-
-    table = Table(title="WireGuard hub", show_header=True)
-    table.add_column("Setting", style="cyan")
-    table.add_column("Value", style="green")
-    table.add_row("Enabled", "Yes" if cfg.wireguard.enabled else "No")
-    table.add_row("Endpoint", cfg.wireguard.hub_endpoint or "not set")
-    table.add_row("Tunnel network", cfg.wireguard.tunnel_network)
-    table.add_row("Listen port", f"{cfg.wireguard.listen_port}/udp")
-    table.add_row(
-        "Enrollment listener",
-        f"{cfg.wireguard.enrollment_host}:{cfg.wireguard.enrollment_port}/tcp",
-    )
-    table.add_row("MTU", str(cfg.wireguard.mtu))
-    table.add_row("Keepalive", f"{cfg.wireguard.keepalive}s")
-    table.add_row("DNS", ", ".join(cfg.wireguard.dns) or "not set")
-    table.add_row("Hub key", "present" if load_hub_private_key() else "not generated")
-
-    console.print(table)
-    console.print(f"[yellow]{CLEARTEXT_API_NOTICE}[/yellow]")
 
 
 def _load_config(config_path: str) -> Config:

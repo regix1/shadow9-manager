@@ -274,20 +274,3 @@ def _save_config(config: dict, config_path: str) -> bool:
         )
     )
     return True
-
-
-def display_api_config(config_path: str = DEFAULT_CONFIG_PATH) -> None:
-    """
-    Display the current API configuration.
-
-    Args:
-        config_path: Path to the API config file
-    """
-    config = _load_existing_config(config_path)
-
-    if not config:
-        console.print("[yellow]No API configuration found.[/yellow]")
-        console.print("[dim]Run the API setup wizard to configure: shadow9 api setup[/dim]")
-        return
-
-    _show_summary({**config, "key": get_api_key(Path(config_path))})

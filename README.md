@@ -259,11 +259,19 @@ to get a generated password that already meets those rules.
 On `shadow9 user modify`, `--rate-limit 0` and `--bind-port 0` mean "go back to the
 server default".
 
-### Interactive Menu
+### Inspect Current Settings
 
 ```bash
-# Open the menu (this is also what runs when shadow9 is called with no arguments)
-shadow9 menu
+# Show command help (also printed when shadow9 is called with no arguments)
+shadow9
+
+# Show the active configuration, paths, or credential-encryption key
+shadow9 show config
+shadow9 show paths
+shadow9 show key
+
+# Generate a username and password without creating a user
+shadow9 user generate --dry-run
 ```
 
 ### Encryption Keys
@@ -509,7 +517,7 @@ Shadow9 Manager
 │   ├── Service commands (install, start, stop, logs)
 │   ├── Key commands (generate, check)
 │   ├── API commands (setup, start, status, key)
-│   └── Interactive menu
+│   └── Show commands (config, paths, key)
 ├── REST API (FastAPI, separate process)
 │   ├── User endpoints (list, create, modify, remove)
 │   ├── Server status endpoints
