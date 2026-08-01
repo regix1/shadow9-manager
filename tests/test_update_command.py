@@ -797,7 +797,7 @@ class TestPrivilege:
 
         monkeypatch.setattr(utils.os, "geteuid", geteuid, raising=False)
 
-        assert utils._privileged(["systemctl", "stop", SERVICE_NAME]) == [
+        assert utils.privileged(["systemctl", "stop", SERVICE_NAME]) == [
             "systemctl",
             "stop",
             SERVICE_NAME,
@@ -814,7 +814,7 @@ class TestPrivilege:
 
         monkeypatch.setattr(utils.os, "geteuid", geteuid, raising=False)
 
-        assert utils._privileged(["systemctl", "stop", SERVICE_NAME])[:2] == ["sudo", "-n"]
+        assert utils.privileged(["systemctl", "stop", SERVICE_NAME])[:2] == ["sudo", "-n"]
 
     def test_a_box_without_sudo_runs_the_command_as_it_is(
         self, tools: set[str], monkeypatch: pytest.MonkeyPatch
@@ -826,7 +826,7 @@ class TestPrivilege:
 
         monkeypatch.setattr(utils.os, "geteuid", geteuid, raising=False)
 
-        assert utils._privileged(["systemctl", "start", SERVICE_NAME]) == [
+        assert utils.privileged(["systemctl", "start", SERVICE_NAME]) == [
             "systemctl",
             "start",
             SERVICE_NAME,

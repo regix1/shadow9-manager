@@ -1196,7 +1196,7 @@ def _project_version(repo_root: Path) -> str:
     return found.group(1) if found else "unknown"
 
 
-def _privileged(command: list[str]) -> list[str]:
+def privileged(command: list[str]) -> list[str]:
     """Prefix a system command with sudo unless the caller is already root."""
     geteuid = getattr(os, "geteuid", None)
     if geteuid is not None and geteuid() == 0:
@@ -1286,7 +1286,7 @@ def _start_server(repo_root: Path, as_service: bool) -> bool:
     """Start the proxy again in the mode it was stopped in."""
     if as_service:
         result = subprocess.run(
-            _privileged(["systemctl", "start", SERVICE_NAME]), capture_output=True, text=True
+            privileged(["systemctl", "start", SERVICE_NAME]), capture_output=True, text=True
         )
         if result.returncode == 0:
             return True
@@ -1326,7 +1326,7 @@ def stop_running_server() -> RunningServer:
         if result.stdout.strip() == "active":
             console.print(f"[>] Stopping {SERVICE_NAME} service...")
             stop = subprocess.run(
-                _privileged(["systemctl", "stop", SERVICE_NAME]), capture_output=True, text=True
+                privileged(["systemctl", "stop", SERVICE_NAME]), capture_output=True, text=True
             )
             # The port stays bound until the unit is really gone, so a fixed sleep
             # either wastes time or restarts into an address already in use.
