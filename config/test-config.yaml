@@ -36,6 +36,7 @@ security:
   max_request_size: 1048576
 wireguard:
   enabled: false
+  interface: wg0
   listen_port: 51820
   enrollment_host: 0.0.0.0
   enrollment_port: 8081

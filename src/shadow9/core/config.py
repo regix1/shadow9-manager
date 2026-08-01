@@ -35,6 +35,7 @@ from ..memory_budget import (
 )
 from ..config import listener_port_errors
 from ..paths import write_file_safely
+from ..wireguard import DEFAULT_INTERFACE, checked_interface
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -265,6 +266,9 @@ class WireguardSettings(EnvFirstSettings):
     )
 
     enabled: bool = Field(default=False, description="Enable the WireGuard hub")
+    interface: str = Field(
+        default=DEFAULT_INTERFACE, description="Name of the WireGuard hub interface"
+    )
     listen_port: int = Field(
         default=51820, ge=1, le=65535, description="UDP port the hub listens on"
     )
@@ -313,6 +317,12 @@ class WireguardSettings(EnvFirstSettings):
             return [part.strip() for part in v.split(",") if part.strip()]
         return v
 
+    @field_validator("interface")
+    @classmethod
+    def validate_interface(cls, v: str) -> str:
+        """Keep the configured name within WireGuard's interface-name limits."""
+        return checked_interface(v)
+
     @field_validator("tunnel_network")
     @classmethod
     def validate_tunnel_network(cls, v: str) -> str:
@@ -332,6 +342,10 @@ def _wireguard_setting_errors(settings: WireguardSettings) -> list[str]:
     is talking.
     """
     errors = []
+    try:
+        checked_interface(settings.interface)
+    except ValueError as error:
+        errors.append(str(error))
     if not 1 <= settings.listen_port <= 65535:
         errors.append(
             f"wireguard.listen_port must be between 1 and 65535, got {settings.listen_port}"
@@ -499,6 +513,7 @@ class Settings(BaseSettings):
             },
             "wireguard": {
                 "enabled": self.wireguard.enabled,
+                "interface": self.wireguard.interface,
                 "listen_port": self.wireguard.listen_port,
                 "enrollment_host": self.wireguard.enrollment_host,
                 "enrollment_port": self.wireguard.enrollment_port,

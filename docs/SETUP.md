@@ -35,6 +35,11 @@ shadow9 wg init --endpoint 203.0.113.10:51820
 `--endpoint` is `host:port` that peers dial. **The port is the UDP WireGuard port, not
 the API port.** A DNS name works as well as an address.
 
+Running `shadow9 wg init` without flags now asks for the endpoint when it has an
+interactive terminal. A script, redirected command, or test has no terminal to answer
+that question, so it must pass `--endpoint`; shadow9 stops before writing a key or config
+when the flag is missing.
+
 That one value drives two separate things, which is worth knowing before you get it
 wrong: it becomes the `Endpoint` line in every peer's config, and its host half becomes
 the host of the enrollment URL printed in join commands. A private or wrong address
@@ -45,6 +50,7 @@ Other options worth knowing:
 
 | Option | Why |
 |---|---|
+| `--interface s9hub` | Use another hub interface name. The default is `wg0`. |
 | `--network 10.9.0.0/24` | A different tunnel range. Must be private; a public range is refused. |
 | `--port` | A different UDP port. |
 | `--masquerade-interface eth0` | Only needed if full-tunnel devices should reach the internet. |
@@ -56,15 +62,30 @@ Other options worth knowing:
 `wg init` and `wg setup` write the hub key, render the config, and then try four independent
 host changes:
 
-1. Bring `wg0` up with `wg-quick`.
-2. Link shadow9's config into `/etc/wireguard` and enable `wg-quick@wg0` for reboot.
+1. Bring the selected interface up with `wg-quick`.
+2. Link shadow9's config into `/etc/wireguard` and enable its `wg-quick@` unit for reboot.
 3. Turn on IP forwarding and record it in `/etc/sysctl.d/99-shadow9.conf`.
-4. Check for the `wg0`-to-`wg0` FORWARD rule and add it only when it is absent.
+4. Check for the selected interface's tunnel-to-tunnel FORWARD rule and add it only when
+   it is absent.
 
 The forwarding key and firewall command follow the tunnel network: IPv4 uses
 `net.ipv4.ip_forward` and `iptables`; IPv6 uses `net.ipv6.conf.all.forwarding` and
 `ip6tables`. The command finishes with a four-line summary. One failed step does not stop
-the other three.
+the other three. The summary keeps the text printed by a failed command, so an error such
+as `wg0 already exists` is not flattened into a permission hint.
+
+Before writing a hub key or config, init checks for a live WireGuard interface with the
+selected name and for `/etc/wireguard/<name>.conf`. If this host already runs `wg0`, choose
+another name, for example:
+
+```
+shadow9 wg init --interface s9hub --endpoint 203.0.113.10:51820
+```
+
+The chosen name is saved in `wireguard.interface`. Hub config regeneration, endpoint
+changes, device configs, activation, the FORWARD rule and handshake checks keep using it.
+On Windows, or when the host cannot report its live WireGuard interfaces, init carries on
+with the checks it can make.
 
 ## 2. If activation needs manual work
 
@@ -73,8 +94,9 @@ No root access, Windows, a host without systemd, or a missing command are normal
 the same fallback in one place.
 
 shadow9 renders the config under its own install root, at
-`config/wireguard/wg0.conf`, which `init` prints. Replace the example path below with that
-printed path:
+`config/wireguard/<interface>.conf`, which `init` prints. The examples below use the
+default `wg0`; replace both the path and interface name when `--interface` selected another
+one:
 
 ```
 sudo wg-quick up /opt/shadow9/config/wireguard/wg0.conf     # the path init printed
@@ -89,9 +111,9 @@ sudo ln -s /opt/shadow9/config/wireguard/wg0.conf /etc/wireguard/wg0.conf
 sudo systemctl enable wg-quick@wg0
 ```
 
-If `/etc/wireguard/wg0.conf` already exists, shadow9 leaves it alone. Inspect that file
-before moving or removing it. You can still start shadow9's config by its full path with
-the `wg-quick up` command above.
+If `/etc/wireguard/wg0.conf` already exists, init stops before writing anything and tells
+you to use `--interface`. Inspect the existing file before moving or removing it; shadow9
+does not replace it.
 
 `wg-quick` reads the file when the interface comes up, so after a change that rewrites
 the hub config, restart it:

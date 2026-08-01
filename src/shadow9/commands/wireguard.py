@@ -23,6 +23,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -82,6 +83,7 @@ from ..wireguard import (
     TunnelAddress,
     TunnelNetwork,
     claim_address,
+    checked_interface,
     config_path,
     derive_public_key,
     generate_keypair,
@@ -138,6 +140,19 @@ class Host:
 
     def which(self, name: str) -> str | None:
         return shutil.which(name)
+
+    def interfaces(self) -> set[str] | None:
+        """Return live WireGuard interfaces, or None when this host cannot answer."""
+        binary = self.which("wg")
+        if binary is None:
+            return None
+        try:
+            result = self.run([binary, "show", "interfaces"])
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return set(result.stdout.split())
 
     def run(
         self, command: list[str], timeout: int = COMMAND_TIMEOUT
@@ -219,6 +234,9 @@ def init(
     port: Annotated[
         Optional[int], typer.Option("--port", "-p", help="UDP port the hub listens on")
     ] = None,
+    interface: Annotated[
+        str, typer.Option("--interface", "-i", help="WireGuard interface name for this hub")
+    ] = DEFAULT_INTERFACE,
     masquerade: Annotated[
         Optional[str],
         typer.Option(
@@ -254,6 +272,7 @@ def init(
             endpoint,
             network,
             port,
+            interface,
             masquerade,
             api_url,
             token_hours,
@@ -269,6 +288,7 @@ def _init_impl(
     endpoint: Optional[str],
     network: Optional[str],
     port: Optional[int],
+    interface: str,
     masquerade: Optional[str],
     api_url: Optional[str],
     token_hours: int,
@@ -281,13 +301,33 @@ def _init_impl(
     cfg = _load_config(config)
 
     try:
-        cfg = _with_hub_settings(cfg, endpoint, network, port)
+        cfg = _with_hub_settings(cfg, endpoint, network, port, interface)
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
 
+    if endpoint is None and not cfg.wireguard.hub_endpoint:
+        if not _terminal_is_interactive():
+            console.print(
+                "[red]--endpoint is required when wg init is not running in an interactive "
+                "terminal.[/red]"
+            )
+            raise typer.Exit(1)
+        from ..wizards.wireguard_setup import _prompt_endpoint
+
+        prompted = _prompt_endpoint(cfg)
+        if prompted is None:
+            console.print("[yellow]Cancelled. Nothing was written.[/yellow]")
+            raise typer.Exit(1)
+        cfg.wireguard.hub_endpoint = prompted
+
+    clash = _interface_clash(cfg.wireguard.interface)
+    if clash is not None:
+        console.print(f"[red]{clash}[/red]")
+        raise typer.Exit(1)
+
     with lock_file(hub_key_path()):
-        outward = masquerade or _stored_masquerade_interface()
+        outward = masquerade or _stored_masquerade_interface(cfg.wireguard.interface)
         existing = load_hub_private_key()
         if existing is not None and not force:
             console.print("[yellow]This host already has a WireGuard hub key.[/yellow]")
@@ -368,9 +408,9 @@ def _init_impl(
             "them to.[/dim]"
         )
 
-    _print_join_command(cfg, keypair.public_key, api_url, token_hours)
-    _print_cleartext_notice()
     _print_activation_summary(activation)
+    _print_cleartext_notice()
+    _print_join_command(cfg, keypair.public_key, api_url, token_hours)
 
 
 @wg_app.command("token")
@@ -984,8 +1024,40 @@ def _save_config(cfg: Config, config_file: Path) -> None:
         console.print("[dim]The settings apply to this run but were not kept.[/dim]")
 
 
+def _terminal_is_interactive() -> bool:
+    """Whether init can safely ask for a missing answer."""
+    return sys.stdin.isatty()
+
+
+def _interface_clash(interface: str, host: Host | None = None) -> str | None:
+    """Explain what already owns an interface name, or return None when it is free."""
+    machine = host or _host
+    if machine.is_windows():
+        return None
+
+    interfaces = machine.interfaces()
+    if interfaces is not None and interface in interfaces:
+        return (
+            f"WireGuard interface '{interface}' already exists on this host. "
+            "Choose another name with --interface."
+        )
+
+    system_config = WIREGUARD_SYSTEM_DIR / f"{interface}.conf"
+    try:
+        occupied = system_config.exists() or system_config.is_symlink()
+    except OSError:
+        occupied = False
+    if occupied:
+        return f"{system_config} already exists. Choose another name with --interface."
+    return None
+
+
 def _with_hub_settings(
-    cfg: Config, endpoint: Optional[str], network: Optional[str], port: Optional[int]
+    cfg: Config,
+    endpoint: Optional[str],
+    network: Optional[str],
+    port: Optional[int],
+    interface: str,
 ) -> Config:
     """
     Apply the settings `init` was given, refusing a value the config system rejects.
@@ -995,6 +1067,7 @@ def _with_hub_settings(
         endpoint: The endpoint peers dial, or None to keep what is configured
         network: The tunnel network, or None to keep what is configured
         port: The UDP listen port, or None to keep what is configured
+        interface: The WireGuard interface name
 
     Returns:
         The configuration with the hub turned on
@@ -1009,6 +1082,7 @@ def _with_hub_settings(
         cfg.wireguard.tunnel_network = network
     if port is not None:
         cfg.wireguard.listen_port = port
+    cfg.wireguard.interface = checked_interface(interface)
 
     cfg.wireguard.enabled = True
 
@@ -1051,21 +1125,24 @@ def _topology(cfg: Config, auth_manager: AuthManager, public_key: str) -> Topolo
     """
     try:
         return load_topology(
-            cfg, auth_manager.list_credentials(), public_key, _stored_masquerade_interface()
+            cfg,
+            auth_manager.list_credentials(),
+            public_key,
+            _stored_masquerade_interface(cfg.wireguard.interface),
         )
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
 
 
-def _stored_masquerade_interface() -> Optional[str]:
+def _stored_masquerade_interface(interface: str) -> Optional[str]:
     """
     Recover the hub's outward interface from the config it wrote last time.
 
     Returns:
         The interface name, or None when the hub does not NAT anything out
     """
-    path = config_path(DEFAULT_INTERFACE)
+    path = config_path(interface)
     if not path.exists():
         return None
     try:
@@ -1365,8 +1442,16 @@ def write_qr(text: str, path: Path) -> Optional[Path]:
     return path
 
 
-def _manual_activation(path: Path, network_version: int) -> ActivationResult:
+def _root_command(command: str, host: Host) -> str:
+    """Add sudo only when the current process is not already root."""
+    return command if host.is_root() else f"sudo {command}"
+
+
+def _manual_activation(
+    path: Path, network_version: int, host: Host | None = None
+) -> ActivationResult:
     """Print every host command skipped by ``--no-apply``."""
+    machine = host or _host
     interface = path.stem
     target = WIREGUARD_SYSTEM_DIR / path.name
     setting = (
@@ -1375,23 +1460,27 @@ def _manual_activation(path: Path, network_version: int) -> ActivationResult:
         else "net.ipv4.ip_forward=1"
     )
     firewall = "ip6tables" if network_version == 6 else "iptables"
+    up_command = _root_command(f"wg-quick up {shlex.quote(str(path))}", machine)
+    mkdir_command = _root_command(f"mkdir -p {WIREGUARD_SYSTEM_DIR}", machine)
+    link_command = _root_command(shlex.join(["ln", "-s", str(path), str(target)]), machine)
+    boot_command = _root_command(f"systemctl enable wg-quick@{interface}", machine)
+    forward_command = _root_command(f"sysctl -w {setting}", machine)
+    persist_command = f"echo '{setting}' | {_root_command(f'tee {FORWARDING_CONFIG}', machine)}"
+    check_command = _root_command(
+        f"{firewall} -C FORWARD -i {interface} -o {interface} -j ACCEPT", machine
+    )
+    add_command = _root_command(
+        f"{firewall} -A FORWARD -i {interface} -o {interface} -j ACCEPT", machine
+    )
 
     console.print("\n[yellow]Host activation was skipped by --no-apply.[/yellow]")
-    console.print(f"[dim]Bring it up with: sudo wg-quick up {shlex.quote(str(path))}[/dim]")
-    console.print(f"[dim]Create the boot link: sudo mkdir -p {WIREGUARD_SYSTEM_DIR}[/dim]")
-    console.print(
-        f"[dim]Then: {shlex.join(['sudo', 'ln', '-s', str(path), str(target)])}[/dim]"
-    )
-    console.print(f"[dim]Then: sudo systemctl enable wg-quick@{interface}[/dim]")
-    console.print(f"[dim]Turn forwarding on: sudo sysctl -w {setting}[/dim]")
-    console.print(
-        f"[dim]Persist it: echo '{setting}' | sudo tee {FORWARDING_CONFIG}[/dim]"
-    )
-    console.print(
-        f"[dim]Allow spoke traffic: sudo {firewall} -C FORWARD -i {interface} "
-        f"-o {interface} -j ACCEPT || sudo {firewall} -A FORWARD -i {interface} "
-        f"-o {interface} -j ACCEPT[/dim]"
-    )
+    console.print(f"[dim]Bring it up with: {up_command}[/dim]")
+    console.print(f"[dim]Create the boot link: {mkdir_command}[/dim]")
+    console.print(f"[dim]Then: {link_command}[/dim]")
+    console.print(f"[dim]Then: {boot_command}[/dim]")
+    console.print(f"[dim]Turn forwarding on: {forward_command}[/dim]")
+    console.print(f"[dim]Persist it: {persist_command}[/dim]")
+    console.print(f"[dim]Allow spoke traffic: {check_command} || {add_command}[/dim]")
 
     skipped = "not changed (--no-apply)"
     return ActivationResult(
@@ -1436,41 +1525,45 @@ def _apply_config(path: Path, host: Host | None = None) -> ActivationStep:
 
     binary = machine.which("wg-quick")
     if binary is None:
+        command = _root_command(f"wg-quick up {shlex.quote(str(path))}", machine)
         console.print("\n[yellow]wg-quick was not found, so the tunnel was not started.[/yellow]")
-        console.print(
-            f"[dim]Install wireguard-tools, then: sudo wg-quick up {shlex.quote(str(path))}[/dim]"
-        )
+        console.print(f"[dim]Install wireguard-tools, then: {command}[/dim]")
         return ActivationStep("Interface up", False, "wg-quick was not found")
 
     console.print(f"\n[cyan]Bringing the tunnel up: wg-quick up {path}[/cyan]")
     try:
         result = machine.run([binary, "up", str(path)])
     except (OSError, subprocess.SubprocessError) as error:
+        command = _root_command(f"wg-quick up {shlex.quote(str(path))}", machine)
         console.print(f"[yellow]Could not run wg-quick: {error}[/yellow]")
-        console.print(f"[dim]Run it yourself: sudo wg-quick up {shlex.quote(str(path))}[/dim]")
-        return ActivationStep("Interface up", False, "wg-quick could not run")
+        console.print(f"[dim]Run it yourself: {command}[/dim]")
+        return ActivationStep("Interface up", False, str(error))
 
     if result.returncode == 0:
         console.print("[green]Tunnel is up.[/green]")
         return ActivationStep("Interface up", True, "yes")
 
-    console.print(f"[yellow]wg-quick exited {result.returncode}: {result.stderr.strip()}[/yellow]")
-    console.print(
-        f"[dim]This usually needs root. Try: sudo wg-quick up {shlex.quote(str(path))}[/dim]"
+    detail = (
+        result.stderr.strip() or result.stdout.strip() or f"wg-quick exited {result.returncode}"
     )
-    return ActivationStep("Interface up", False, "wg-quick did not bring it up")
+    console.print(f"[yellow]wg-quick exited {result.returncode}: {detail}[/yellow]")
+    if not machine.is_root():
+        command = _root_command(f"wg-quick up {shlex.quote(str(path))}", machine)
+        console.print(f"[dim]Root may be needed. Try: {command}[/dim]")
+    return ActivationStep("Interface up", False, detail)
 
 
 def _enable_at_boot(path: Path, host: Host) -> ActivationStep:
     """Link the rendered config into systemd's location and enable its unit."""
     interface = path.stem
     target = WIREGUARD_SYSTEM_DIR / path.name
-    link_command = shlex.join(["sudo", "ln", "-s", str(path), str(target)])
-    enable_command = f"sudo systemctl enable wg-quick@{interface}"
+    mkdir_command = _root_command(f"mkdir -p {WIREGUARD_SYSTEM_DIR}", host)
+    link_command = _root_command(shlex.join(["ln", "-s", str(path), str(target)]), host)
+    enable_command = _root_command(f"systemctl enable wg-quick@{interface}", host)
 
     if host.is_windows():
         console.print("[yellow]Windows cannot enable the Linux wg-quick service.[/yellow]")
-        console.print(f"[dim]On the Linux hub: sudo mkdir -p {WIREGUARD_SYSTEM_DIR}[/dim]")
+        console.print(f"[dim]On the Linux hub: {mkdir_command}[/dim]")
         console.print(f"[dim]Then: {link_command}[/dim]")
         console.print(f"[dim]Then: {enable_command}[/dim]")
         return ActivationStep("Starts at boot", False, "Linux systemd is not available")
@@ -1491,12 +1584,12 @@ def _enable_at_boot(path: Path, host: Host) -> ActivationStep:
             console.print(f"[yellow]{target} is already {existing}; it was left alone.[/yellow]")
             console.print(
                 f"[dim]Start shadow9's config without replacing it: "
-                f"sudo wg-quick up {shlex.quote(str(path))}[/dim]"
+                f"{_root_command(f'wg-quick up {shlex.quote(str(path))}', host)}[/dim]"
             )
             return ActivationStep("Starts at boot", False, f"{target} already exists")
     elif not host.is_root():
         console.print("[yellow]Root is needed to install the boot config link.[/yellow]")
-        console.print(f"[dim]Run: sudo mkdir -p {WIREGUARD_SYSTEM_DIR}[/dim]")
+        console.print(f"[dim]Run: {mkdir_command}[/dim]")
         console.print(f"[dim]Then: {link_command}[/dim]")
         console.print(f"[dim]Then: {enable_command}[/dim]")
         return ActivationStep("Starts at boot", False, "root is required")
@@ -1507,7 +1600,7 @@ def _enable_at_boot(path: Path, host: Host) -> ActivationStep:
             console.print(f"[green]Boot config link:[/green] {target} -> {path.resolve()}")
         except OSError as error:
             console.print(f"[yellow]Could not create {target}: {error}[/yellow]")
-            console.print(f"[dim]Run: sudo mkdir -p {WIREGUARD_SYSTEM_DIR}[/dim]")
+            console.print(f"[dim]Run: {mkdir_command}[/dim]")
             console.print(f"[dim]Then: {link_command}[/dim]")
             console.print(f"[dim]Then: {enable_command}[/dim]")
             return ActivationStep("Starts at boot", False, "the config link was not created")
@@ -1534,7 +1627,7 @@ def _enable_at_boot(path: Path, host: Host) -> ActivationStep:
     return ActivationStep("Starts at boot", False, "systemd did not enable the unit")
 
 
-def _persist_forwarding(setting: str) -> ActivationStep:
+def _persist_forwarding(setting: str, host: Host) -> ActivationStep:
     """Put the selected forwarding setting in shadow9's sysctl file."""
     key = setting.partition("=")[0]
     try:
@@ -1566,9 +1659,8 @@ def _persist_forwarding(setting: str) -> ActivationStep:
         return ActivationStep("Forwarding persistence", True, "yes")
     except (OSError, UnicodeError) as error:
         console.print(f"[yellow]Could not persist forwarding: {error}[/yellow]")
-        console.print(
-            f"[dim]Run: echo '{setting}' | sudo tee {FORWARDING_CONFIG}[/dim]"
-        )
+        command = f"echo '{setting}' | {_root_command(f'tee {FORWARDING_CONFIG}', host)}"
+        console.print(f"[dim]Run: {command}[/dim]")
         return ActivationStep("Forwarding persistence", False, "the sysctl file was not written")
 
 
@@ -1579,8 +1671,8 @@ def _enable_forwarding(network_version: int, host: Host) -> ActivationStep:
         if network_version == 6
         else "net.ipv4.ip_forward=1"
     )
-    command = f"sudo sysctl -w {setting}"
-    persist_command = f"echo '{setting}' | sudo tee {FORWARDING_CONFIG}"
+    command = _root_command(f"sysctl -w {setting}", host)
+    persist_command = f"echo '{setting}' | {_root_command(f'tee {FORWARDING_CONFIG}', host)}"
 
     if host.is_windows():
         console.print("[yellow]Windows cannot set the Linux hub forwarding sysctl.[/yellow]")
@@ -1615,7 +1707,7 @@ def _enable_forwarding(network_version: int, host: Host) -> ActivationStep:
                 )
                 console.print(f"[dim]Try: {command}[/dim]")
 
-    persistent = _persist_forwarding(setting)
+    persistent = _persist_forwarding(setting, host)
     if current and persistent.ready:
         return ActivationStep("Forwarding on", True, "yes, and it persists")
     if current:
@@ -1628,7 +1720,7 @@ def _allow_forwarding(interface: str, network_version: int, host: Host) -> Activ
     firewall = "ip6tables" if network_version == 6 else "iptables"
     check = [firewall, "-C", "FORWARD", "-i", interface, "-o", interface, "-j", "ACCEPT"]
     add = [firewall, "-A", "FORWARD", "-i", interface, "-o", interface, "-j", "ACCEPT"]
-    manual = f"sudo {shlex.join(check)} || sudo {shlex.join(add)}"
+    manual = f"{_root_command(shlex.join(check), host)} || {_root_command(shlex.join(add), host)}"
 
     if host.is_windows():
         console.print(f"[yellow]Windows has no {firewall} FORWARD chain.[/yellow]")
@@ -1671,7 +1763,7 @@ def _allow_forwarding(interface: str, network_version: int, host: Host) -> Activ
         added = host.run(add)
     except (OSError, subprocess.SubprocessError) as error:
         console.print(f"[yellow]Could not add the FORWARD rule: {error}[/yellow]")
-        console.print(f"[dim]Run it yourself: sudo {shlex.join(add)}[/dim]")
+        console.print(f"[dim]Run it yourself: {_root_command(shlex.join(add), host)}[/dim]")
         return ActivationStep("FORWARD rule present", False, "the rule was not added")
 
     if added.returncode == 0:
@@ -1679,7 +1771,7 @@ def _allow_forwarding(interface: str, network_version: int, host: Host) -> Activ
         return ActivationStep("FORWARD rule present", True, "yes")
 
     console.print(f"[yellow]{firewall} exited {added.returncode}: {added.stderr.strip()}[/yellow]")
-    console.print(f"[dim]Try: sudo {shlex.join(add)}[/dim]")
+    console.print(f"[dim]Try: {_root_command(shlex.join(add), host)}[/dim]")
     return ActivationStep("FORWARD rule present", False, "the rule was not added")
 
 

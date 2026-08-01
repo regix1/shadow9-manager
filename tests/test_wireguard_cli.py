@@ -47,11 +47,13 @@ class _Host(wg_commands.Host):
         root: bool = True,
         binaries: set[str] | None = None,
         returncodes: dict[tuple[str, ...], int] | None = None,
+        outputs: dict[tuple[str, ...], str] | None = None,
     ) -> None:
         self.windows = windows
         self.root = root
         self.binaries = binaries if binaries is not None else set()
         self.returncodes = returncodes if returncodes is not None else {}
+        self.outputs = outputs if outputs is not None else {}
         self.commands: list[tuple[str, ...]] = []
         self.timeouts: list[int] = []
 
@@ -74,7 +76,7 @@ class _Host(wg_commands.Host):
         return subprocess.CompletedProcess(
             command,
             returncode,
-            stdout="",
+            stdout=self.outputs.get(parts, ""),
             stderr="permission denied" if returncode else "",
         )
 
@@ -170,6 +172,201 @@ class TestInit:
         assert "UDP 51820" in _flat(output)
         assert "Keep TCP 8080, the admin API port, closed to the internet" in _flat(output)
         assert "requires iptables" in _flat(output)
+
+    def test_noninteractive_init_names_the_missing_endpoint_flag(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def terminal_is_not_interactive() -> bool:
+            return False
+
+        monkeypatch.setattr(wg_commands, "_terminal_is_interactive", terminal_is_not_interactive)
+
+        result = runner.invoke(cli_app, ["wg", "init", "--config", _config_file(hub_root)])
+
+        assert result.exit_code == 1
+        assert "--endpoint is required" in _flat(result.output)
+        assert not (_wireguard_dir(hub_root) / "hub.key").exists()
+        assert not (_wireguard_dir(hub_root) / "wg0.conf").exists()
+
+    def test_interactive_init_asks_again_after_a_bad_endpoint(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def terminal_is_interactive() -> bool:
+            return True
+
+        monkeypatch.setattr(wg_commands, "_terminal_is_interactive", terminal_is_interactive)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "init", "--config", _config_file(hub_root)],
+            input=f"hub:not-a-port\n{ROUTABLE_ENDPOINT}\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "does not end in a port number" in _flat(result.output)
+        assert Config.load(Path(_config_file(hub_root))).wireguard.hub_endpoint == ROUTABLE_ENDPOINT
+
+    def test_flags_skip_the_interactive_check(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def terminal_check_was_not_expected() -> bool:
+            raise AssertionError("init checked the terminal after every needed flag was passed")
+
+        monkeypatch.setattr(
+            wg_commands, "_terminal_is_interactive", terminal_check_was_not_expected
+        )
+
+        _init_hub(
+            runner,
+            cli_app,
+            hub_root,
+            "--network",
+            "10.10.0.0/24",
+            "--port",
+            "51999",
+            "--interface",
+            "s9hub",
+            "--masquerade-interface",
+            "eth0",
+            "--api-url",
+            "http://198.51.100.7:8081",
+        )
+
+        assert (_wireguard_dir(hub_root) / "s9hub.conf").exists()
+
+    def test_the_interface_name_is_saved_and_used_by_later_hub_work(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _init_hub(runner, cli_app, hub_root, "--interface", "s9hub")
+
+        config_file = Path(_config_file(hub_root))
+        cfg = Config.load(config_file)
+        private_key = (_wireguard_dir(hub_root) / "hub.key").read_text(encoding="utf-8").strip()
+        topology = wireguard_service.load_topology(cfg, [], derive_public_key(private_key))
+
+        assert cfg.wireguard.interface == "s9hub"
+        assert topology.interface == "s9hub"
+        assert (_wireguard_dir(hub_root) / "s9hub.conf").exists()
+        assert not (_wireguard_dir(hub_root) / "wg0.conf").exists()
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "hub", "set-endpoint", "203.0.113.9:51820", "--config", str(config_file)],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (_wireguard_dir(hub_root) / "s9hub.conf").exists()
+
+        checked: list[str] = []
+
+        def latest_handshakes(interface: str) -> dict[str, str]:
+            checked.append(interface)
+            return {}
+
+        monkeypatch.setattr(wg_commands, "_latest_handshakes", latest_handshakes)
+        result = runner.invoke(cli_app, ["wg", "list", "--config", str(config_file)])
+
+        assert result.exit_code == 0, result.output
+        assert checked == ["s9hub"]
+
+    def test_a_live_interface_stops_init_before_it_writes(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host = _Host(
+            root=True,
+            binaries={"wg"},
+            outputs={("wg", "show", "interfaces"): "wg0 office\n"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "init", "--endpoint", HUB_ENDPOINT, "--config", _config_file(hub_root)],
+        )
+
+        assert result.exit_code == 1
+        assert "interface 'wg0' already exists" in _flat(result.output)
+        assert "--interface" in _flat(result.output)
+        assert not (_wireguard_dir(hub_root) / "hub.key").exists()
+        assert not (_wireguard_dir(hub_root) / "wg0.conf").exists()
+
+    def test_a_system_config_stops_init_before_it_writes(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        target = system_dir / "wg0.conf"
+        target.write_text("existing\n", encoding="utf-8")
+        monkeypatch.setattr(wg_commands, "_host", _Host(root=True))
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "init", "--endpoint", HUB_ENDPOINT, "--config", _config_file(hub_root)],
+        )
+
+        assert result.exit_code == 1
+        assert f"{target} already exists" in _flat(result.output)
+        assert "--interface" in _flat(result.output)
+        assert not (_wireguard_dir(hub_root) / "hub.key").exists()
+        assert not (_wireguard_dir(hub_root) / "wg0.conf").exists()
+
+    def test_a_root_failure_keeps_the_wg_quick_message_in_the_summary(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _wireguard_dir(hub_root) / "wg0.conf"
+        host = _Host(
+            root=True,
+            binaries={"wg-quick", "systemctl", "sysctl", "iptables"},
+            returncodes={("wg-quick", "up", str(config)): 1},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard")
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+
+        output = _flat(_init_hub(runner, cli_app, hub_root))
+
+        assert "Interface up: no — permission denied" in output
+        assert "Root may be needed" not in output
+
+    def test_activation_summary_precedes_the_join_command(
+        self, runner: CliRunner, cli_app: Typer, hub_root: Path
+    ) -> None:
+        output = _flat(_init_hub(runner, cli_app, hub_root))
+
+        assert output.index("Hub activation") < output.index(
+            "Run this on the machine that should join"
+        )
 
     def test_no_apply_runs_no_host_commands(
         self,
@@ -975,19 +1172,6 @@ class TestDeviceAdd:
 
         assert result.exit_code == 1
         assert "already a peer" in _flat(result.output)
-
-    def test_a_device_needs_an_endpoint_to_dial(
-        self, runner: CliRunner, cli_app: Typer, hub_root: Path
-    ) -> None:
-        result = runner.invoke(cli_app, ["wg", "init", "--config", _config_file(hub_root)])
-        assert result.exit_code == 0, result.output
-
-        result = runner.invoke(
-            cli_app, ["wg", "device", "add", "phone", "--config", _config_file(hub_root)]
-        )
-
-        assert result.exit_code == 1
-        assert "set-endpoint" in _flat(result.output)
 
     def test_without_the_qr_extra_the_config_is_still_written(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path, monkeypatch: pytest.MonkeyPatch

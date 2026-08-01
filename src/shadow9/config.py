@@ -16,6 +16,7 @@ import yaml
 import structlog
 
 from .paths import write_file_safely
+from .wireguard import DEFAULT_INTERFACE, checked_interface
 
 
 # Configure structlog early with consistent formatting
@@ -296,6 +297,7 @@ class WireguardConfig:
     """WireGuard hub settings, shared by every peer rather than set per user."""
 
     enabled: bool = False
+    interface: str = DEFAULT_INTERFACE
     listen_port: int = 51820
     enrollment_host: str = "0.0.0.0"
     # Separate from the local admin API on 8080 and the SOCKS5 listener on 1080.
@@ -322,6 +324,7 @@ class WireguardConfig:
         # which returns a list nothing on the serve path reads. Checked whether or not the
         # hub is enabled: a value that cannot work is a typo on the day it is written, not
         # on the day somebody turns the hub on.
+        self.interface = checked_interface(self.interface)
         errors = _wireguard_setting_errors(self)
         if errors:
             raise ValueError("; ".join(errors))
@@ -333,7 +336,14 @@ def _wireguard_setting_errors(config: "WireguardConfig") -> list[str]:
     One list, read by construction and by Config.validate, so the two cannot come to
     disagree about which values are allowed.
     """
+    try:
+        checked_interface(config.interface)
+        interface_error = None
+    except ValueError as error:
+        interface_error = str(error)
+
     found = (
+        interface_error,
         _wireguard_listen_port_error(config.listen_port),
         _wireguard_enrollment_port_error(config.enrollment_port),
         _wireguard_tunnel_network_error(config.tunnel_network),
@@ -480,6 +490,8 @@ class Config:
         # left out of this block is read by the API and ignored by everything else.
         if env_val := os.getenv("SHADOW9_WIREGUARD_ENABLED"):
             self.wireguard.enabled = env_val.lower() in ("true", "1", "yes")
+        if env_val := os.getenv("SHADOW9_WIREGUARD_INTERFACE"):
+            self.wireguard.interface = checked_interface(env_val)
         if env_val := os.getenv("SHADOW9_WIREGUARD_LISTEN_PORT"):
             self.wireguard.listen_port = _wireguard_number_from_env(
                 "SHADOW9_WIREGUARD_LISTEN_PORT", env_val, _wireguard_listen_port_error

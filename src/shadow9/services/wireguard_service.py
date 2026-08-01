@@ -35,7 +35,6 @@ from ..config import Config
 from ..paths import get_config_dir, lock_file, write_file_safely
 from ..wireguard import (
     AddressClaim,
-    DEFAULT_INTERFACE,
     Peer,
     PeerRole,
     Topology,
@@ -917,7 +916,7 @@ def load_topology(
         listen_port=cfg.wireguard.listen_port,
         mtu=cfg.wireguard.mtu,
         dns=", ".join(cfg.wireguard.dns) if cfg.wireguard.dns else None,
-        interface=DEFAULT_INTERFACE,
+        interface=cfg.wireguard.interface,
         masquerade_interface=masquerade_interface,
     )
 
@@ -1340,7 +1339,7 @@ def enroll_peer(
         if existing_peer is not None:
             if checked_token.used_at is not None and existing_peer.public_key == public_key:
                 outward = None
-                hub_config = config_path(DEFAULT_INTERFACE)
+                hub_config = config_path(cfg.wireguard.interface)
                 if hub_config.exists():
                     outward = masquerade_interface_from_config(
                         hub_config.read_text(encoding="utf-8")
@@ -1352,7 +1351,7 @@ def enroll_peer(
                 f"'shadow9 wg remove {checked_name}' or join under another name."
             )
 
-        hub_config = config_path(DEFAULT_INTERFACE)
+        hub_config = config_path(cfg.wireguard.interface)
         outward = None
         if hub_config.exists():
             outward = masquerade_interface_from_config(hub_config.read_text(encoding="utf-8"))
@@ -1400,7 +1399,7 @@ def enroll_peer(
 def _current_topology(cfg: Config, auth_manager: AuthManager, public_key: str) -> Topology:
     """Build topology from credentials read while the caller holds the hub lock."""
     outward = None
-    hub_config = config_path(DEFAULT_INTERFACE)
+    hub_config = config_path(cfg.wireguard.interface)
     if hub_config.exists():
         outward = masquerade_interface_from_config(hub_config.read_text(encoding="utf-8"))
     return load_topology(cfg, auth_manager.list_credentials(), public_key, outward)

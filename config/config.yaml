@@ -44,6 +44,7 @@ security:
 
 wireguard:
   enabled: false              # Enable the WireGuard hub
+  interface: wg0              # Hub interface name, change it if this host already runs wg0
   listen_port: 51820          # Open this UDP port for the WireGuard tunnel
   enrollment_host: "0.0.0.0" # Reachable listener for enrollment, refresh, and node downloads
   enrollment_port: 8081       # Open this TCP port; keep the admin API port closed

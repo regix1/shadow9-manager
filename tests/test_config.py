@@ -22,6 +22,7 @@ SHIPPED_CONFIG = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
 # read by hand in Config._apply_env_overrides.
 WIREGUARD_ENV_NAMES = [
     "SHADOW9_WIREGUARD_ENABLED",
+    "SHADOW9_WIREGUARD_INTERFACE",
     "SHADOW9_WIREGUARD_LISTEN_PORT",
     "SHADOW9_WIREGUARD_ENROLLMENT_HOST",
     "SHADOW9_WIREGUARD_ENROLLMENT_PORT",
@@ -86,6 +87,7 @@ FULL_CONFIG = {
     # section with defaults fails rather than looking like a successful round trip.
     "wireguard": {
         "enabled": True,
+        "interface": "shadow9",
         "listen_port": 51821,
         "enrollment_host": "198.51.100.9",
         "enrollment_port": 8191,
@@ -578,6 +580,7 @@ class TestTheWireguardGroupExistsOnBothHalves:
 
         assert config.mtu == settings.mtu == 1420
         assert config.keepalive == settings.keepalive == 25
+        assert config.interface == settings.interface == "wg0"
         assert config.listen_port == settings.listen_port == 51820
         assert config.enrollment_host == settings.enrollment_host == "0.0.0.0"
         assert config.enrollment_port == settings.enrollment_port == 8081
@@ -594,6 +597,7 @@ class TestTheWireguardSectionIsRead:
         config = Config.load(config_file)
 
         assert config.wireguard.enabled is True
+        assert config.wireguard.interface == "shadow9"
         assert config.wireguard.listen_port == 51821
         assert config.wireguard.enrollment_host == "198.51.100.9"
         assert config.wireguard.enrollment_port == 8191
@@ -613,6 +617,7 @@ class TestTheWireguardSectionIsRead:
         written = yaml.safe_load(config_file.read_text())
 
         assert written["wireguard"]["hub_endpoint"] == "10.0.0.9:51820"
+        assert written["wireguard"]["interface"] == "wg0"
         assert written["wireguard"]["mtu"] == 1420
 
     def test_settings_load_from_yaml_reads_the_section(self, tmp_path):
@@ -621,6 +626,7 @@ class TestTheWireguardSectionIsRead:
 
         settings = Settings.load_from_yaml(config_file)
 
+        assert settings.wireguard.interface == "shadow9"
         assert settings.wireguard.listen_port == 51821
         assert settings.wireguard.enrollment_host == "198.51.100.9"
         assert settings.wireguard.enrollment_port == 8191
@@ -697,6 +703,7 @@ class TestTheWireguardEnvironmentVariables:
     def test_both_halves_honour_every_variable(self, monkeypatch, tmp_path):
         """The file says something else, so this also shows the environment winning."""
         monkeypatch.setenv("SHADOW9_WIREGUARD_ENABLED", "true")
+        monkeypatch.setenv("SHADOW9_WIREGUARD_INTERFACE", "s9hub")
         monkeypatch.setenv("SHADOW9_WIREGUARD_LISTEN_PORT", "51999")
         monkeypatch.setenv("SHADOW9_WIREGUARD_ENROLLMENT_HOST", "192.0.2.9")
         monkeypatch.setenv("SHADOW9_WIREGUARD_ENROLLMENT_PORT", "8199")
@@ -712,6 +719,7 @@ class TestTheWireguardEnvironmentVariables:
 
         for half in (proxy, api):
             assert half.enabled is True
+            assert half.interface == "s9hub"
             assert half.listen_port == 51999
             assert half.enrollment_host == "192.0.2.9"
             assert half.enrollment_port == 8199
@@ -746,6 +754,14 @@ class TestTheWireguardEnvironmentVariables:
 
 class TestWireguardValuesThatCannotWork:
     """Each refusal names the offending value, on both halves."""
+
+    @pytest.mark.parametrize("interface", ["", "name with spaces", "sixteencharslong", "túnel"])
+    def test_an_interface_name_wireguard_cannot_use_is_refused(self, interface):
+        with pytest.raises(ValueError, match="wireguard.interface"):
+            WireguardConfig(interface=interface)
+
+        with pytest.raises(ValidationError, match="wireguard.interface"):
+            WireguardSettings(interface=interface)
 
     @pytest.mark.parametrize("network", ["8.8.8.0/24", "1.1.1.0/24", "0.0.0.0/0"])
     def test_a_public_tunnel_network_is_refused(self, network):

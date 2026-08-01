@@ -94,6 +94,7 @@ def run_wireguard_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> Option
         endpoint=endpoint,
         network=network,
         port=port,
+        interface=cfg.wireguard.interface,
         masquerade=masquerade,
         api_url=None,
         token_hours=DEFAULT_TOKEN_HOURS,
@@ -165,7 +166,7 @@ def _prompt_endpoint(cfg: Config) -> Optional[str]:
         "every peer config.[/dim]"
     )
 
-    for _ in range(3):
+    while True:
         answer = typer.prompt("Endpoint", default=cfg.wireguard.hub_endpoint or "").strip()
         if not answer:
             console.print("[yellow]An endpoint is needed before any peer can be built.[/yellow]")
@@ -186,8 +187,6 @@ def _prompt_endpoint(cfg: Config) -> Optional[str]:
                 continue
 
         return endpoint
-
-    return None
 
 
 def _prompt_tunnel_network(cfg: Config) -> str:

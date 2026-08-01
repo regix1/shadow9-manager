@@ -397,6 +397,22 @@ def config_path(name: str) -> Path:
     return path
 
 
+def checked_interface(name: str) -> str:
+    """Check a WireGuard interface name before it becomes a file or host command."""
+    cleaned = name.strip()
+    if not 1 <= len(cleaned) <= 15:
+        raise ValueError("wireguard.interface must be 1 to 15 characters long")
+    if not all(
+        character.isascii() and (character.isalnum() or character in "_=+.-")
+        for character in cleaned
+    ):
+        raise ValueError(
+            "wireguard.interface can only hold letters, digits, underscores, equals, "
+            "plus signs, periods and hyphens"
+        )
+    return cleaned
+
+
 def write_config(path: Path, text: str) -> None:
     """
     Write a config at 0600 inside a 0700 directory.
