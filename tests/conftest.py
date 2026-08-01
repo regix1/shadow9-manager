@@ -36,7 +36,13 @@ _TEST_ROOT = Path(tempfile.mkdtemp(prefix="shadow9-tests-", dir=tempfile.gettemp
 # install and filling it with a config directory, a salt and a set of users. Refusing here
 # costs one comparison and turns that into a message rather than a mess.
 if _TEST_ROOT == _CHECKOUT or _CHECKOUT in _TEST_ROOT.parents:
-    raise RuntimeError(f"the tests' install root landed inside the checkout: {_TEST_ROOT}")
+    # mkdtemp has already created it, and pytest_sessionfinish never runs when conftest
+    # raises, so take it away here or the refusal leaves its own litter in the checkout.
+    shutil.rmtree(_TEST_ROOT, ignore_errors=True)
+    raise RuntimeError(
+        f"the tests' install root landed inside the checkout: {_TEST_ROOT}. "
+        f"Set TMPDIR or TEMP to somewhere outside it."
+    )
 
 os.environ["SHADOW9_HOME"] = str(_TEST_ROOT)
 
