@@ -656,17 +656,43 @@ class TestJoinToken:
     ) -> None:
         dist = hub_root / "node" / "dist"
         dist.mkdir(parents=True)
-        (dist / "shadow9-node-linux-amd64").write_bytes(b"pretend binary")
-        (dist / "SHA256SUMS").write_text("abc123 *shadow9-node-linux-amd64\n", encoding="utf-8")
+        binary_lines: list[str] = []
+        for architecture in wireguard_service.NODE_ARCHITECTURES:
+            name = f"shadow9-node-linux-{architecture}"
+            (dist / name).write_bytes(f"pretend {architecture} binary".encode())
+            binary_lines.append(f"binary-{architecture} *{name}")
+        (dist / "SHA256SUMS").write_text("\n".join(binary_lines) + "\n", encoding="utf-8")
+
+        packages = hub_root / "node" / "packages"
+        packages.mkdir()
+        package_lines: list[str] = []
+        for package, names in wireguard_service.NODE_PACKAGE_FILES.items():
+            for architecture, name in names.items():
+                (packages / name).write_bytes(f"pretend {package} {architecture}".encode())
+                package_lines.append(f"package-{package}-{architecture} *{name}")
+        (packages / "SHA256SUMS").write_text("\n".join(package_lines) + "\n", encoding="utf-8")
 
         flat = _flat(_init_hub(runner, cli_app, hub_root))
 
-        assert "wget -O /usr/sbin/shadow9-node" in flat
-        assert "abc123" in flat
-        # The whole protection is a human running one command, so the command has to read
-        # as a step rather than as a note under three lines of hex
-        assert "2. Check what arrived, on the router" in flat
-        assert flat.index("sha256sum /usr/sbin/shadow9-node") < flat.index("abc123")
+        assert 'wget -O "/tmp/shadow9-node.$package"' in flat
+        assert "/package/$package/$architecture" in flat
+        assert "opkg install /tmp/shadow9-node.ipk" in flat
+        assert "apk add --allow-untrusted /tmp/shadow9-node.apk" in flat
+        assert "linux-amd64" not in flat.split("Raw binary fallback", 1)[0]
+        assert "/linux-$architecture" in flat
+        assert "x86_64) architecture=amd64" in flat
+        assert "aarch64) architecture=arm64" in flat
+        assert "mipsel) architecture=mipsle" in flat
+        # A package is saved and checked before either package manager sees it.
+        assert flat.index('wget -O "/tmp/shadow9-node.$package"') < flat.index(
+            'sha256sum "/tmp/shadow9-node.$package"'
+        )
+        assert flat.index('sha256sum "/tmp/shadow9-node.$package"') < flat.index(
+            "opkg install /tmp/shadow9-node.ipk"
+        )
+        assert "Raw binary fallback only" in flat
+        assert "does not install WireGuard tools" in flat
+        assert "package-ipk-amd64" in flat
         # The operator has to be told this download is unauthenticated, the same way
         # criterion 36 makes every command say so about the API key, and told what
         # skipping the comparison actually costs
@@ -679,6 +705,8 @@ class TestJoinToken:
         flat = _flat(_init_hub(runner, cli_app, hub_root))
 
         assert "wget" not in flat
+        assert "does not hold the complete OpenWrt package set" in flat
+        assert wireguard_service.NODE_RELEASE_URL in flat
 
 
 class TestJoin:

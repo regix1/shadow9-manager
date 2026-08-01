@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: node/go.mod
           cache: false
@@ -205,4 +205,25 @@ jobs:
         with:
           name: package-${{ steps.tag.outputs.tag }}
           path: out/
+          if-no-files-found: error
+
+  package-set:
+    name: Collect packages
+    needs: packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: node/packages
+          merge-multiple: true
+
+      - name: Record package checksums
+        run: sha256sum shadow9-node*.ipk shadow9-node*.apk > SHA256SUMS
+        working-directory: node/packages
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-packages
+          path: node/packages/
           if-no-files-found: error

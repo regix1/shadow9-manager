@@ -163,6 +163,48 @@ hashing, so a machine could be pushed out of memory from the outside. Binding to
 means only local clients can reach it. If you do open it up, put it behind a firewall rule
 that limits which addresses can connect.
 
+### Installing a WireGuard node on OpenWrt
+
+`shadow9 wg init` prints a package install only when that hub actually holds all six CI
+packages under `node/packages`. Its pasted commands use the router's own values:
+
+```sh
+release="$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE")"
+machine="$(uname -m)"
+case "$machine" in
+  x86_64) architecture=amd64 ;;
+  aarch64) architecture=arm64 ;;
+  mipsel) architecture=mipsle ;;
+  *) echo "No shadow9 package matches $machine"; exit 1 ;;
+esac
+case "$release" in
+  24.10.*) package=ipk ;;
+  25.12.*) package=apk ;;
+  *) echo "No shadow9 package matches OpenWrt $release"; exit 1 ;;
+esac
+wget -O "/tmp/shadow9-node.$package" \
+  "http://<hub>:8081/api/wireguard/node/package/$package/$architecture"
+sha256sum "/tmp/shadow9-node.$package"
+```
+
+Compare the checksum with the selected package line printed on the hub, then install the
+file that was already downloaded:
+
+```sh
+case "$package" in
+  ipk) opkg install /tmp/shadow9-node.ipk ;;
+  apk) apk add --allow-untrusted /tmp/shadow9-node.apk ;;
+esac
+```
+
+Do not give a URL directly to `opkg`; a release redirect can make its temporary filename
+longer than the filesystem permits. A git clone has no CI packages, so the hub points to
+the [v0.1.0 release](https://github.com/regix1/shadow9-manager/releases/tag/v0.1.0)
+instead of printing a package URL that will return 404. The raw-binary command is labelled
+as a fallback because it does not install dependencies, the boot service, or the conffile
+that survives `sysupgrade`. See [the router setup steps](docs/SETUP.md#5-add-a-router-as-a-site-gateway)
+for the package filenames and join command.
+
 ---
 
 ## Usage

@@ -164,35 +164,67 @@ to take effect.
 
 ## 5. Add a router as a site gateway
 
-Install the package, matching your release and architecture. **Download it first rather
-than passing the URL to the package manager.** `opkg` builds its temporary filename from
-the last path segment of the URL including the query string, and a GitHub release asset
-redirects to a signed URL carrying roughly 900 characters of query, which overruns the
-255-byte filename limit and fails with "Filename too long".
-
-OpenWrt 24.10.x, `.ipk` named for the package architecture
-(`x86_64`, `aarch64_generic`, `mipsel_24kc`):
+When the hub has the complete CI package set under `node/packages`, `shadow9 wg init`
+prints these commands. They pick the package from the router's own release and hardware;
+you do not have to translate an OpenWrt name into a Go name:
 
 ```
-wget -O /tmp/shadow9-node.ipk \
-  https://github.com/regix1/shadow9-manager/releases/download/v0.1.0/shadow9-node_0.1.0-r1_x86_64.ipk
-opkg install /tmp/shadow9-node.ipk
+release="$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE")"
+machine="$(uname -m)"
+case "$machine" in
+  x86_64) architecture=amd64 ;;
+  aarch64) architecture=arm64 ;;
+  mipsel) architecture=mipsle ;;
+  *) echo "No shadow9 package matches $machine"; exit 1 ;;
+esac
+case "$release" in
+  24.10.*) package=ipk ;;
+  25.12.*) package=apk ;;
+  *) echo "No shadow9 package matches OpenWrt $release"; exit 1 ;;
+esac
+wget -O "/tmp/shadow9-node.$package" \
+  "http://203.0.113.10:8081/api/wireguard/node/package/$package/$architecture"
+sha256sum "/tmp/shadow9-node.$package"
 ```
 
-OpenWrt 25.12.x, `.apk` named for the target (`x86-64`, `armsr-armv8`, `ramips-mt7621`),
-because OpenWrt does not put the architecture in an apk filename:
+Compare that checksum with the `ipk/<architecture>` or `apk/<architecture>` line on the
+hub's own screen before installing. Then run:
 
 ```
-wget -O /tmp/shadow9-node.apk \
-  https://github.com/regix1/shadow9-manager/releases/download/v0.1.0/shadow9-node-0.1.0-r1_x86-64.apk
-apk add --allow-untrusted /tmp/shadow9-node.apk
+case "$package" in
+  ipk) opkg install /tmp/shadow9-node.ipk ;;
+  apk) apk add --allow-untrusted /tmp/shadow9-node.apk ;;
+esac
 ```
 
-`SHA256SUMS` on the release covers every file. To check what arrived:
+The file is downloaded before it is installed. Do not pass its URL to `opkg`: `opkg`
+builds a temporary filename from the whole redirected URL, including its long query
+string, and can fail at the 255-byte filename limit.
+
+A git clone does not contain CI packages. If the hub says its package set is absent or
+incomplete, get the exact router package and `SHA256SUMS` from the
+[v0.1.0 release](https://github.com/regix1/shadow9-manager/releases/tag/v0.1.0). The six
+release names cover all supported combinations:
 
 ```
-sha256sum /tmp/shadow9-node.ipk
+24.10 x86_64  -> shadow9-node_0.1.0-r1_x86_64.ipk
+24.10 aarch64 -> shadow9-node_0.1.0-r1_aarch64_generic.ipk
+24.10 mipsel  -> shadow9-node_0.1.0-r1_mipsel_24kc.ipk
+25.12 x86_64  -> shadow9-node-0.1.0-r1_x86-64.apk
+25.12 aarch64 -> shadow9-node-0.1.0-r1_armsr-armv8.apk
+25.12 mipsel  -> shadow9-node-0.1.0-r1_ramips-mt7621.apk
 ```
+
+Download the selected release file to `/tmp/shadow9-node.ipk` or
+`/tmp/shadow9-node.apk`, check it against the release checksum, and use the same install
+case above. The CI `node-packages` artifact can also be unpacked as `node/packages` on a
+hub; it contains all six files and their `SHA256SUMS`.
+
+The hub prints a raw-binary fallback only when all three raw binaries and checksums are
+present. It detects `uname -m` before downloading `linux-$architecture`. That fallback is
+for a router with no package: it does not install `wireguard-tools`,
+`luci-proto-wireguard`, the boot service, or the conffile that preserves identity across
+`sysupgrade`.
 
 Then join, using the token the hub printed:
 
@@ -249,8 +281,8 @@ Hub-held configs, meaning devices, are reissued immediately on any topology chan
 
 - **Nothing here has run on real OpenWrt hardware.** The UCI write, commit, reload and
   revert paths are tested against a fake `uci`.
-- **The hub does not serve packages yet.** Copy the `.ipk` or `.apk` to the router
-  yourself. The printed instructions still describe fetching the raw binary.
+- **A git clone has no CI packages.** Put the `node-packages` artifact under
+  `node/packages`, or use the release link the hub prints.
 - **The admin API is plain HTTP with a cleartext key.** The split listener means it
   never has to leave `127.0.0.1`, which is the practical answer, but it is not encrypted.
 - **The signed join stops impersonation, not denial of service.** Someone on the network

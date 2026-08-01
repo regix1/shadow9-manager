@@ -20,6 +20,7 @@
 # to serve when the router is unknown.
 
 GO ?= go
+GO_TOOLCHAIN := go1.21.13
 DIST ?= dist
 VERSION ?= 0.1.0
 BINARY := shadow9-node
@@ -34,10 +35,10 @@ CHECKSUMS := $(DIST)/SHA256SUMS
 GO_SOURCES := $(wildcard *.go) $(wildcard internal/*/*.go)
 SOURCES := $(filter-out %_test.go,$(GO_SOURCES)) $(wildcard internal/*/*.json) go.mod
 
-# -trimpath removes the build machine's directory names, -buildvcs=false keeps
-# the git state out, and -buildid= drops the one remaining input that changes
-# between otherwise identical builds. Together these make two builds of the
-# same commit on two machines produce byte-identical binaries.
+# GOTOOLCHAIN selects the exact compiler named in go.mod. With that input fixed,
+# -trimpath removes build-directory names, -buildvcs=false keeps local git state
+# out, and -buildid= removes the last machine-specific value. The same commit,
+# version and target then produce byte-identical binaries on different machines.
 BUILD_FLAGS := -trimpath -buildvcs=false
 LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 
@@ -53,7 +54,7 @@ dist: $(BINARIES) $(CHECKSUMS)
 $(DIST)/$(BINARY)-linux-%: $(SOURCES)
 	@mkdir -p $(DIST)
 	CGO_ENABLED=0 GOOS=linux GOARCH=$* GOMIPS=$(GOMIPS_$*) \
-		$(GO) build $(BUILD_FLAGS) -ldflags '$(LDFLAGS)' -o $@ .
+		GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) build $(BUILD_FLAGS) -ldflags '$(LDFLAGS)' -o $@ .
 
 ## contract: refresh the embedded copy of the enrollment contract
 #
@@ -67,11 +68,11 @@ contract:
 
 ## test: run the Go tests, including the RFC 7748 vector and the contract
 test:
-	$(GO) test ./...
+	GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) test ./...
 
 ## vet: report suspicious constructs
 vet:
-	$(GO) vet ./...
+	GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) vet ./...
 
 ## check: what CI runs
 check: test vet

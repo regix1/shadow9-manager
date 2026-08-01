@@ -46,6 +46,8 @@ from ..services.wireguard_service import (
     ENROLLMENT_PROTOCOL,
     HUB_PEER_NAME,
     NODE_ARCHITECTURES,
+    NODE_PACKAGE_FILES,
+    NODE_RELEASE_URL,
     PeerFieldsMissing,
     RenderedConfigs,
     TokenRejected,
@@ -63,6 +65,7 @@ from ..services.wireguard_service import (
     load_topology,
     masquerade_interface_from_config,
     node_binary_checksums,
+    node_package_checksums,
     regenerate_configs,
     read_stored_config,
     render_peer_config,
@@ -1219,46 +1222,108 @@ def _print_join_command(cfg: Config, public_key: str, api_url: Optional[str], ho
 
 def _print_node_download(url: str) -> None:
     """
-    Show how to fetch the node client, and the checksum that makes it checkable.
+    Show package installation when the full package set is stored on this hub.
 
-    Only shown when the binaries were actually built here. A hub whose operator installs
-    the node client another way does not need three lines about a download that would 404.
+    A git clone has no CI packages. In that case the command names the release instead of
+    printing a hub URL that cannot work. Raw binaries remain a labelled fallback, and are
+    offered only when every supported architecture is present.
 
     Args:
         url: The enrollment URL a node should call
     """
-    checksums = node_binary_checksums()
-    if not checksums:
+    package_checksums = node_package_checksums()
+    package_names = {name for packages in NODE_PACKAGE_FILES.values() for name in packages.values()}
+    packages_complete = set(package_checksums) == package_names
+
+    binary_checksums = node_binary_checksums()
+    binaries_complete = set(binary_checksums) == set(NODE_ARCHITECTURES)
+
+    if packages_complete:
+        console.print(
+            "\n[bold]Install the OpenWrt package before joining. The pasted commands "
+            "detect this router's release and architecture:[/bold]"
+        )
+        console.print("\n[bold]1. Pick and download the package, on the router[/bold]")
+        console.print('  [cyan]release="$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE")"[/cyan]')
+        console.print('  [cyan]machine="$(uname -m)"[/cyan]')
+        console.print('  [cyan]case "$machine" in[/cyan]')
+        console.print("  [cyan]  x86_64) architecture=amd64 ;;[/cyan]")
+        console.print("  [cyan]  aarch64) architecture=arm64 ;;[/cyan]")
+        console.print("  [cyan]  mipsel) architecture=mipsle ;;[/cyan]")
+        console.print('  [cyan]  *) echo "No shadow9 package matches $machine"; exit 1 ;;[/cyan]')
+        console.print("  [cyan]esac[/cyan]")
+        console.print('  [cyan]case "$release" in[/cyan]')
+        console.print("  [cyan]  24.10.*) package=ipk ;;[/cyan]")
+        console.print("  [cyan]  25.12.*) package=apk ;;[/cyan]")
+        console.print(
+            '  [cyan]  *) echo "No shadow9 package matches OpenWrt $release"; exit 1 ;;[/cyan]'
+        )
+        console.print("  [cyan]esac[/cyan]")
+        console.print(
+            f'  [cyan]wget -O "/tmp/shadow9-node.$package" '
+            f'"{url}/api/wireguard/node/package/$package/$architecture"[/cyan]',
+            soft_wrap=True,
+        )
+
+        console.print("\n[bold]2. Check the package before installing it[/bold]")
+        console.print('  [cyan]sha256sum "/tmp/shadow9-node.$package"[/cyan]')
+        console.print("  [bold]Its checksum has to match the selected package below:[/bold]")
+        for package in ("ipk", "apk"):
+            for architecture in NODE_ARCHITECTURES:
+                name = NODE_PACKAGE_FILES[package][architecture]
+                console.print(
+                    f"    [dim]{package}/{architecture}[/dim]  {package_checksums[name]}",
+                    soft_wrap=True,
+                )
+
+        console.print("\n[bold]3. Install the downloaded package[/bold]")
+        console.print('  [cyan]case "$package" in[/cyan]')
+        console.print("  [cyan]  ipk) opkg install /tmp/shadow9-node.ipk ;;[/cyan]")
+        console.print("  [cyan]  apk) apk add --allow-untrusted /tmp/shadow9-node.apk ;;[/cyan]")
+        console.print("  [cyan]esac[/cyan]")
+        console.print(f"[yellow]{BINARY_DOWNLOAD_NOTICE}[/yellow]")
+    else:
+        console.print(
+            "\n[yellow]This hub does not hold the complete OpenWrt package set, so a "
+            "package command pointing at it would fail. Download the package that exactly "
+            "matches the router from:[/yellow]"
+        )
+        console.print(f"  [cyan]{NODE_RELEASE_URL}[/cyan]", soft_wrap=True)
+
+    if not binaries_complete:
         return
 
     console.print(
-        "\n[bold]If that machine has no shadow9-node yet, two steps before the join:[/bold]"
+        "\n[bold]Raw binary fallback only when the release has no package for this "
+        "router's architecture:[/bold]"
     )
-
-    console.print("\n[bold]1. Fetch it, on the router[/bold]")
+    console.print('  [cyan]case "$(uname -m)" in[/cyan]')
+    console.print("  [cyan]  x86_64) architecture=amd64 ;;[/cyan]")
+    console.print("  [cyan]  aarch64) architecture=arm64 ;;[/cyan]")
+    console.print("  [cyan]  mipsel) architecture=mipsle ;;[/cyan]")
+    console.print('  [cyan]  *) echo "No shadow9 binary matches $(uname -m)"; exit 1 ;;[/cyan]')
+    console.print("  [cyan]esac[/cyan]")
     console.print(
-        f"  [cyan]wget -O /usr/sbin/shadow9-node {url}/api/wireguard/node/linux-amd64[/cyan]",
+        f"  [cyan]wget -O /tmp/shadow9-node "
+        f'"{url}/api/wireguard/node/linux-$architecture"[/cyan]',
         soft_wrap=True,
     )
+    console.print("  [cyan]sha256sum /tmp/shadow9-node[/cyan]")
+    console.print("  [bold]It has to print the checksum for the selected architecture:[/bold]")
+    for architecture in NODE_ARCHITECTURES:
+        console.print(
+            f"    [dim]linux-{architecture}[/dim]  {binary_checksums[architecture]}",
+            soft_wrap=True,
+        )
+    console.print("  [cyan]mv /tmp/shadow9-node /usr/sbin/shadow9-node[/cyan]")
     console.print("  [cyan]chmod +x /usr/sbin/shadow9-node[/cyan]")
     console.print(
-        "[dim]A router names its own hardware differently: x86_64 is amd64, aarch64 is "
-        "arm64, mipsel is mipsle.[/dim]"
+        "[yellow]This fallback does not install WireGuard tools, the LuCI protocol, the "
+        "boot service, or the conffile that preserves node identity across sysupgrade. "
+        "Use a package whenever one exists.[/yellow]"
     )
-
-    # The command comes before the digests rather than after them. It is the thing the
-    # operator has to actually run, and underneath three lines of hex it read as a
-    # footnote, which is how a check that only works when a human performs it stops
-    # happening
-    console.print("\n[bold]2. Check what arrived, on the router[/bold]")
-    console.print("  [cyan]sha256sum /usr/sbin/shadow9-node[/cyan]")
-    console.print("  [bold]It has to print one of these:[/bold]")
-    for architecture in NODE_ARCHITECTURES:
-        digest = checksums.get(architecture)
-        if digest:
-            console.print(f"    [dim]linux-{architecture}[/dim]  {digest}", soft_wrap=True)
-
-    console.print(f"[yellow]{BINARY_DOWNLOAD_NOTICE}[/yellow]")
+    if not packages_complete:
+        console.print(f"[yellow]{BINARY_DOWNLOAD_NOTICE}[/yellow]")
 
 
 def _api_url(cfg: Config) -> str:

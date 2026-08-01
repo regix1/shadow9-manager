@@ -103,6 +103,22 @@ NODE_ARCHITECTURES = ("amd64", "arm64", "mipsle")
 NODE_BINARY_PREFIX = "shadow9-node-linux-"
 NODE_CHECKSUM_FILE = "SHA256SUMS"
 
+# CI collects the OpenWrt builds under node/packages, beside node/dist. The route keeps
+# accepting Go architecture names so it can use the same allowlist as the raw binaries.
+NODE_PACKAGE_FILES: dict[str, dict[str, str]] = {
+    "ipk": {
+        "amd64": "shadow9-node_0.1.0-r1_x86_64.ipk",
+        "arm64": "shadow9-node_0.1.0-r1_aarch64_generic.ipk",
+        "mipsle": "shadow9-node_0.1.0-r1_mipsel_24kc.ipk",
+    },
+    "apk": {
+        "amd64": "shadow9-node-0.1.0-r1_x86-64.apk",
+        "arm64": "shadow9-node-0.1.0-r1_armsr-armv8.apk",
+        "mipsle": "shadow9-node-0.1.0-r1_ramips-mt7621.apk",
+    },
+}
+NODE_RELEASE_URL = "https://github.com/regix1/shadow9-manager/releases/tag/v0.1.0"
+
 # Said wherever the node binary is offered. The download has no server authentication of
 # its own, exactly as enrollment does not, and the answer is the same one: a value the
 # operator carries out of band. For enrollment that is the hub key inside the join token;
@@ -1666,6 +1682,24 @@ def node_binary_dir() -> Path:
     return get_root() / "node" / "dist"
 
 
+def node_package_dir() -> Path:
+    """Where the collected OpenWrt packages and their checksums are kept."""
+    return node_binary_dir().parent / "packages"
+
+
+def _node_file_path(directory: Path, name: str) -> Optional[Path]:
+    """Return one named build file only when it stays inside its build directory."""
+    path = directory / name
+    if not path.is_file():
+        return None
+
+    # A symlink left in a build directory could still point outside it
+    if directory.resolve() not in path.resolve().parents:
+        return None
+
+    return path
+
+
 def node_binary_path(architecture: str) -> Optional[Path]:
     """
     The built node client for one architecture, if it was built.
@@ -1684,16 +1718,24 @@ def node_binary_path(architecture: str) -> Optional[Path]:
     if architecture not in NODE_ARCHITECTURES:
         return None
 
-    directory = node_binary_dir()
-    path = directory / f"{NODE_BINARY_PREFIX}{architecture}"
-    if not path.is_file():
+    return _node_file_path(node_binary_dir(), f"{NODE_BINARY_PREFIX}{architecture}")
+
+
+def node_package_path(package: str, architecture: str) -> Optional[Path]:
+    """
+    The OpenWrt package for one package format and architecture, if CI put it here.
+
+    The URL values select names from constants. Neither value is ever joined onto a path,
+    and `_node_file_path` applies the same confinement check used by the raw binary route.
+    """
+    if architecture not in NODE_ARCHITECTURES:
         return None
 
-    # A symlink left in the dist directory could still point outside it
-    if directory.resolve() not in path.resolve().parents:
+    names = NODE_PACKAGE_FILES.get(package)
+    if names is None:
         return None
 
-    return path
+    return _node_file_path(node_package_dir(), names[architecture])
 
 
 def node_checksum_path() -> Optional[Path]:
@@ -1703,21 +1745,16 @@ def node_checksum_path() -> Optional[Path]:
     Returns:
         The SHA256SUMS file, or None when `make -C node checksums` has not been run
     """
-    path = node_binary_dir() / NODE_CHECKSUM_FILE
-    return path if path.is_file() else None
+    return _node_file_path(node_binary_dir(), NODE_CHECKSUM_FILE)
 
 
-def node_binary_checksums() -> dict[str, str]:
-    """
-    Read the recorded checksum of each built binary.
+def node_package_checksum_path() -> Optional[Path]:
+    """The recorded checksums of the collected OpenWrt packages, if present."""
+    return _node_file_path(node_package_dir(), NODE_CHECKSUM_FILE)
 
-    The operator reads these off the hub's terminal and compares them on the router, which
-    is what makes an unauthenticated download over plain HTTP checkable at all.
 
-    Returns:
-        Architecture names mapped to their SHA-256, empty when nothing was recorded
-    """
-    path = node_checksum_path()
+def _node_checksums(path: Optional[Path], names: dict[str, str]) -> dict[str, str]:
+    """Read sha256sum output for an exact set of allowed filenames."""
     if path is None:
         return {}
 
@@ -1732,13 +1769,40 @@ def node_binary_checksums() -> dict[str, str]:
         # sha256sum writes "<digest>  <name>" in text mode and "<digest> *<name>" in
         # binary mode, so the marker comes off before the name is read
         name = name.strip().lstrip("*")
-        if not digest or not name.startswith(NODE_BINARY_PREFIX):
-            continue
-        architecture = name[len(NODE_BINARY_PREFIX) :]
-        if architecture in NODE_ARCHITECTURES:
-            checksums[architecture] = digest
+        key = names.get(name)
+        if digest and key is not None:
+            checksums[key] = digest
 
     return checksums
+
+
+def node_binary_checksums() -> dict[str, str]:
+    """
+    Read the recorded checksum of each built binary.
+
+    The operator reads these off the hub's terminal and compares them on the router, which
+    is what makes an unauthenticated download over plain HTTP checkable at all.
+
+    Returns:
+        Architecture names mapped to their SHA-256, empty when nothing was recorded
+    """
+    names = {
+        f"{NODE_BINARY_PREFIX}{architecture}": architecture
+        for architecture in NODE_ARCHITECTURES
+        if node_binary_path(architecture) is not None
+    }
+    return _node_checksums(node_checksum_path(), names)
+
+
+def node_package_checksums() -> dict[str, str]:
+    """Read checksums for package files that are actually present on this hub."""
+    names = {
+        name: name
+        for package, packages in NODE_PACKAGE_FILES.items()
+        for architecture, name in packages.items()
+        if node_package_path(package, architecture) is not None
+    }
+    return _node_checksums(node_package_checksum_path(), names)
 
 
 def tunnel_network_of(cfg: Config) -> TunnelNetwork:

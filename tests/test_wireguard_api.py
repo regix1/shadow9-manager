@@ -771,6 +771,87 @@ class TestServingTheNodeBinary:
         }
 
 
+class TestServingTheNodePackages:
+    """OpenWrt packages use the binary route's allowlist and confinement checks."""
+
+    @staticmethod
+    def _build_packages(hub: "_Hub", *entries: tuple[str, str]) -> dict[tuple[str, str], bytes]:
+        directory = hub.root / "node" / "packages"
+        directory.mkdir(parents=True, exist_ok=True)
+
+        built: dict[tuple[str, str], bytes] = {}
+        lines: list[str] = []
+        for package, architecture in entries:
+            name = wireguard_service.NODE_PACKAGE_FILES[package][architecture]
+            body = f"pretend {package} package for {architecture}".encode()
+            (directory / name).write_bytes(body)
+            built[(package, architecture)] = body
+            lines.append(f"{hashlib.sha256(body).hexdigest()} *{name}")
+        (directory / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return built
+
+    def test_each_package_is_served_under_its_release_filename(self, hub: "_Hub") -> None:
+        entries = tuple(
+            (package, architecture)
+            for package in wireguard_service.NODE_PACKAGE_FILES
+            for architecture in NODE_ARCHITECTURES
+        )
+        built = self._build_packages(hub, *entries)
+
+        for (package, architecture), body in built.items():
+            response = hub.client.get(f"/api/wireguard/node/package/{package}/{architecture}")
+
+            assert response.status_code == 200, response.text
+            assert response.content == body
+            assert response.headers["content-disposition"].endswith(
+                f'filename="{wireguard_service.NODE_PACKAGE_FILES[package][architecture]}"'
+            )
+
+    def test_an_architecture_with_no_package_names_the_release(self, hub: "_Hub") -> None:
+        self._build_packages(hub, ("ipk", "amd64"))
+
+        response = hub.client.get("/api/wireguard/node/package/ipk/arm64")
+
+        assert response.status_code == 404
+        assert "does not have the ipk node package for 'arm64'" in response.json()["detail"]
+        assert wireguard_service.NODE_RELEASE_URL in response.json()["detail"]
+
+    @pytest.mark.parametrize(
+        "attempt",
+        [
+            "..%2f..%2fconfig%2fwireguard%2fhub.key",
+            "../../../config/wireguard/hub.key",
+            "..\\..\\config\\wireguard\\hub.key",
+            "amd64%00.ipk",
+        ],
+    )
+    def test_a_package_name_cannot_climb_out_of_its_directory(
+        self, hub: "_Hub", attempt: str
+    ) -> None:
+        self._build_packages(hub, ("ipk", "amd64"))
+
+        response = hub.client.get(f"/api/wireguard/node/package/ipk/{attempt}")
+
+        assert response.status_code == 404
+        assert b"PrivateKey" not in response.content
+        assert wireguard_service.node_package_path("ipk", attempt) is None
+
+    def test_package_checksums_are_served(self, hub: "_Hub") -> None:
+        built = self._build_packages(hub, ("ipk", "amd64"), ("apk", "arm64"))
+
+        response = hub.client.get("/api/wireguard/node/package/SHA256SUMS")
+
+        assert response.status_code == 200, response.text
+        for (package, architecture), body in built.items():
+            name = wireguard_service.NODE_PACKAGE_FILES[package][architecture]
+            assert hashlib.sha256(body).hexdigest() in response.text
+            assert name in response.text
+        assert set(wireguard_service.node_package_checksums()) == {
+            wireguard_service.NODE_PACKAGE_FILES["ipk"]["amd64"],
+            wireguard_service.NODE_PACKAGE_FILES["apk"]["arm64"],
+        }
+
+
 class TestTheRouterIsWired:
     """The endpoint is reachable on the app the entry point builds."""
 

@@ -36,6 +36,8 @@ from ...schemas.wireguard import (
 from ...services.wireguard_service import (
     NODE_ARCHITECTURES,
     NODE_CHECKSUM_FILE,
+    NODE_PACKAGE_FILES,
+    NODE_RELEASE_URL,
     ENROLLMENT_PROTOCOL,
     Enrollment,
     PeerFieldsMissing,
@@ -46,6 +48,8 @@ from ...services.wireguard_service import (
     hub_public_key,
     node_binary_path,
     node_checksum_path,
+    node_package_checksum_path,
+    node_package_path,
     refresh_peer,
     refresh_response_mac,
     response_mac,
@@ -284,6 +288,60 @@ async def node_checksums() -> FileResponse:
 
 
 @router.get(
+    "/node/package/" + NODE_CHECKSUM_FILE,
+    summary="The checksums of the OpenWrt node packages",
+    response_class=FileResponse,
+    responses={
+        200: {"description": "One line per package, as sha256sum writes them"},
+        404: {"description": "The packages are not stored on this hub"},
+    },
+)
+async def node_package_checksums() -> FileResponse:
+    """Serve checksums for the OpenWrt packages collected by CI."""
+    path = node_package_checksum_path()
+    if path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "This hub has no recorded checksums for OpenWrt packages. A git clone does "
+                f"not include CI packages; get them from {NODE_RELEASE_URL}."
+            ),
+        )
+
+    return FileResponse(path, media_type="text/plain", filename=NODE_CHECKSUM_FILE)
+
+
+@router.get(
+    "/node/package/{package}/{architecture}",
+    summary="Download an OpenWrt node package",
+    response_class=FileResponse,
+    responses={
+        200: {"description": "The matching ipk or apk package"},
+        404: {"description": "The package is not supported or is not stored on this hub"},
+    },
+)
+async def node_package(package: str, architecture: str) -> FileResponse:
+    """Serve an allowlisted OpenWrt package from node/packages."""
+    path = node_package_path(package, architecture)
+    if path is None:
+        if package not in NODE_PACKAGE_FILES or architecture not in NODE_ARCHITECTURES:
+            detail = (
+                f"There is no '{package}' node package for '{architecture}'. The supported "
+                f"formats are {', '.join(NODE_PACKAGE_FILES)} and the supported architectures "
+                f"are {', '.join(NODE_ARCHITECTURES)}."
+            )
+        else:
+            detail = (
+                f"This hub does not have the {package} node package for '{architecture}'. "
+                "Packages are CI release files and are not included in a git clone. Get the "
+                f"matching package from {NODE_RELEASE_URL}."
+            )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
+@router.get(
     "/node/linux-{architecture}",
     summary="Download the node client for one architecture",
     response_class=FileResponse,
@@ -296,7 +354,7 @@ async def node_binary(architecture: str) -> FileResponse:
     """
     Serve the cross-compiled node client, so a router needs no package feed.
 
-        wget -O /usr/sbin/shadow9-node http://<hub>:8081/api/wireguard/node/linux-amd64
+        wget -O /usr/sbin/shadow9-node http://<hub>:8081/api/wireguard/node/linux-$architecture
         chmod +x /usr/sbin/shadow9-node
 
     A router names the same hardware differently from Go: `x86_64` is `amd64`, `aarch64` is
