@@ -56,6 +56,9 @@ FALLBACK_BRIDGE_CACHE_FILE = Path("/tmp/shadow9_bridge_cache.json")
 CACHE_MAX_AGE_DAYS = 7
 CACHE_TEST_TIMEOUT_SECONDS = 15.0  # How long to wait for cached bridge test
 CACHE_SPEED_THRESHOLD_SECONDS = 5.0  # Max speed to consider cached bridge "fast enough"
+BRIDGE_TEST_CONCURRENCY = 2
+WORKING_BRIDGE_TARGET = 3
+BRIDGE_SELECTION_TIMEOUT_SECONDS = 35.0
 
 
 def _get_bridge_name(bridge: "Bridge") -> str:
@@ -359,7 +362,7 @@ class TorBridgeConnector:
     - Using snowflake to use WebRTC peer connections
     """
 
-    def __init__(self, bridge_config: BridgeConfig, socks_port: int = 9050):
+    def __init__(self, bridge_config: BridgeConfig, socks_port: int = 9050) -> None:
         self.config = bridge_config
         self.socks_port = socks_port
         self.pt_manager = PluggableTransportManager(bridge_config)
@@ -368,6 +371,7 @@ class TorBridgeConnector:
         self._data_dir: Optional[Path] = None
         self._log_file: Optional[Path] = None
         self._current_bridge: Optional[Bridge] = None  # Track which bridge is working
+        self._speed_tests_complete = False
 
     async def start_tor_with_bridges(self) -> tuple[str, int]:
         """
@@ -481,12 +485,17 @@ class TorBridgeConnector:
 
                 # Only cache if at least one bridge succeeded
                 working_count = sum(1 for _, s in sorted_bridges if s is not None)
-                if working_count > 0:
+                if working_count > 0 and self._speed_tests_complete:
                     _bridge_speedtest_cache[cache_key] = sorted_bridges
                     logger.info(f"Cached speedtest results for bridge type: {cache_key}")
+                elif working_count > 0:
+                    logger.info(
+                        "Speed tests stopped after finding enough working bridges; "
+                        "leaving the remaining fallbacks uncached"
+                    )
                 else:
                     logger.warning(
-                        f"Not caching speedtest results - all {len(sorted_bridges)} bridges failed"
+                        "Not caching speed test results because no tested bridge worked"
                     )
 
             # Filter to only working bridges
@@ -537,8 +546,8 @@ class TorBridgeConnector:
             raise
 
     async def _test_bridge_speeds(
-        self, bridges: List[Bridge]
-    ) -> List[tuple[Bridge, Optional[float]]]:
+        self, bridges: list[Bridge]
+    ) -> list[tuple[Bridge, float | None]]:
         """
         Test multiple bridges in parallel and measure time to reach 15% bootstrap.
 
@@ -546,33 +555,110 @@ class TorBridgeConnector:
             List of (bridge, time_to_15_percent) tuples. time is None if failed.
         """
 
-        results = []
+        results: list[tuple[Bridge, float | None]] = [
+            (bridge, None) for bridge in bridges
+        ]
         test_timeout = 30  # 30 seconds max per bridge for speed test
         target_progress = 15  # Target bootstrap percentage for speed test
-        first_test = True
+        pending: dict[
+            asyncio.Task[tuple[float | None, str | None]], int
+        ] = {}
+        next_index = 0
+        working_count = 0
+        self._speed_tests_complete = False
 
-        for bridge in bridges:
-            bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
-            print(f"    Testing {bridge_name}...", end=" ", flush=True)
+        async def run_tests() -> None:
+            nonlocal next_index, working_count
 
-            speed, error = await self._quick_bridge_test(
-                bridge, test_timeout, target_progress, show_config=first_test
+            while (
+                pending or next_index < len(bridges)
+            ) and working_count < WORKING_BRIDGE_TARGET:
+                while (
+                    next_index < len(bridges)
+                    and len(pending) < BRIDGE_TEST_CONCURRENCY
+                ):
+                    bridge = bridges[next_index]
+                    bridge_name = bridge.params.get(
+                        "front", bridge.params.get("url", "unknown")
+                    )
+                    print(f"    Testing {bridge_name}...", flush=True)
+                    task = asyncio.create_task(
+                        self._quick_bridge_test(
+                            bridge,
+                            test_timeout,
+                            target_progress,
+                            show_config=next_index == 0,
+                        )
+                    )
+                    pending[task] = next_index
+                    next_index += 1
+
+                done, _ = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    index = pending.pop(task)
+                    bridge = bridges[index]
+                    bridge_name = bridge.params.get(
+                        "front", bridge.params.get("url", "unknown")
+                    )
+                    speed, error = task.result()
+                    results[index] = (bridge, speed)
+
+                    if speed is not None:
+                        working_count += 1
+                        print(f"    {bridge_name}: {speed:.1f}s")
+                    elif error:
+                        print(f"    {bridge_name}: FAILED: {error}")
+                    else:
+                        print(f"    {bridge_name}: timeout/failed")
+
+            self._speed_tests_complete = next_index == len(bridges) and not pending
+
+        try:
+            await asyncio.wait_for(
+                run_tests(), timeout=BRIDGE_SELECTION_TIMEOUT_SECONDS
             )
-            first_test = False
-
-            if speed is not None:
-                print(f"{speed:.1f}s")
-            elif error:
-                print(f"FAILED: {error}")
-            else:
-                print("timeout/failed")
-
-            results.append((bridge, speed))
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Bridge speed tests reached the selection deadline",
+                timeout=BRIDGE_SELECTION_TIMEOUT_SECONDS,
+                tested=next_index - len(pending),
+                total=len(bridges),
+            )
+        finally:
+            remaining = list(pending)
+            for task in remaining:
+                task.cancel()
+            if remaining:
+                await asyncio.gather(*remaining, return_exceptions=True)
 
         return results
 
+    @staticmethod
+    async def _terminate_process(
+        process: subprocess.Popen, timeout: float
+    ) -> None:
+        """Terminate a child off the event loop and wait until it is reaped."""
+        process.terminate()
+        wait_task = asyncio.create_task(
+            asyncio.to_thread(process.wait, timeout=timeout)
+        )
+        try:
+            await asyncio.shield(wait_task)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            await asyncio.to_thread(process.wait)
+        except asyncio.CancelledError:
+            process.kill()
+            try:
+                await wait_task
+            except subprocess.TimeoutExpired:
+                await asyncio.to_thread(process.wait)
+            raise
+
     async def _quick_bridge_test(
-        self, bridge: Bridge, timeout: int, target_progress: int, show_config: bool = False
+        self, bridge: Bridge, timeout: float, target_progress: int, show_config: bool = False
     ) -> tuple[Optional[float], Optional[str]]:
         """
         Quick test a bridge - measure time to reach target bootstrap percentage.
@@ -585,6 +671,7 @@ class TorBridgeConnector:
 
         temp_dir = None
         tor_process = None
+        cancelled = False
         bridge_name = bridge.params.get("front", bridge.params.get("url", "unknown"))
 
         try:
@@ -731,6 +818,7 @@ class TorBridgeConnector:
                 await asyncio.sleep(0.5)
 
         except asyncio.CancelledError:
+            cancelled = True
             logger.debug("Quick bridge test cancelled")
             raise
         except Exception as e:
@@ -738,11 +826,7 @@ class TorBridgeConnector:
         finally:
             # Cleanup
             if tor_process:
-                tor_process.terminate()
-                try:
-                    tor_process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    tor_process.kill()
+                await self._terminate_process(tor_process, 0 if cancelled else 3)
             if temp_dir:
                 try:
                     temp_dir.cleanup()
@@ -810,12 +894,11 @@ class TorBridgeConnector:
     async def _cleanup_tor(self) -> None:
         """Cleanup Tor process and temp directory without logging stop message."""
         if self._tor_process:
-            self._tor_process.terminate()
+            tor_process = self._tor_process
             try:
-                self._tor_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._tor_process.kill()
-            self._tor_process = None
+                await self._terminate_process(tor_process, 5)
+            finally:
+                self._tor_process = None
 
         if self._temp_dir:
             try:
@@ -929,12 +1012,11 @@ class TorBridgeConnector:
     async def stop(self) -> None:
         """Stop Tor process and cleanup."""
         if self._tor_process:
-            self._tor_process.terminate()
+            tor_process = self._tor_process
             try:
-                self._tor_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._tor_process.kill()
-            self._tor_process = None
+                await self._terminate_process(tor_process, 10)
+            finally:
+                self._tor_process = None
 
         if self._temp_dir:
             self._temp_dir.cleanup()
