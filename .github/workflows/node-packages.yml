@@ -133,6 +133,29 @@ jobs:
       - name: Unpack the SDK
         run: tar --zstd -xf sdk.tar.zst
 
+      # Cloning the feeds costs about a minute and a half per target and depends
+      # on nothing in this repository: the SDK pins its feeds to fixed commits,
+      # so the same SDK always yields the same clones. dl holds the source
+      # tarballs the dependency build downloads. Restored after the unpack,
+      # which is what creates the directory.
+      #
+      # staging_dir and build_dir are deliberately NOT cached. They would skip
+      # the dependency compile too, but the whole prepared tree is 1.8 GB
+      # compressed per target and six of those exceed the 10 GB a repository
+      # gets, so the entries would evict each other and most runs would miss.
+      # feeds and dl come to 738 MB per target, which fits with room to spare.
+      - name: Cache the feeds and downloads
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.sdk.outputs.dir }}/feeds
+            ${{ steps.sdk.outputs.dir }}/package/feeds
+            ${{ steps.sdk.outputs.dir }}/dl
+            ${{ steps.sdk.outputs.dir }}/tmp
+          key: feeds-${{ steps.sdk.outputs.name }}-${{ hashFiles('packaging/openwrt/Makefile') }}
+          restore-keys: |
+            feeds-${{ steps.sdk.outputs.name }}-
+
       - name: Add the package
         run: |
           sdk="${{ steps.sdk.outputs.dir }}"
@@ -143,9 +166,14 @@ jobs:
       - name: Feeds
         working-directory: ${{ steps.sdk.outputs.dir }}
         run: |
-          # Feeds are cloned pinned to a commit, which leaves a detached HEAD
-          # that a later git pull cannot update. The indexes are what matter.
-          ./scripts/feeds update base packages luci || true
+          # A restored tree already holds the clones and their indexes. Running
+          # update again would only try to git pull a checkout pinned to a
+          # commit, which cannot work and costs a minute and a half.
+          if [ -f feeds/luci.index ]; then
+            echo "feeds restored from cache"
+          else
+            ./scripts/feeds update base packages luci || true
+          fi
           ./scripts/feeds install luci-proto-wireguard wireguard-tools ca-bundle || true
 
       - name: Configure
@@ -162,7 +190,12 @@ jobs:
 
       - name: Build
         working-directory: ${{ steps.sdk.outputs.dir }}
-        run: make package/shadow9-node/compile -j"$(nproc)"
+        run: |
+          # Cheap insurance: this package must always be built from the binary
+          # this run produced, never from anything a cache put there. It costs
+          # seconds to rebuild, so cleaning first is free even on a fresh tree.
+          make package/shadow9-node/clean >/dev/null 2>&1 || true
+          make package/shadow9-node/compile -j"$(nproc)"
 
       # Catches a reintroduced strip, and catches the recipe packaging the wrong
       # architecture's binary, which its ARCH mapping is supposed to prevent.
