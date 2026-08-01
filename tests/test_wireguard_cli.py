@@ -49,7 +49,7 @@ class _Host(wg_commands.Host):
         root: bool = True,
         binaries: set[str] | None = None,
         returncodes: dict[tuple[str, ...], int] | None = None,
-        outputs: dict[tuple[str, ...], str] | None = None,
+        outputs: dict[tuple[str, ...], str | list[str]] | None = None,
         detected_address: wg_commands.OutwardAddress | None = None,
         detection_error: Exception | None = None,
         listener_ready: bool = True,
@@ -89,10 +89,12 @@ class _Host(wg_commands.Host):
         self.commands.append(parts)
         self.timeouts.append(timeout)
         returncode = self.returncodes.get(parts, 0)
+        output = self.outputs.get(parts, "")
+        stdout = output.pop(0) if isinstance(output, list) else output
         return subprocess.CompletedProcess(
             command,
             returncode,
-            stdout=self.outputs.get(parts, ""),
+            stdout=stdout,
             stderr="permission denied" if returncode else "",
         )
 
@@ -580,6 +582,67 @@ class TestInit:
         saved = system_dir / "wg0.conf.before-shadow9"
         assert saved.read_text(encoding="utf-8") == "hand written\n"
         assert "Previous boot config" in output
+
+    def test_force_continues_after_wg_quick_stops_the_interface_with_a_cleanup_error(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _wireguard_dir(hub_root) / "wg0.conf"
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick", "systemctl", "sysctl", "iptables"},
+            returncodes={("wg-quick", "down", "wg0"): 1},
+            outputs={("wg", "show", "interfaces"): ["wg0\n", "wg0\n", ""]},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(
+            wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard"
+        )
+        monkeypatch.setattr(
+            wg_commands,
+            "FORWARDING_CONFIG",
+            hub_root / "etc" / "sysctl.d" / "99-shadow9.conf",
+        )
+
+        output = _flat(_init_hub(runner, cli_app, hub_root, "--force"))
+
+        down = host.commands.index(("wg-quick", "down", "wg0"))
+        up = host.commands.index(("wg-quick", "up", str(config)))
+        assert down < up
+        assert "Continuing because the interface is gone" in output
+        assert "Tunnel is up" in output
+
+    def test_force_stops_when_wg_quick_leaves_the_interface_up(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _wireguard_dir(hub_root) / "wg0.conf"
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick", "systemctl", "sysctl", "iptables"},
+            returncodes={("wg-quick", "down", "wg0"): 1},
+            outputs={("wg", "show", "interfaces"): "wg0\n"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(
+            wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard"
+        )
+        monkeypatch.setattr(
+            wg_commands,
+            "FORWARDING_CONFIG",
+            hub_root / "etc" / "sysctl.d" / "99-shadow9.conf",
+        )
+
+        output = _flat(_init_hub(runner, cli_app, hub_root, "--force"))
+
+        assert ("wg-quick", "up", str(config)) not in host.commands
+        assert "The replacement was not started" in output
 
     def test_force_with_no_apply_leaves_the_existing_interface_and_boot_config_alone(
         self,

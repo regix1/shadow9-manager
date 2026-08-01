@@ -2110,14 +2110,23 @@ def _apply_config(path: Path, host: Host | None = None, *, replace: bool = False
                 or stopped.stdout.strip()
                 or f"wg-quick exited {stopped.returncode}"
             )
+            remaining = machine.interfaces()
+            if remaining is None or path.stem in remaining:
+                console.print(
+                    f"[yellow]Could not stop the existing interface: {detail}. "
+                    "The replacement was not started.[/yellow]"
+                )
+                if not machine.is_root():
+                    command = _root_command(
+                        f"wg-quick down {shlex.quote(path.stem)}", machine
+                    )
+                    console.print(f"[dim]Root may be needed. Try: {command}[/dim]")
+                return ActivationStep("Interface up", False, f"existing interface: {detail}")
+
             console.print(
-                f"[yellow]Could not stop the existing interface: {detail}. "
-                "The replacement was not started.[/yellow]"
+                f"[yellow]wg-quick reported a cleanup error after stopping {path.stem}: "
+                f"{detail}. Continuing because the interface is gone.[/yellow]"
             )
-            if not machine.is_root():
-                command = _root_command(f"wg-quick down {shlex.quote(path.stem)}", machine)
-                console.print(f"[dim]Root may be needed. Try: {command}[/dim]")
-            return ActivationStep("Interface up", False, f"existing interface: {detail}")
 
         console.print("[green]Existing interface stopped.[/green]")
 
