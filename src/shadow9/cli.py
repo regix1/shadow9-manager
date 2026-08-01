@@ -71,6 +71,28 @@ def version_callback(value: bool):
         raise typer.Exit()
 
 
+def remove_completion_callback(value: bool) -> None:
+    """Take out what --install-completion put in, and say what was left behind."""
+    if not value:
+        return
+
+    from .completion import remove_completion
+
+    result = remove_completion("shadow9")
+
+    if result.found_anything:
+        for entry in result.removed:
+            console.print(f"[green]Removed[/green] {entry}")
+        console.print("[dim]Open a new shell for it to take effect.[/dim]")
+    else:
+        console.print("[yellow]No shell completion is installed for shadow9[/yellow]")
+
+    for note in result.notes:
+        console.print(f"[dim]{note}[/dim]")
+
+    raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -78,6 +100,15 @@ def main(
         bool,
         typer.Option(
             "--version", callback=version_callback, is_eager=True, help="Show version and exit."
+        ),
+    ] = False,
+    remove_completion: Annotated[
+        bool,
+        typer.Option(
+            "--remove-completion",
+            callback=remove_completion_callback,
+            is_eager=True,
+            help="Remove the shell completion that --install-completion set up.",
         ),
     ] = False,
 ) -> None:
