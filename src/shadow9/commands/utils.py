@@ -5,11 +5,12 @@ Contains init, check-tor, fetch, setup, status, and update commands.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -22,7 +23,8 @@ from rich.table import Table
 from rich.panel import Panel
 
 from ..config import Config, generate_default_config, generate_master_key
-from ..paths import get_paths, write_file_safely
+from ..core.api_config import clear_api_key, get_api_key, load_api_config, set_api_key
+from ..paths import Shadow9Paths, get_paths, load_master_key, lock_file, write_file_safely
 from ..tor_connector import TorConnector, TorConfig
 from ..wizards import run_init_wizard, show_config_summary, show_master_key
 from ..ui import console, header, dependency_table
@@ -30,8 +32,253 @@ from ..ui import success as ui_success, error as ui_error
 from .service import SERVICE_NAME
 from . import probe
 
+# How old a half-written backup has to be before the next rotation clears it away. It is
+# not zero because another rotation may be writing one right now.
+ABANDONED_BACKUP_AGE_SECONDS = 3600.0
 
-def register_util_commands(app: typer.Typer):
+
+class KeyFile(NamedTuple):
+    """One live file that belongs to a master key."""
+
+    name: str
+    path: Path
+
+
+class BackupEntry(NamedTuple):
+    """One file recorded in a key backup manifest."""
+
+    name: str
+    present: bool
+    sha256: str | None = None
+    byte_count: int | None = None
+    content: bytes | None = None
+
+
+def _key_files(paths: Shadow9Paths) -> tuple[KeyFile, ...]:
+    """Return the complete set of files tied to the current master key."""
+    return (
+        KeyFile(".env", paths.env_file),
+        KeyFile("credentials.enc", paths.credentials_file),
+        KeyFile(".salt", paths.salt_file),
+        KeyFile("api.yaml", paths.config_dir / "api.yaml"),
+        KeyFile(".api_salt", paths.config_dir / ".api_salt"),
+    )
+
+
+def _env_text_with_key(existing: str | None, master_key: str) -> str:
+    """
+    The text of a .env file that records this master key, keeping anything else it holds.
+
+    load_master_key reads the environment before it reads the file, so an exported key is
+    the one the credentials were encrypted with even when the file says something else or
+    is not there at all. A backup that copied the file as it stands would hold a stale key
+    or no key, and could never be restored, which is the same way a missing salt makes a
+    backup worthless.
+    """
+    if existing is None:
+        return (
+            "# Shadow9 Master Key - Keep this secret!\n"
+            "# This key encrypts your credentials file\n"
+            f"SHADOW9_MASTER_KEY={master_key}\n"
+        )
+
+    lines = existing.splitlines()
+    for index, line in enumerate(lines):
+        # the first line wins, because that is the one load_master_key stops at
+        if line.strip().startswith("SHADOW9_MASTER_KEY="):
+            lines[index] = f"SHADOW9_MASTER_KEY={master_key}"
+            break
+    else:
+        lines.append(f"SHADOW9_MASTER_KEY={master_key}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _remove_abandoned_backups(backups_dir: Path) -> None:
+    """
+    Delete the staging directories a killed rotation left behind.
+
+    They hold copies of the master key and the credential store, and nothing ever reads
+    them again, because a restore only looks at directories that were renamed into their
+    final name. The age check is there because a rotation running in another process has a
+    staging directory of its own open right now, and taking that one away would make its
+    backup fail.
+    """
+    try:
+        entries = list(backups_dir.iterdir())
+    except OSError:
+        return
+
+    cutoff = time.time() - ABANDONED_BACKUP_AGE_SECONDS
+    for entry in entries:
+        if not entry.name.startswith(".incomplete-") or not entry.is_dir():
+            continue
+        try:
+            if entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _save_key_backup(root: Path, files: tuple[KeyFile, ...], env_text: str) -> Path:
+    """Copy a complete key backup into place with an atomic final rename."""
+    backups_dir = root / "key-backups"
+    staging_dir: Path | None = None
+
+    try:
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(backups_dir, 0o700)
+        _remove_abandoned_backups(backups_dir)
+
+        while staging_dir is None:
+            candidate = backups_dir / f".incomplete-{secrets.token_hex(8)}"
+            try:
+                candidate.mkdir(mode=0o700 if os.name != "nt" else 0o777)
+            except FileExistsError:
+                continue
+            staging_dir = candidate
+
+        created = datetime.now(timezone.utc)
+        entries: list[BackupEntry] = []
+        for key_file in files:
+            stored_file = staging_dir / key_file.name
+
+            if key_file.name == Shadow9Paths.ENV_FILE:
+                # written rather than copied, so the backup carries the key that was really
+                # in force rather than whatever text the file happened to hold
+                write_file_safely(stored_file, env_text.encode("utf-8"))
+            elif key_file.path.exists():
+                shutil.copy2(key_file.path, stored_file)
+            else:
+                entries.append(BackupEntry(key_file.name, False))
+                continue
+
+            copied = stored_file.read_bytes()
+            entries.append(
+                BackupEntry(
+                    key_file.name,
+                    True,
+                    hashlib.sha256(copied).hexdigest(),
+                    len(copied),
+                )
+            )
+
+        recorded_files: list[dict[str, object]] = []
+        for entry in entries:
+            recorded: dict[str, object] = {"name": entry.name, "present": entry.present}
+            if entry.present:
+                recorded["sha256"] = entry.sha256
+                recorded["bytes"] = entry.byte_count
+            recorded_files.append(recorded)
+
+        manifest = {
+            "created": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "files": recorded_files,
+        }
+        manifest_text = json.dumps(manifest, indent=2) + "\n"
+        write_file_safely(staging_dir / "manifest.json", manifest_text.encode("utf-8"))
+
+        base_name = created.strftime("%Y%m%d-%H%M%S")
+        suffix = 0
+        while True:
+            name = base_name if suffix == 0 else f"{base_name}-{suffix:06d}"
+            backup_dir = backups_dir / name
+            try:
+                os.rename(staging_dir, backup_dir)
+                return backup_dir
+            except OSError:
+                if not backup_dir.exists():
+                    raise
+                suffix += 1
+    except BaseException:
+        if staging_dir is not None and staging_dir.exists():
+            try:
+                staging_dir.relative_to(backups_dir)
+            except ValueError:
+                pass
+            else:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+
+def _read_key_backup(backup_dir: Path, files: tuple[KeyFile, ...]) -> tuple[BackupEntry, ...]:
+    """Read and verify every entry in a completed key backup."""
+    manifest_file = backup_dir / "manifest.json"
+    if not manifest_file.is_file():
+        raise ValueError(f"{manifest_file} is missing, so the backup is incomplete")
+
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{manifest_file} could not be read: {error}") from error
+
+    if not isinstance(manifest, dict) or set(manifest) != {"created", "files"}:
+        raise ValueError("manifest.json does not have the required shape")
+    if not isinstance(manifest["created"], str) or not isinstance(manifest["files"], list):
+        raise ValueError("manifest.json does not have the required shape")
+
+    expected_names = {key_file.name for key_file in files}
+    raw_entries = manifest["files"]
+    if len(raw_entries) != len(expected_names):
+        raise ValueError("manifest.json does not list the complete five-file key set")
+
+    entries: list[BackupEntry] = []
+    seen: set[str] = set()
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise ValueError("manifest.json contains an invalid file entry")
+
+        name = raw_entry.get("name")
+        present = raw_entry.get("present")
+        if not isinstance(name, str) or name not in expected_names or name in seen:
+            raise ValueError("manifest.json contains an unknown or repeated file name")
+        if not isinstance(present, bool):
+            raise ValueError(f"manifest.json has an invalid present value for {name}")
+
+        expected_fields = (
+            {"name", "present", "sha256", "bytes"}
+            if present
+            else {
+                "name",
+                "present",
+            }
+        )
+        if set(raw_entry) != expected_fields:
+            raise ValueError(f"manifest.json has invalid fields for {name}")
+
+        if not present:
+            entries.append(BackupEntry(name, False))
+            seen.add(name)
+            continue
+
+        checksum = raw_entry["sha256"]
+        byte_count = raw_entry["bytes"]
+        if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+            raise ValueError(f"manifest.json has an invalid checksum for {name}")
+        if not isinstance(byte_count, int) or isinstance(byte_count, bool) or byte_count < 0:
+            raise ValueError(f"manifest.json has an invalid byte count for {name}")
+
+        copied_file = backup_dir / name
+        if not copied_file.is_file():
+            raise ValueError(f"the backup is missing {name}")
+        copied = copied_file.read_bytes()
+        if hashlib.sha256(copied).hexdigest() != checksum:
+            raise ValueError(f"the checksum for {name} does not match manifest.json")
+        if len(copied) != byte_count:
+            raise ValueError(f"the byte count for {name} does not match manifest.json")
+
+        entries.append(BackupEntry(name, True, checksum, byte_count, copied))
+        seen.add(name)
+
+    if seen != expected_names:
+        raise ValueError("manifest.json does not list the complete five-file key set")
+
+    by_name = {entry.name: entry for entry in entries}
+    return tuple(by_name[key_file.name] for key_file in files)
+
+
+def register_util_commands(app: typer.Typer) -> None:
     """Register utility commands with the main app."""
 
     show_app = typer.Typer(help="Show current settings and paths.")
@@ -62,21 +309,8 @@ def register_util_commands(app: typer.Typer):
         table.add_row("Logs Directory", str(paths.logs_dir))
         console.print(table)
 
-    @show_app.command("key")
-    def show_key() -> None:
-        """Show the master key used to encrypt credentials."""
-        show_master_key()
-
-    @app.command()
-    def init(
-        output: Annotated[
-            str, typer.Option("--output", "-o", help="Output path for configuration file")
-        ] = "config/config.yaml",
-        quick: Annotated[
-            bool, typer.Option("--quick", "-q", help="Use defaults without prompts")
-        ] = False,
-    ):
-        """Initialize a new configuration file (interactive wizard if no flags provided)."""
+    def _write_new_config(output: str, quick: bool) -> None:
+        """Write a configuration file, asking what to put in it unless quick is set."""
         output_path = Path(output)
 
         if output_path.exists():
@@ -132,18 +366,18 @@ def register_util_commands(app: typer.Typer):
 
     @app.command("check-tor")
     def check_tor(
-        tor_port: Annotated[int, typer.Option("--tor-port", "-p", help="Tor SOCKS port")] = 9050,
-    ):
+        tor_port: Annotated[
+            int | None,
+            typer.Option(
+                "--tor-port",
+                "-p",
+                help="Tor SOCKS port to test. Autodetects the running service when not given.",
+            ),
+        ] = None,
+    ) -> None:
         """Check Tor connectivity status."""
-        asyncio.run(_check_tor(tor_port))
-
-    @app.command()
-    def fetch(
-        url: Annotated[str, typer.Argument(help="URL to fetch (supports .onion)")],
-        tor_port: Annotated[int, typer.Option("--tor-port", "-p", help="Tor SOCKS port")] = 9050,
-    ):
-        """Fetch a URL through Tor (supports .onion)."""
-        asyncio.run(_fetch(url, tor_port))
+        if not asyncio.run(_check_tor(tor_port)):
+            raise typer.Exit(1)
 
     @app.command()
     def setup(
@@ -153,15 +387,32 @@ def register_util_commands(app: typer.Typer):
         check_only: Annotated[
             bool, typer.Option("--check-only", help="Only check status, do not install")
         ] = False,
+        config_only: Annotated[
+            bool,
+            typer.Option(
+                "--config-only",
+                help="Only write a configuration file, install nothing",
+            ),
+        ] = False,
+        output: Annotated[
+            str, typer.Option("--output", "-o", help="Where to write the configuration file")
+        ] = "config/config.yaml",
+        quick: Annotated[
+            bool, typer.Option("--quick", "-q", help="Take the defaults without prompting")
+        ] = False,
     ) -> None:
         """
-        Setup Tor and proxy components for Shadow9.
+        Set Shadow9 up: write a configuration file, and install what the proxy needs.
 
-        Installs:
+        With --config-only it writes the configuration and stops. Otherwise it installs:
         - Tor daemon (required)
         - obfs4proxy, snowflake (optional bridges)
         """
         from ..setup import run_setup, check_setup
+
+        if config_only:
+            _write_new_config(output, quick)
+            return
 
         if check_only:
             console.print("[cyan]Checking proxy components...[/cyan]\n")
@@ -446,7 +697,7 @@ def register_util_commands(app: typer.Typer):
                 console.print("[dim]Update cancelled. Nothing was changed.[/dim]")
                 raise typer.Exit(1)
 
-        running = _stop_running_server()
+        running = stop_running_server()
 
         # Written outside the working tree before anything moves, so the commit to go
         # back to is still there for a later run after this process exits.
@@ -507,9 +758,10 @@ def register_util_commands(app: typer.Typer):
                 # The setup script prompts, so it needs this terminal rather than pipes.
                 subprocess.run([str(setup_script)], cwd=repo_root)
 
-    # Key management subcommand group
-    key_app = typer.Typer(help="Manage encryption keys")
-    app.add_typer(key_app, name="key")
+    # The key that encrypts the credential store. Named in full because "api key" is a
+    # different secret entirely, and an unqualified "key" gave no way to tell them apart.
+    key_app = typer.Typer(help="Manage the master key that encrypts stored credentials")
+    app.add_typer(key_app, name="master-key")
 
     @key_app.command("generate")
     def key_generate(
@@ -523,83 +775,76 @@ def register_util_commands(app: typer.Typer):
         This key encrypts the credentials file. If a key already exists,
         you will be prompted before regenerating (which invalidates existing credentials).
         """
-        import secrets
-        import subprocess
+        paths = get_paths()
+        project_root = paths.root
+        config_dir = paths.config_dir
+        env_file = paths.env_file
+        credentials_file = paths.credentials_file
+        salt_file = paths.salt_file
+        api_config_file = config_dir / "api.yaml"
+        files = _key_files(paths)
 
-        # Find project root (where .env should be)
-        project_root = Path(__file__).parent.parent.parent.parent
-        env_file = project_root / ".env"
-        config_dir = project_root / "config"
-        credentials_file = config_dir / "credentials.enc"
-        salt_file = config_dir / ".salt"
+        # Whether there is a key to lose is asked of load_master_key rather than of the
+        # text of .env, because an exported SHADOW9_MASTER_KEY beats the file and is what
+        # the init wizard tells operators to set up. Reading only the file missed that
+        # install completely, so it got no backup, no service stop, and a new key written
+        # beside a credential store and a salt belonging to the old one.
+        old_master_key = load_master_key()
+        key_was_exported = os.environ.get("SHADOW9_MASTER_KEY") is not None
 
-        # Check if key already exists
-        key_exists = False
-        if env_file.exists():
-            try:
-                with open(env_file) as f:
-                    content = f.read()
-                    if "SHADOW9_MASTER_KEY" in content:
-                        key_exists = True
-            except Exception:
-                pass
+        had_api_key = False
+        old_api_key: str | None = None
+        backup_dir: Path | None = None
 
-        if key_exists:
-            console.print("[yellow]Existing master key found in .env[/yellow]")
+        if old_master_key is not None:
+            found_in = "the environment" if key_was_exported else str(env_file)
+            console.print(f"[yellow]Existing master key found in {found_in}[/yellow]")
             console.print(
-                "[red]WARNING: Regenerating the key will make existing credentials unreadable![/red]"
+                "[red]WARNING: Regenerating the key will make existing "
+                "credentials unreadable![/red]"
             )
 
-            if not force:
-                if not typer.confirm("Generate a new master key?", default=False):
-                    console.print("[dim]Keeping existing key[/dim]")
-                    return
+            if not force and not typer.confirm("Generate a new master key?", default=False):
+                console.print("[dim]Keeping existing key[/dim]")
+                return
 
-            # Stop service if running to prevent key mismatch errors
-            if shutil.which("systemctl"):
-                try:
-                    result = subprocess.run(
-                        ["systemctl", "is-active", "--quiet", "shadow9.service"],
-                        capture_output=True,
-                    )
-                    if result.returncode == 0:
-                        console.print(
-                            "[yellow]Stopping shadow9 service before key regeneration...[/yellow]"
-                        )
-                        subprocess.run(
-                            ["systemctl", "stop", "shadow9.service"], capture_output=True
-                        )
-                except Exception:
-                    pass
+            stop_running_server()
 
-            # Backup old .env
-            backup_env = project_root / ".env.backup"
             try:
-                shutil.copy2(env_file, backup_env)
-                console.print(f"[dim]Old .env backed up to {backup_env}[/dim]")
-            except Exception:
-                pass
+                api_state = load_api_config(api_config_file)
+                had_api_key = bool(api_state.get("api_key_encrypted") or api_state.get("key"))
+                if had_api_key:
+                    old_api_key = get_api_key(api_config_file)
+            except Exception as error:
+                console.print(f"[red]Could not read the current API key state: {error}[/red]")
+                console.print("[dim]No key files were changed.[/dim]")
+                raise typer.Exit(1) from error
 
-            # Remove old credentials (encrypted with old key)
-            if credentials_file.exists():
-                backup_creds = config_dir / "credentials.enc.backup"
-                try:
-                    shutil.copy2(credentials_file, backup_creds)
-                    credentials_file.unlink()
-                    console.print(
-                        "[dim]Old credentials removed (backup: config/credentials.enc.backup)[/dim]"
-                    )
-                    console.print("[yellow]You will need to create new users after this[/yellow]")
-                except Exception as e:
-                    console.print(f"[red]Error removing credentials: {e}[/red]")
+            try:
+                existing_env = env_file.read_text(encoding="utf-8") if env_file.exists() else None
+                backup_dir = _save_key_backup(
+                    project_root, files, _env_text_with_key(existing_env, old_master_key)
+                )
+            except Exception as error:
+                console.print(f"[red]Could not create a complete key backup: {error}[/red]")
+                console.print("[dim]No key files were changed.[/dim]")
+                raise typer.Exit(1) from error
 
-            # Remove old salt file
-            if salt_file.exists():
-                try:
-                    salt_file.unlink()
-                    console.print("[dim]Old salt file removed[/dim]")
-                except Exception:
-                    pass
+            credentials_were_present = credentials_file.exists()
+            try:
+                with lock_file(credentials_file):
+                    credentials_file.unlink(missing_ok=True)
+                    salt_file.unlink(missing_ok=True)
+            except Exception as error:
+                console.print(f"[red]Error removing old key material: {error}[/red]")
+                console.print(
+                    "[dim]Restore the matched backup with: "
+                    f'shadow9 master-key restore "{backup_dir}"[/dim]'
+                )
+                raise typer.Exit(1) from error
+
+            if credentials_were_present:
+                console.print("[yellow]You will need to create new users after this[/yellow]")
 
         # Generate new key
         master_key = secrets.token_urlsafe(32)
@@ -623,103 +868,257 @@ SHADOW9_MASTER_KEY={master_key}
             console.print("[green]Master key generated and saved to .env[/green]")
 
             # Also set in current environment for immediate use
-            import os
-
             os.environ["SHADOW9_MASTER_KEY"] = master_key
 
         except Exception as e:
             console.print(f"[red]Error saving key: {e}[/red]")
             raise typer.Exit(1) from e
 
-    @key_app.command("check")
-    def key_check():
-        """Check if a master key is configured."""
-        import os
-
-        # Check environment variable first
-        if os.environ.get("SHADOW9_MASTER_KEY"):
-            console.print("[green]Master key is set in environment[/green]")
-            return
-
-        # Check .env file
-        project_root = Path(__file__).parent.parent.parent.parent
-        env_file = project_root / ".env"
-
-        if env_file.exists():
+        if had_api_key:
             try:
-                with open(env_file) as f:
-                    content = f.read()
-                    if "SHADOW9_MASTER_KEY" in content:
-                        console.print(f"[green]Master key found in {env_file}[/green]")
-                        return
-            except Exception:
-                pass
+                if old_api_key is not None:
+                    set_api_key(old_api_key)
+                    console.print(
+                        "[green]The existing API key was re-encrypted and API access "
+                        "still works.[/green]"
+                    )
+                else:
+                    clear_api_key()
+                    console.print(
+                        "[yellow]The old API key could not be read and has been removed. "
+                        "Run 'shadow9 api setup' to create another.[/yellow]"
+                    )
+            except Exception as error:
+                if old_api_key is not None:
+                    try:
+                        clear_api_key()
+                    except Exception as clear_error:
+                        console.print(
+                            f"[red]The API key could not be re-encrypted or removed: "
+                            f"{clear_error}[/red]"
+                        )
+                        raise typer.Exit(1) from clear_error
+                    console.print(
+                        "[yellow]The API key could not be re-encrypted and has been removed. "
+                        "Run 'shadow9 api setup' to create another.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        f"[red]The unreadable API key could not be removed: {error}[/red]"
+                    )
+                raise typer.Exit(1) from error
 
-        console.print("[red]No master key configured[/red]")
-        console.print("[dim]Run 'shadow9 key generate' to create one[/dim]")
-        raise typer.Exit(1)
-
-
-async def _check_tor(tor_port: int):
-    """Async Tor check implementation."""
-    console.print("[cyan]Checking Tor connectivity...[/cyan]")
-
-    # Check if Tor service is detected
-    detected_config = TorConnector.detect_tor_service()
-
-    if detected_config:
-        console.print(f"[green]Tor service detected on port {detected_config.socks_port}[/green]")
-
-        tor = TorConnector(detected_config)
-        if await tor.connect():
-            circuit_info = tor.circuit_info
+        if key_was_exported:
+            # only this process picked up the new key, and an exported one beats .env, so
+            # the operator's next command would read the old key against the new store
             console.print(
-                Panel(
-                    f"[bold green]Tor Connection Successful[/bold green]\n\n"
-                    f"Exit IP: [cyan]{circuit_info.exit_ip if circuit_info else 'Unknown'}[/cyan]\n"
-                    f"SOCKS Port: [cyan]{detected_config.socks_port}[/cyan]",
-                    title="Tor Status",
-                    border_style="green",
-                )
+                "[yellow]Your shell still exports the old SHADOW9_MASTER_KEY. Export the "
+                "new one or start a new shell, or the next command will use the old "
+                "key.[/yellow]"
             )
-            await tor.disconnect()
+
+        if backup_dir is not None:
+            console.print(f"[dim]Matched key backup saved to {backup_dir}[/dim]")
+            console.print(f'[dim]Restore it with: shadow9 master-key restore "{backup_dir}"[/dim]')
+
+    @key_app.command("restore")
+    def key_restore(
+        backup: Annotated[
+            Path | None,
+            typer.Argument(help="Backup directory to restore (newest if omitted)"),
+        ] = None,
+        force: Annotated[
+            bool, typer.Option("--force", "-f", help="Skip confirmation prompts")
+        ] = False,
+    ) -> None:
+        """Restore the master key and every file captured with it."""
+        paths = get_paths()
+        project_root = paths.root
+        credentials_file = paths.credentials_file
+        files = _key_files(paths)
+        backups_dir = project_root / "key-backups"
+
+        if backup is None:
+            if not backups_dir.is_dir():
+                console.print(f"[red]No key backups were found in {backups_dir}[/red]")
+                raise typer.Exit(1)
+            try:
+                candidates = sorted(
+                    entry
+                    for entry in backups_dir.iterdir()
+                    if entry.is_dir()
+                    and re.fullmatch(r"\d{8}-\d{6}(?:-\d+)?", entry.name) is not None
+                )
+            except OSError as error:
+                console.print(f"[red]Could not read key backups in {backups_dir}: {error}[/red]")
+                raise typer.Exit(1) from error
+
+            if not candidates:
+                console.print(f"[red]No key backups were found in {backups_dir}[/red]")
+                raise typer.Exit(1)
+            backup_dir = candidates[-1]
         else:
-            console.print("[red]Could not establish Tor connection[/red]")
-    else:
-        console.print("[red]Tor service not detected[/red]")
-        console.print(f"\n{TorConnector.get_tor_install_instructions()}")
+            backup_dir = backup.expanduser().resolve()
 
+        if not backup_dir.is_dir():
+            console.print(f"[red]Key backup directory not found: {backup_dir}[/red]")
+            raise typer.Exit(1)
 
-async def _fetch(url: str, tor_port: int):
-    """Async fetch implementation."""
-    config = TorConfig(socks_port=tor_port)
-    tor = TorConnector(config)
+        try:
+            entries = _read_key_backup(backup_dir, files)
+        except (OSError, ValueError) as error:
+            console.print(f"[red]Refusing to restore {backup_dir}: {error}[/red]")
+            raise typer.Exit(1) from error
 
-    try:
-        console.print("[cyan]Connecting to Tor...[/cyan]")
-        if not await tor.connect():
-            console.print("[red]Failed to connect to Tor[/red]")
-            return
-
-        console.print(f"[cyan]Fetching {url}...[/cyan]")
-        text = await tor.fetch_text(url)
+        by_name = {entry.name: entry for entry in entries}
+        env_entry = by_name[".env"]
+        restored_master_key: str | None = None
+        if env_entry.present:
+            try:
+                env_text = (env_entry.content or b"").decode("utf-8")
+            except UnicodeError as error:
+                console.print(f"[red]Refusing to restore an unreadable .env file: {error}[/red]")
+                raise typer.Exit(1) from error
+            for line in env_text.splitlines():
+                if line.strip().startswith("SHADOW9_MASTER_KEY="):
+                    restored_master_key = line.split("=", 1)[1].strip()
+                    break
+            if not restored_master_key:
+                console.print("[red]Refusing to restore a .env file with no master key[/red]")
+                raise typer.Exit(1)
 
         console.print(
-            Panel(
-                text[:2000] + ("..." if len(text) > 2000 else ""),
-                title=f"Response from {url}",
-                border_style="green",
+            f"[yellow]Restoring {backup_dir} replaces the current key material. "
+            "Users created since this backup will be gone.[/yellow]"
+        )
+        if not force and not typer.confirm("Restore this key backup?", default=False):
+            console.print("[dim]Keeping the current key material[/dim]")
+            return
+
+        stop_running_server()
+
+        # The environment file goes last so an interrupted restore never advertises the
+        # old key while some live files still belong to the newer one.
+        restore_order = files[1:] + files[:1]
+        try:
+            with lock_file(credentials_file):
+                for key_file in restore_order:
+                    entry = by_name[key_file.name]
+                    if entry.present:
+                        if entry.content is None:
+                            raise ValueError(f"verified content is missing for {entry.name}")
+                        write_file_safely(key_file.path, entry.content)
+                    else:
+                        key_file.path.unlink(missing_ok=True)
+        except Exception as error:
+            console.print(f"[red]Key restore did not complete: {error}[/red]")
+            console.print(f"[dim]The backup at {backup_dir} was not changed.[/dim]")
+            raise typer.Exit(1) from error
+
+        exported_key = os.environ.get("SHADOW9_MASTER_KEY")
+        if restored_master_key is None:
+            os.environ.pop("SHADOW9_MASTER_KEY", None)
+        else:
+            os.environ["SHADOW9_MASTER_KEY"] = restored_master_key
+
+        if exported_key is not None and exported_key != restored_master_key:
+            # the same trap as after a rotation, in the other direction
+            console.print(
+                "[yellow]Your shell still exports a different SHADOW9_MASTER_KEY. An "
+                "exported key beats .env, so export the restored one or start a new "
+                "shell.[/yellow]"
             )
+
+        restored = ", ".join(entry.name for entry in entries if entry.present)
+        removed = ", ".join(entry.name for entry in entries if not entry.present)
+        console.print(f"[green]Key material restored from {backup_dir}[/green]")
+        if restored:
+            console.print(f"[dim]Restored: {restored}[/dim]")
+        if removed:
+            console.print(f"[dim]Removed because they were absent in the backup: {removed}[/dim]")
+        console.print(
+            "[yellow]The Shadow9 service is stopped. Start it again with "
+            "'shadow9 service start'.[/yellow]"
         )
 
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-    finally:
-        await tor.disconnect()
+    @key_app.command("check")
+    def key_check(
+        show: Annotated[
+            bool,
+            typer.Option("--show", help="Print the key itself, not just where it came from"),
+        ] = False,
+    ) -> None:
+        """
+        Say whether a master key is configured, and with --show print it.
+
+        The answer comes from load_master_key rather than from reading .env, so it matches
+        the key the rest of the program will actually use. An exported SHADOW9_MASTER_KEY
+        beats the file, and a check that only read the file would call that install
+        unconfigured.
+        """
+        master_key = load_master_key()
+
+        if master_key is None:
+            console.print("[red]No master key configured[/red]")
+            console.print("[dim]Run 'shadow9 master-key generate' to create one[/dim]")
+            raise typer.Exit(1)
+
+        if show:
+            show_master_key(master_key)
+            return
+
+        if os.environ.get("SHADOW9_MASTER_KEY"):
+            console.print("[green]Master key is set in the environment[/green]")
+        else:
+            console.print(f"[green]Master key found in {get_paths().env_file}[/green]")
 
 
-# a probe must answer quickly even when the proxy host drops packets
-SERVING_PROBE_TIMEOUT = 1.0
+async def _check_tor(tor_port: int | None = None) -> bool:
+    """
+    Report whether Tor answers, and say so through the return value.
+
+    A port given on the command line is the one tested. Autodetection only fills in a port
+    the caller did not choose, because a check that quietly tests a different port than the
+    one asked about answers a question nobody asked.
+
+    Args:
+        tor_port: The SOCKS port to test, or None to autodetect the running service
+
+    Returns:
+        True if Tor answered on the port that was tested
+    """
+    console.print("[cyan]Checking Tor connectivity...[/cyan]")
+
+    config: TorConfig | None
+    if tor_port is not None:
+        config = TorConfig(socks_port=tor_port)
+        console.print(f"[cyan]Testing the requested port {tor_port}[/cyan]")
+    else:
+        config = TorConnector.detect_tor_service()
+        if config is None:
+            console.print("[red]Tor service not detected[/red]")
+            console.print(f"\n{TorConnector.get_tor_install_instructions()}")
+            return False
+        console.print(f"[green]Tor service detected on port {config.socks_port}[/green]")
+
+    tor = TorConnector(config)
+    if not await tor.connect():
+        console.print(f"[red]Could not establish Tor connection on port {config.socks_port}[/red]")
+        return False
+
+    circuit_info = tor.circuit_info
+    console.print(
+        Panel(
+            f"[bold green]Tor Connection Successful[/bold green]\n\n"
+            f"Exit IP: [cyan]{circuit_info.exit_ip if circuit_info else 'Unknown'}[/cyan]\n"
+            f"SOCKS Port: [cyan]{config.socks_port}[/cyan]",
+            title="Tor Status",
+            border_style="green",
+        )
+    )
+    await tor.disconnect()
+    return True
+
 
 # the file holding the commit to go back to, kept inside .git so a reset cannot
 # remove it and git status never reports it
@@ -852,32 +1251,27 @@ def _configured_address(repo_root: Path) -> tuple[str, int]:
     return cfg.server.host, cfg.server.port
 
 
-def _something_is_listening(host: str, port: int) -> bool:
-    """
-    Check whether a TCP connection to the proxy address is accepted.
-
-    This observes one thing: some process accepted a connection at that host and
-    port. It does not prove the listener is the proxy, but a refused connection does
-    prove the proxy is not serving.
-    """
-    # a wildcard bind is not a connectable address, so probe the loopback it covers
-    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-    try:
-        with socket.create_connection((probe_host, port), timeout=SERVING_PROBE_TIMEOUT):
-            return True
-    except OSError:
-        return False
-
-
-def _wait_until_serving(host: str, port: int, timeout_seconds: float = 20.0) -> bool:
-    """Wait for the proxy to accept connections again after a restart."""
+async def _serving_within(host: str, port: int, timeout_seconds: float) -> bool:
+    """Wait for the address to accept a connection, or give up at the deadline."""
     deadline = time.monotonic() + timeout_seconds
     while True:
-        if _something_is_listening(host, port):
+        if await probe._something_is_listening(host, port):
             return True
         if time.monotonic() >= deadline:
             return False
-        time.sleep(1)
+        await asyncio.sleep(1)
+
+
+def _wait_until_serving(host: str, port: int, timeout_seconds: float = 20.0) -> bool:
+    """
+    Wait for the proxy to accept connections again after a restart.
+
+    The check itself is commands.probe, the one the status commands use, so there is a
+    single answer to "is something listening there" rather than a second copy that could
+    disagree about a wildcard bind or a timeout. One event loop covers the whole wait
+    instead of one per attempt.
+    """
+    return asyncio.run(_serving_within(host, port, timeout_seconds))
 
 
 def _server_launcher(repo_root: Path) -> list[str]:
@@ -917,8 +1311,14 @@ def _start_server(repo_root: Path, as_service: bool) -> bool:
     return True
 
 
-def _stop_running_server() -> RunningServer:
-    """Stop the proxy if it is running, and report how it was running."""
+def stop_running_server() -> RunningServer:
+    """
+    Stop the proxy if it is running, and report how it was running.
+
+    Finds the server by identity rather than by whoever holds a port: the service unit
+    first, then shadow9's own process. `shadow9 stop` uses this for the same reason the
+    updater does, because killing the holder of a port has stopped unrelated programs.
+    """
     if shutil.which("systemctl"):
         result = subprocess.run(
             ["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True
@@ -1067,7 +1467,7 @@ def _run_rollback(repo_root: Path) -> None:
         f"recorded {record.recorded_at}[/cyan]\n"
     )
 
-    running = _stop_running_server()
+    running = stop_running_server()
     if not _roll_back(repo_root, record.commit):
         _start_and_check(repo_root, running)
         raise typer.Exit(1)

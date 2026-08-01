@@ -10,7 +10,7 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
-from typing import Optional, Annotated
+from typing import NamedTuple, Optional, Annotated
 
 import structlog
 import typer
@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from ..config import Config, setup_logging
-from ..auth import AuthManager
+from ..auth import AuthManager, MissingMasterKey
 from ..memory_budget import MemoryCeilingTooLow
 from ..paths import load_master_key
 from ..socks5_server import Socks5Server, ConnectionInfo
@@ -109,43 +109,139 @@ def register_server_commands(app: typer.Typer) -> None:
     @app.command()
     def stop(
         port: Annotated[
-            int, typer.Option("--port", "-p", help="Port the server is running on")
+            int,
+            typer.Option(
+                "--port",
+                "-p",
+                help="Port to look on when neither the service nor a shadow9 process is found",
+            ),
         ] = 1080,
+        yes: Annotated[
+            bool,
+            typer.Option("--yes", "-y", help="Do not ask before stopping an unrecognised process"),
+        ] = False,
     ) -> None:
-        """Stop a running Shadow9 server."""
+        """
+        Stop a running Shadow9 server.
+
+        Looks for the server by identity first, the service unit and then shadow9's own
+        process, because killing whoever happens to hold a port has stopped unrelated
+        programs. The port is a last resort, and a process this cannot recognise is named
+        and confirmed before anything is sent to it.
+        """
+        from .utils import stop_running_server
+
+        if stop_running_server().was_running:
+            console.print("[green]Server stopped[/green]")
+            return
+
+        holder = _listener_on_port(port)
+        if holder is None:
+            console.print(
+                f"[yellow]No Shadow9 service or process found, and nothing is listening "
+                f"on port {port}[/yellow]"
+            )
+            return
+
+        if not holder.looks_like_shadow9:
+            console.print(
+                f"[yellow]Port {port} is held by PID {holder.pid} ({holder.name}), which "
+                f"does not look like Shadow9.[/yellow]"
+            )
+            if not yes and not typer.confirm("Stop it anyway?", default=False):
+                console.print("[yellow]Left it running[/yellow]")
+                raise typer.Exit(1)
+
+        if not _terminate(holder.pid):
+            console.print(f"[red]Could not stop PID {holder.pid}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]Stopped PID {holder.pid} ({holder.name}) on port {port}[/green]")
+
+
+class PortHolder(NamedTuple):
+    """The process listening on a port, and whether it looks like ours."""
+
+    pid: int
+    name: str
+    looks_like_shadow9: bool
+
+
+def _listener_on_port(port: int) -> PortHolder | None:
+    """
+    Find the process listening on exactly this port.
+
+    The port is compared as a number rather than as text. Matching the string ":1080"
+    against a netstat line also matches ":10801", which is a different service.
+
+    Args:
+        port: The TCP port to look for
+
+    Returns:
+        The listening process, or None when nothing holds the port
+    """
+    pid = _listening_pid(port)
+    if pid is None:
+        return None
+    name = _process_name(pid)
+    return PortHolder(pid, name, "shadow9" in name.lower() or "python" in name.lower())
+
+
+def _listening_pid(port: int) -> int | None:
+    """Ask the platform which process is listening on a port."""
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            # proto, local address, foreign address, state, pid
+            if len(parts) < 5 or parts[3] != "LISTENING":
+                continue
+            _, _, local_port = parts[1].rpartition(":")
+            if local_port.isdigit() and int(local_port) == port and parts[4].isdigit():
+                return int(parts[4])
+        return None
+
+    try:
+        result = subprocess.run(["lsof", "-t", f"-i:{port}"], capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = [entry for entry in result.stdout.split() if entry.isdigit()]
+    return int(found[0]) if found else None
+
+
+def _process_name(pid: int) -> str:
+    """Best effort name for a pid, so the operator is told what they are about to stop."""
+    try:
         if sys.platform == "win32":
-            # Windows: find and kill process by port
-            try:
-                result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True)
-                for line in result.stdout.splitlines():
-                    if f":{port}" in line and "LISTENING" in line:
-                        parts = line.split()
-                        pid = parts[-1]
-                        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
-                        console.print(f"[green]Stopped server on port {port} (PID {pid})[/green]")
-                        return
-                console.print(f"[yellow]No server found on port {port}[/yellow]")
-            except Exception as e:
-                console.print(f"[red]Error stopping server: {e}[/red]")
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+            )
+            first = result.stdout.strip().splitlines()[:1]
+            return first[0].split(",")[0].strip('"') if first else "unknown"
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True
+        )
+        return result.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return "unknown"
+
+
+def _terminate(pid: int) -> bool:
+    """Ask a process to stop, and say whether the request was accepted."""
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)], capture_output=True, text=True
+            )
         else:
-            # Unix: use lsof/fuser to find and kill
-            try:
-                result = subprocess.run(
-                    ["lsof", "-t", f"-i:{port}"], capture_output=True, text=True
-                )
-                if result.stdout.strip():
-                    pid = result.stdout.strip().split()[0]
-                    subprocess.run(["kill", pid])
-                    console.print(f"[green]Stopped server on port {port} (PID {pid})[/green]")
-                else:
-                    console.print(f"[yellow]No server found on port {port}[/yellow]")
-            except FileNotFoundError:
-                # lsof not available, try fuser
-                try:
-                    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
-                    console.print(f"[green]Stopped server on port {port}[/green]")
-                except Exception as e:
-                    console.print(f"[red]Error stopping server: {e}[/red]")
+            result = subprocess.run(["kill", str(pid)], capture_output=True, text=True)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> None:
@@ -178,14 +274,25 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> 
         # Setup logging
         setup_logging(cfg.log)
 
-        # Initialize authentication
+        # Initialize authentication. Built here rather than through commands.user.open_store
+        # because AuthManager and load_master_key are substituted on this module by name to
+        # drive _serve without a real store, and reaching them through another module's
+        # namespace would step around that.
         master_key = load_master_key()
 
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network,
-        )
+        try:
+            auth_manager = AuthManager(
+                credentials_file=cfg.get_credentials_file(),
+                master_key=master_key,
+                tunnel_network=cfg.wireguard.tunnel_network,
+            )
+        except MissingMasterKey as missing:
+            console.print(f"[red]{missing}[/red]")
+            console.print(
+                "[dim]The proxy checks every login against that store, so it will not "
+                "start without the key that reads it.[/dim]"
+            )
+            raise typer.Exit(1) from missing
 
         # Check if any users exist
         if not auth_manager.list_users():

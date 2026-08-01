@@ -265,10 +265,9 @@ server default".
 # Show command help (also printed when shadow9 is called with no arguments)
 shadow9
 
-# Show the active configuration, paths, or credential-encryption key
+# Show the active configuration or paths
 shadow9 show config
 shadow9 show paths
-shadow9 show key
 
 # Generate a username and password without creating a user
 shadow9 user generate --dry-run
@@ -278,13 +277,19 @@ shadow9 user generate --dry-run
 
 ```bash
 # Create the master key that encrypts the credentials file
-shadow9 key generate
+shadow9 master-key generate
 
 # Regenerate it (this invalidates every existing credential)
-shadow9 key generate --force
+shadow9 master-key generate --force
 
-# Report whether a master key is configured
-shadow9 key check
+# Report whether a master key is configured, and where it came from
+shadow9 master-key check
+
+# Print the key itself
+shadow9 master-key check --show
+
+# Put back a key and the files captured with it
+shadow9 master-key restore
 ```
 
 ### REST API

@@ -4,9 +4,8 @@ API management commands for Shadow9 CLI.
 Contains commands for configuring, starting, and managing the REST API server.
 """
 
+import asyncio
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -15,6 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from . import probe
 from ..config import Config, listener_port_errors
 from ..core.api_config import generate_api_key, get_api_key, load_api_config, set_api_key
 from ..paths import get_config_dir
@@ -51,24 +51,6 @@ def _docs_are_published() -> bool:
     return docs_enabled()
 
 
-def _is_api_running(host: str, port: int) -> bool:
-    """Check if the API server is running on the given host:port."""
-    if sys.platform == "win32":
-        try:
-            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True)
-            for line in result.stdout.splitlines():
-                if f":{port}" in line and "LISTENING" in line:
-                    return True
-        except Exception:
-            pass
-    else:
-        try:
-            result = subprocess.run(["lsof", "-t", f"-i:{port}"], capture_output=True, text=True)
-            if result.stdout.strip():
-                return True
-        except FileNotFoundError:
-            pass
-    return False
 
 
 @api_app.command("setup")
@@ -227,8 +209,11 @@ def status(
     api_key = get_api_key(Path(config_path)) or ""
     enable_on_startup = config.get("enable_on_startup", False)
 
-    # Check if running
-    is_running = _is_api_running(api_host, api_port)
+    # The same probe the top-level status uses, so both answer about the address they
+    # print. The old check asked the operating system for any listener on the port and
+    # ignored the host entirely, so an unrelated service on another interface read as the
+    # API running, and on Windows a listener on 10801 matched a question about 1080.
+    is_running = asyncio.run(probe._something_is_listening(api_host, api_port))
 
     # Build status table
     table = Table(title="API Configuration", show_header=True)

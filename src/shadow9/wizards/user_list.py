@@ -138,10 +138,17 @@ def _user_action_menu(auth_manager: AuthManager, username: str, config_path: str
             continue
 
         if action.lower() == "e":
+            # Imported here rather than at the top because commands.user imports this
+            # wizard, and the restart offer has to happen from either route: without it
+            # an operator sees an account reported as disabled that still logs in until
+            # something restarts the proxy.
+            from ..commands.user import _offer_service_restart
+
             new_status = not enabled
             auth_manager.set_user_enabled(username, new_status)
             status_str = "enabled" if new_status else "disabled"
             console.print(f"  [green]User {status_str}[/green]")
+            _offer_service_restart("Changes will apply after restart.")
             continue
 
         if action.lower() == "s":
@@ -208,8 +215,11 @@ def _user_action_menu(auth_manager: AuthManager, username: str, config_path: str
 
         if action.lower() == "d":
             if typer.confirm(f"  Delete user '{username}'?", default=False):
-                auth_manager.remove_user(username)
+                from ..commands.user import _offer_service_restart, remove_user
+
+                remove_user(auth_manager, username)
                 console.print(f"  [green]User '{username}' deleted[/green]")
+                _offer_service_restart("Changes will apply after restart.")
                 return  # Go back to list since user is deleted
             continue
 

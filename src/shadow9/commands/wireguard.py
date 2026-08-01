@@ -38,7 +38,8 @@ from rich.table import Table
 
 from ..auth import AuthManager
 from ..config import Config
-from ..paths import load_master_key, lock_file, write_file_safely
+from ..paths import lock_file, write_file_safely
+from .user import open_store
 from ..services.wireguard_service import (
     BINARY_DOWNLOAD_NOTICE,
     CLEARTEXT_API_NOTICE,
@@ -1141,10 +1142,8 @@ def _auth_manager(cfg: Config) -> AuthManager:
     Returns:
         The store
     """
-    return AuthManager(
-        credentials_file=cfg.get_credentials_file(),
-        master_key=load_master_key(),
-        tunnel_network=cfg.wireguard.tunnel_network,
+    return open_store(
+        cfg, "Peers are kept on the user records, so this cannot read them without the key."
     )
 
 

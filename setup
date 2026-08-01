@@ -153,7 +153,7 @@ print_step 4 4 "Encryption Key"
 if [ -f ".env" ] && grep -q "SHADOW9_MASTER_KEY" .env 2>/dev/null; then
     print_status "$SUCCESS" "Master key exists"
 else
-    shadow9 key generate
+    shadow9 master-key generate
 fi
 
 # Verify

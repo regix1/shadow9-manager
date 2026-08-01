@@ -11,8 +11,8 @@ from shadow9.config import Config
 from shadow9.commands import api as api_commands
 from shadow9.commands import probe
 from shadow9.commands import user as user_commands
+from shadow9.commands import server as server_commands
 from shadow9.commands import utils
-from shadow9.wizards import init_wizard
 
 
 runner = CliRunner()
@@ -105,32 +105,174 @@ def test_show_paths_prints_every_configured_path(monkeypatch: pytest.MonkeyPatch
     assert str(paths.logs_dir) in result.stdout
 
 
-def test_show_key_prints_the_stored_key_and_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_master_key_check_prints_the_stored_key_and_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--show is what 'show key' used to be, warning included."""
+
     def load_key() -> str:
         return "stored-master-key-123"
 
-    monkeypatch.setattr(init_wizard, "load_master_key", load_key)
+    monkeypatch.setattr(utils, "load_master_key", load_key)
 
-    result = runner.invoke(app, ["show", "key"])
+    result = runner.invoke(app, ["master-key", "check", "--show"])
 
     assert result.exit_code == 0, result.stdout
-    assert "stored-master-key-123" in result.stdout
-    assert "Anyone with this key can decrypt credentials" in result.stdout
+    said = plain(result.stdout)
+    assert "stored-master-key-123" in said
+    assert "Anyone with this key can decrypt credentials" in said
 
 
-def test_show_key_explains_how_to_create_a_missing_key(
+def test_removing_a_user_takes_their_directory_with_them() -> None:
+    """The interactive list used to remove the credential and leave the files behind.
+
+    Both routes call this now, so a user removed from either one is gone from both places.
+    """
+    removed: list[str] = []
+    deleted: list[str] = []
+
+    class _Store:
+        def remove_user(self, username: str) -> bool:
+            removed.append(username)
+            return True
+
+    class _Paths:
+        def delete_user_dir(self, username: str) -> bool:
+            deleted.append(username)
+            return True
+
+    import shadow9.commands.user as user_module
+
+    original = user_module.get_paths
+    user_module.get_paths = lambda: _Paths()  # type: ignore[assignment]
+    try:
+        assert user_commands.remove_user(_Store(), "alice") is True
+    finally:
+        user_module.get_paths = original  # type: ignore[assignment]
+
+    assert removed == ["alice"]
+    assert deleted == ["alice"], "the user's directory was left on disk"
+
+
+class TestStop:
+    """Stopping the proxy must not stop somebody else's program."""
+
+    def test_the_service_is_preferred_over_the_port(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When shadow9's own process is found, nothing looks at the port at all."""
+        monkeypatch.setattr(utils, "stop_running_server", lambda: utils.RunningServer(True, True))
+
+        def no_port_lookup(port: int) -> None:
+            raise AssertionError("the port must not be consulted once the server was found")
+
+        monkeypatch.setattr(server_commands, "_listener_on_port", no_port_lookup)
+
+        result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "Server stopped" in plain(result.stdout)
+
+    def test_an_unrecognised_process_is_named_and_not_killed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Declining the prompt has to leave the other program running."""
+        monkeypatch.setattr(utils, "stop_running_server", lambda: utils.RunningServer(False, False))
+        monkeypatch.setattr(
+            server_commands,
+            "_listener_on_port",
+            lambda port: server_commands.PortHolder(4242, "postgres", False),
+        )
+
+        killed: list[int] = []
+        monkeypatch.setattr(server_commands, "_terminate", lambda pid: killed.append(pid) or True)
+
+        result = runner.invoke(app, ["stop"], input="n\n")
+
+        assert result.exit_code == 1, result.stdout
+        said = plain(result.stdout)
+        assert "postgres" in said and "4242" in said
+        assert killed == [], "it stopped a process the operator declined to stop"
+
+    def test_yes_stops_the_unrecognised_process_without_asking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(utils, "stop_running_server", lambda: utils.RunningServer(False, False))
+        monkeypatch.setattr(
+            server_commands,
+            "_listener_on_port",
+            lambda port: server_commands.PortHolder(4242, "postgres", False),
+        )
+        killed: list[int] = []
+        monkeypatch.setattr(server_commands, "_terminate", lambda pid: killed.append(pid) or True)
+
+        result = runner.invoke(app, ["stop", "--yes"])
+
+        assert result.exit_code == 0, result.stdout
+        assert killed == [4242]
+
+
+class TestCheckTor:
+    """The port on the command line is the port that gets tested."""
+
+    def _connector(self, monkeypatch: pytest.MonkeyPatch, *, connects: bool) -> list[int]:
+        """Record which SOCKS port a connector was built for, without touching Tor."""
+        tested: list[int] = []
+
+        class _Connector:
+            def __init__(self, config: object) -> None:
+                tested.append(config.socks_port)  # type: ignore[attr-defined]
+
+            @staticmethod
+            def detect_tor_service() -> object:
+                raise AssertionError("a supplied port must not be second-guessed by autodetection")
+
+            @staticmethod
+            def get_tor_install_instructions() -> str:
+                return "install tor"
+
+            async def connect(self) -> bool:
+                return connects
+
+            async def disconnect(self) -> None:
+                return None
+
+            circuit_info = None
+
+        monkeypatch.setattr(utils, "TorConnector", _Connector)
+        return tested
+
+    def test_the_supplied_port_is_the_one_tested(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        tested = self._connector(monkeypatch, connects=True)
+
+        result = runner.invoke(app, ["check-tor", "--tor-port", "9150"])
+
+        assert result.exit_code == 0, result.stdout
+        assert tested == [9150]
+
+    def test_a_failed_check_exits_non_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A red line on the terminal is not enough for a script to notice."""
+        self._connector(monkeypatch, connects=False)
+
+        result = runner.invoke(app, ["check-tor", "--tor-port", "9150"])
+
+        assert result.exit_code == 1, result.stdout
+
+
+def test_master_key_check_explains_how_to_create_a_missing_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A check that finds no key says how to make one, and fails so a script notices."""
+
     def load_key() -> None:
         return None
 
-    monkeypatch.setattr(init_wizard, "load_master_key", load_key)
+    monkeypatch.setattr(utils, "load_master_key", load_key)
 
-    result = runner.invoke(app, ["show", "key"])
+    result = runner.invoke(app, ["master-key", "check"])
 
-    assert result.exit_code == 0, result.stdout
-    assert "Master key not found" in result.stdout
-    assert "shadow9 init" in result.stdout
+    assert result.exit_code == 1, result.stdout
+    said = plain(result.stdout)
+    assert "No master key configured" in said
+    assert "master-key generate" in said
 
 
 @pytest.mark.parametrize("listening", [True, False])

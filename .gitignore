@@ -82,6 +82,12 @@ users/
 .env.local
 .env.*.local
 
+# Key rotation copies the master key and the credential store aside before replacing them.
+# Those copies hold the same secrets as the originals, so they must never be staged.
+.env.backup
+*.backup
+config/*.backup
+
 # Secrets - NEVER commit these
 *.pem
 *.key

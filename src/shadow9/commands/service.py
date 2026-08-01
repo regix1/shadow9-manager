@@ -15,7 +15,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from ..paths import get_paths, write_file_safely
+from ..paths import get_paths, load_master_key, write_file_safely
 
 console = Console()
 
@@ -43,7 +43,7 @@ def register_service_commands(app: typer.Typer):
                 "--global", "-g", help="Install 'shadow9' command globally in /usr/local/bin"
             ),
         ] = True,
-    ):
+    ) -> None:
         """Install Shadow9 as a systemd service."""
         _check_linux()
         _check_root()
@@ -63,30 +63,50 @@ def register_service_commands(app: typer.Typer):
             python_path = "/usr/local/bin:/usr/bin:/bin"
 
         # Get master key from paths module (checks env var and .env file)
-        from ..paths import load_master_key
-
         master_key = load_master_key()
+        key_generated = False
 
         if master_key:
             console.print(f"[dim]Using master key from: {paths.env_file}[/dim]")
+        else:
+            import secrets
+
+            master_key = secrets.token_urlsafe(32)
+            key_generated = True
+
+        # The stored key is the only copy of whatever credentials.enc was encrypted with,
+        # so an install that quietly replaced it with a different one would leave every
+        # existing user unreadable and nothing to go back to
+        stored_key = _read_master_key(paths.env_file)
+        if stored_key is not None and stored_key != master_key:
+            console.print(
+                f"[red]{paths.env_file} holds a different master key than the environment[/red]"
+            )
+            console.print(
+                "[dim]Existing credentials are encrypted with one of the two. Unset "
+                "SHADOW9_MASTER_KEY to install with the stored key, or remove that line from "
+                "the file to install with the one in the environment[/dim]"
+            )
+            raise typer.Exit(1)
 
         # This is the one file whose truncation cannot be recovered from: half a master
         # key means credentials.enc will never decrypt again, for every user.
         # write_file_safely renames a complete file into place and applies 0600 before
         # any content exists, rather than after
-        if not master_key:
-            import secrets
+        _save_master_key(paths.env_file, master_key)
 
-            master_key = secrets.token_urlsafe(32)
-            env_file = Path(install_path) / ".env"
-            write_file_safely(env_file, f"SHADOW9_MASTER_KEY={master_key}\n".encode())
-            console.print(f"[green]Generated master key and saved to {env_file}[/green]")
+        # The unit below names this file instead of carrying the key, so a write that did
+        # not land would leave systemd starting the service with no key at all. Read it
+        # back from disk rather than trusting the write, and do it before the unit exists
+        if _read_master_key(paths.env_file) != master_key:
+            console.print(
+                f"[red]{paths.env_file} does not contain the master key; "
+                "the service would start with no key[/red]"
+            )
+            raise typer.Exit(1)
 
-        # Ensure .env file exists in install path for the service
-        target_env = Path(install_path) / ".env"
-        if not target_env.exists():
-            write_file_safely(target_env, f"SHADOW9_MASTER_KEY={master_key}\n".encode())
-            console.print(f"[dim]Saved master key to: {target_env}[/dim]")
+        if key_generated:
+            console.print(f"[green]Generated master key and saved to {paths.env_file}[/green]")
 
         # A flat RestartSec retries forever at one rate, which fills the journal on a
         # service that cannot start at all. The decaying interval needs systemd 254.
@@ -117,7 +137,8 @@ WorkingDirectory={install_path}
 Environment="PATH={python_path}"
 Environment="PYTHONPATH={install_path}/src"
 Environment="SHADOW9_HOME={install_path}"
-Environment="SHADOW9_MASTER_KEY={master_key}"
+# The unit is world readable, so the key stays in the 0600 file systemd reads as root.
+EnvironmentFile={paths.env_file}
 ExecStart={python_exec} -m shadow9.cli serve --host {host} --port {port}
 # a clean exit must also come back, so on-failure is not enough
 Restart=always
@@ -384,6 +405,44 @@ WantedBy=multi-user.target
         else:
             result = subprocess.run(cmd, capture_output=True, text=True)
             console.print(result.stdout)
+
+
+def _read_master_key(env_file: Path) -> str | None:
+    """
+    Read the master key out of the environment file, or None if it holds no key.
+
+    Shadow9Paths.load_master_key answers the wider question of which key the process will
+    use and prefers the environment variable, which would hide an environment file that
+    has nothing in it. This only ever reports what systemd will read out of the file.
+    """
+    if not env_file.exists():
+        return None
+
+    for line in env_file.read_text().splitlines():
+        if line.strip().startswith("SHADOW9_MASTER_KEY="):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def _save_master_key(env_file: Path, master_key: str) -> None:
+    """Write the master key into the 0600 environment file, keeping the other lines in it."""
+    lines = env_file.read_text().splitlines() if env_file.exists() else []
+    key_line = f"SHADOW9_MASTER_KEY={master_key}"
+    key_replaced = False
+    updated_lines: list[str] = []
+
+    for line in lines:
+        if line.strip().startswith("SHADOW9_MASTER_KEY="):
+            if not key_replaced:
+                updated_lines.append(key_line)
+                key_replaced = True
+        else:
+            updated_lines.append(line)
+
+    if not key_replaced:
+        updated_lines.append(key_line)
+
+    write_file_safely(env_file, ("\n".join(updated_lines) + "\n").encode())
 
 
 def _systemd_version() -> int:

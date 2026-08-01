@@ -5,6 +5,7 @@ Provides secure credential management using Argon2id hashing
 and secure token generation.
 """
 
+import os
 import secrets
 import json
 import threading
@@ -33,6 +34,58 @@ logger = structlog.get_logger(__name__)
 # Hashed on the branches that reject a login without checking a real hash, so every
 # outcome costs the same and the response time does not reveal which users exist.
 _DUMMY_PASSWORD = "dummy_password_for_timing"
+
+# Set this to say the store may keep its users as plain JSON, which is what happens when
+# there is no master key to encrypt them with. An install never sets it.
+ALLOW_PLAINTEXT_ENV = "SHADOW9_ALLOW_PLAINTEXT_CREDENTIALS"
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+class MissingMasterKey(Exception):
+    """A credential store was opened with no key to encrypt its users with."""
+
+
+def plaintext_credentials_allowed() -> bool:
+    """
+    Whether this process may keep credentials on disk as plain JSON.
+
+    One thing says yes: SHADOW9_ALLOW_PLAINTEXT_CREDENTIALS. A developer sets it by hand
+    to work without a key, and tests/conftest.py sets it for the test suite, which builds
+    most of its stores without one. Nothing in the package sets it, so an installed copy
+    that has lost its master key cannot fall through to writing plaintext.
+
+    Returns:
+        True if a store with no master key may be built, False otherwise
+    """
+    return os.getenv(ALLOW_PLAINTEXT_ENV, "").strip().lower() in _TRUE_VALUES
+
+
+def _no_master_key_message(credentials_file: Path) -> str:
+    """What to tell an operator whose store has no key to encrypt with.
+
+    Which advice is right turns on whether a file is already there. On a fresh install the
+    operator wants a key generated. Where a store already exists, generating one is the
+    worst thing they can do: the existing file is then read with the new key, fails, and
+    the store comes up with nobody in it. A key on its own is not enough to read it back
+    either, because the encryption key is derived from the master key and the salt in
+    .salt together, so a regenerated salt locks the file exactly as thoroughly as a lost
+    key does.
+    """
+    if not credentials_file.exists():
+        return (
+            f"No master key, so {credentials_file} cannot be encrypted. Set "
+            f"SHADOW9_MASTER_KEY, or put it in the install's .env file, and run "
+            f"'shadow9 master-key generate' if there is no key yet."
+        )
+
+    return (
+        f"No master key, so {credentials_file} cannot be read or written. A store is "
+        f"already there, so set the SHADOW9_MASTER_KEY it was written with rather than "
+        f"generating a new one, and keep the .salt file beside it, because the key and "
+        f"the salt together are what decrypt it. Generating a new key would leave every "
+        f"user in that file unreadable."
+    )
 
 
 @dataclass
@@ -490,11 +543,16 @@ class AuthManager:
             parallelism=self.ARGON2_PARALLELISM,
         )
 
-        # Setup encryption for credentials at rest
+        # Setup encryption for credentials at rest. Without a key this store would keep
+        # password hashes and WireGuard private keys as plain JSON, in a file named
+        # credentials.enc that says otherwise, and the operator would have no sign of it
+        # until adding a key later made every one of those users unreadable.
         if master_key:
             self._fernet = self._derive_fernet_key(master_key)
-        else:
+        elif plaintext_credentials_allowed():
             self._fernet = None
+        else:
+            raise MissingMasterKey(_no_master_key_message(self.credentials_file))
 
         # Async save infrastructure. The lock on the credentials file covers the writes
         # themselves and is held for the whole of a change, so the scheduling state needs
@@ -562,7 +620,7 @@ class AuthManager:
                 decrypted_data = self._fernet.decrypt(encrypted_data)
                 data = json.loads(decrypted_data.decode())
             else:
-                # If no encryption, assume plain JSON (for development only)
+                # Plain JSON, which only a store built under the plaintext opt-in has
                 data = json.loads(encrypted_data.decode())
 
             loaded = {

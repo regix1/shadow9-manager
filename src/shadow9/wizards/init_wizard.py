@@ -196,7 +196,9 @@ def show_master_key(key: str | None = None) -> None:
     """Display a new key or the key currently used for credential encryption."""
     key = key or load_master_key()
     if key is None:
-        console.print("[red]Master key not found. Run 'shadow9 init' to generate one.[/red]")
+        console.print(
+            "[red]Master key not found. Run 'shadow9 master-key generate' to create one.[/red]"
+        )
         return
 
     console.print(

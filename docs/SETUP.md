@@ -13,7 +13,7 @@ prints the exact command when it cannot make one. Node setup still applies its o
 
 On the hub:
 
-- shadow9 installed and `shadow9 init` already run, so the master key exists.
+- shadow9 installed and `shadow9 master-key generate` already run, so the master key exists.
 - `wireguard-tools`, for `wg-quick`. shadow9 generates keys itself and never shells out
   to `wg`, but the kernel still needs something to bring the interface up.
 - A public address. A cloud VM's elastic IP is fine even though the machine cannot see

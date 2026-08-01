@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 
-from ..auth import AuthManager
+from ..auth import AuthManager, MissingMasterKey
 from ..config import Config, get_project_root
 from ..core.config import get_settings
 from ..repositories.user_repository import UserRepository
@@ -42,12 +42,24 @@ def get_user_repository() -> UserRepository:
 
     # The same setting the proxy sizes its own hashing cap from, so the unit's MemoryMax
     # comment holds for both processes rather than only the one
-    return UserRepository(
-        credentials_file=credentials_file,
-        master_key=get_master_key(),
-        max_concurrent_hashes=settings.auth.max_concurrent_auth,
-        tunnel_network=settings.wireguard.tunnel_network,
-    )
+    try:
+        return UserRepository(
+            credentials_file=credentials_file,
+            master_key=get_master_key(),
+            max_concurrent_hashes=settings.auth.max_concurrent_auth,
+            tunnel_network=settings.wireguard.tunnel_network,
+        )
+    except MissingMasterKey as missing:
+        # The store refuses to open rather than keeping users as plain JSON. Answering
+        # 503 says the service is not configured yet, which is the truth, and the path
+        # to the credentials file stays out of the response.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Credential store unavailable: no master key is configured. "
+                "Set SHADOW9_MASTER_KEY."
+            ),
+        ) from missing
 
 
 def get_config() -> Config:

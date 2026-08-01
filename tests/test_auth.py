@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -1853,3 +1854,282 @@ class TestAFileWrittenByALaterVersion:
         written = json.loads(creds_file.read_text())["alice"]
         assert "injected" not in written
         assert "unknown_fields" not in written
+
+
+def _look_like_an_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take away what lets the store keep plain JSON, so it behaves as an install does.
+
+    conftest.py sets SHADOW9_ALLOW_PLAINTEXT_CREDENTIALS for the whole session, because
+    most of the stores in this suite are built without a master key. A test that wants to
+    see what an installed copy sees has to take it away again, along with any real key the
+    developer running the suite happens to have in their environment.
+
+    The assertion is the reason this is a helper rather than two lines copied around. The
+    opt-in now arrives from conftest.py rather than from the test, so a test that failed to
+    clear it would still pass and would prove nothing at all. This refuses to hand back a
+    process that can still write plaintext.
+    """
+    monkeypatch.delenv(auth_module.ALLOW_PLAINTEXT_ENV, raising=False)
+    monkeypatch.delenv("SHADOW9_MASTER_KEY", raising=False)
+    assert auth_module.plaintext_credentials_allowed() is False
+
+
+def _one_line(text: str) -> str:
+    """Flatten styled, wrapped terminal output so a sentence can be matched in it.
+
+    Rich colours values inside a line and wraps the line to the width of the terminal, so
+    a message the operator reads as one sentence is never present in the raw output as
+    plain text.
+    """
+    return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", text).split())
+
+
+def test_the_suite_does_not_run_against_the_working_tree():
+    """conftest.py moves the install root off the checkout, and this fails if that goes.
+
+    Shadow9Paths takes the first standard location holding a .env or a config directory,
+    and on a developer's machine that is the working tree. A suite that finds it reads the
+    operator's own master key, so tests pass or fail depending on whose checkout they run
+    on, and a command under test can write into a real install. No test fails today if the
+    line goes, because the files that need a root of their own already set one per test.
+    This is what says why the line is there.
+    """
+    assert get_paths().root != Path(__file__).resolve().parent.parent
+
+
+class TestAStoreWithNoMasterKey:
+    """A store with no key to encrypt with must refuse rather than keep plain JSON.
+
+    Without a master key the store used to write ordinary JSON into a file called
+    credentials.enc, so password hashes and WireGuard private keys sat in the clear under
+    a name that said otherwise. It also compounded: adding a key later made that same file
+    fail to decrypt, and the service came up with no users at all.
+    """
+
+    def test_a_store_with_no_master_key_refuses_to_open(self, tmp_path, monkeypatch):
+        _look_like_an_install(monkeypatch)
+        creds_file = tmp_path / "credentials.enc"
+
+        with pytest.raises(auth_module.MissingMasterKey) as refused:
+            AuthManager(credentials_file=creds_file)
+
+        assert "SHADOW9_MASTER_KEY" in str(refused.value)
+        assert not creds_file.exists()
+
+    def test_creating_the_first_user_without_a_key_writes_no_credentials_file(
+        self, tmp_path, monkeypatch
+    ):
+        """The CLI has to say the key is missing, and leave nothing behind when it does."""
+        from typer.testing import CliRunner
+
+        from shadow9.cli import app
+
+        # a fresh install: the key is in neither the environment nor the .env file.
+        # Shadow9Paths keeps one instance per process and reads SHADOW9_HOME only while
+        # building it, so a test that has to move the root has to drop that instance as
+        # well. Without this the command finds the developer's own .env, succeeds, and
+        # writes a user into the real install.
+        monkeypatch.setenv("SHADOW9_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module.Shadow9Paths, "_instance", None)
+        _look_like_an_install(monkeypatch)
+        assert get_paths().root == tmp_path.resolve()
+        assert not (tmp_path / ".env").exists()
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "user",
+                "generate",
+                "--username",
+                "alice",
+                "--password",
+                "SecurePass123!@#",
+                "--no-tor",
+                "--bridge",
+                "none",
+                "--security",
+                "none",
+                "--no-logging",
+                "--config",
+                str(tmp_path / "config" / "config.yaml"),
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "SHADOW9_MASTER_KEY" in _one_line(result.output)
+        assert list(tmp_path.rglob("credentials.enc")) == []
+
+    def test_the_proxy_refuses_to_start_without_a_key(self, tmp_path, monkeypatch):
+        """Starting the proxy is the path where this matters most.
+
+        A proxy that came up against a store it cannot read would answer every login from
+        an empty table, so it has to refuse and say why rather than exit on a traceback
+        that systemd will bury.
+        """
+        from typer.testing import CliRunner
+
+        from shadow9.cli import app
+
+        monkeypatch.setenv("SHADOW9_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module.Shadow9Paths, "_instance", None)
+        _look_like_an_install(monkeypatch)
+        assert get_paths().root == tmp_path.resolve()
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "19998",
+                "--config",
+                str(tmp_path / "config" / "config.yaml"),
+            ],
+        )
+
+        assert result.exit_code != 0
+        said = _one_line(result.output)
+        assert "SHADOW9_MASTER_KEY" in said
+        assert "will not start" in said
+
+        # a traceback here would be the failure this replaces
+        assert "Traceback" not in result.output
+        assert list(tmp_path.rglob("credentials.enc")) == []
+
+    def test_the_api_answers_that_the_key_is_missing_rather_than_failing_deeper_in(
+        self, tmp_path, monkeypatch
+    ):
+        from fastapi import HTTPException
+
+        from shadow9.api import deps
+        from shadow9.core.config import Settings
+
+        _look_like_an_install(monkeypatch)
+
+        settings = Settings()
+        settings.auth.credentials_file = str(tmp_path / "credentials.enc")
+        monkeypatch.setattr(deps, "get_settings", lambda: settings)
+
+        deps.get_user_repository.cache_clear()
+        try:
+            assert deps.get_master_key() is None
+
+            with pytest.raises(HTTPException) as refused:
+                deps.get_user_repository()
+
+            assert refused.value.status_code == 503
+            assert "SHADOW9_MASTER_KEY" in refused.value.detail
+            assert not (tmp_path / "credentials.enc").exists()
+        finally:
+            deps.get_user_repository.cache_clear()
+
+    def test_a_store_that_is_already_there_is_not_told_to_generate_a_key(
+        self, tmp_path, monkeypatch
+    ):
+        """Generating a key over an existing file is what loses every user in it.
+
+        The encryption key comes from the master key and the salt in .salt together, so a
+        new key, or a new salt, locks the file just as thoroughly as a lost key. An
+        operator who reaches this message with a file already on disk needs the original
+        key, and telling them to generate one would walk them into exactly the cold
+        start _save_credentials refuses to write over.
+        """
+        _look_like_an_install(monkeypatch)
+        creds_file = tmp_path / "credentials.enc"
+        creds_file.write_bytes(b"{}")
+
+        with pytest.raises(auth_module.MissingMasterKey) as refused:
+            AuthManager(credentials_file=creds_file)
+
+        said = str(refused.value)
+        assert "SHADOW9_MASTER_KEY" in said
+        assert ".salt" in said
+        assert "master-key generate" not in said
+
+        # the file it refused to open is still exactly as it was
+        assert creds_file.read_bytes() == b"{}"
+
+    def test_a_fresh_install_is_told_how_to_get_a_key(self, tmp_path, monkeypatch):
+        _look_like_an_install(monkeypatch)
+        creds_file = tmp_path / "credentials.enc"
+
+        with pytest.raises(auth_module.MissingMasterKey) as refused:
+            AuthManager(credentials_file=creds_file)
+
+        assert "master-key generate" in str(refused.value)
+
+    def test_a_master_key_is_all_a_store_needs_to_open(self, tmp_path, monkeypatch):
+        """The refusal is about the missing key, not about being outside a test run."""
+        _look_like_an_install(monkeypatch)
+        creds_file = tmp_path / "credentials.enc"
+
+        auth = AuthManager(credentials_file=creds_file, master_key="a-master-key")
+        auth.add_user("alice", "SecurePass123!@#")
+
+        assert AuthManager(
+            credentials_file=creds_file, master_key="a-master-key"
+        ).verify("alice", "SecurePass123!@#")
+
+
+class TestThePlaintextOptIn:
+    """SHADOW9_ALLOW_PLAINTEXT_CREDENTIALS is how a developer works without a key.
+
+    It is the whole mechanism, and the only one. There is no constructor argument for it,
+    because the store is reached through UserRepository as well and a second way in is a
+    second thing to get wrong. The suite takes it in conftest.py, once and in the open,
+    rather than each test being let through by something it never asked for. An installed
+    copy never sets it.
+    """
+
+    def test_the_opt_in_lets_a_store_open_with_no_master_key(self, tmp_path, monkeypatch):
+        _look_like_an_install(monkeypatch)
+        monkeypatch.setenv("SHADOW9_ALLOW_PLAINTEXT_CREDENTIALS", "1")
+        creds_file = tmp_path / "credentials.enc"
+
+        auth = AuthManager(credentials_file=creds_file)
+        assert auth.add_user("alice", "SecurePass123!@#") is True
+
+        # what it writes really is plain JSON, which is the point of the opt-in
+        assert json.loads(creds_file.read_text())["alice"]["password_hash"]
+        assert AuthManager(credentials_file=creds_file).verify("alice", "SecurePass123!@#")
+
+    def test_the_constant_names_the_variable_the_tests_set(self):
+        """A caller reading auth.py finds the same spelling these tests use."""
+        assert auth_module.ALLOW_PLAINTEXT_ENV == "SHADOW9_ALLOW_PLAINTEXT_CREDENTIALS"
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " on "])
+    def test_the_values_that_take_the_opt_in(self, value, monkeypatch):
+        _look_like_an_install(monkeypatch)
+        monkeypatch.setenv(auth_module.ALLOW_PLAINTEXT_ENV, value)
+
+        assert auth_module.plaintext_credentials_allowed() is True
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "maybe"])
+    def test_the_values_that_do_not(self, value, monkeypatch):
+        _look_like_an_install(monkeypatch)
+        monkeypatch.setenv(auth_module.ALLOW_PLAINTEXT_ENV, value)
+
+        assert auth_module.plaintext_credentials_allowed() is False
+
+    def test_the_suite_takes_the_opt_in_for_every_test(self):
+        """conftest.py is what lets the suite's 90-odd keyless stores build.
+
+        Nothing else does it now, so if this ever fails the refusal is about to fire in
+        roughly 250 tests that have nothing to do with master keys.
+        """
+        assert os.environ[auth_module.ALLOW_PLAINTEXT_ENV] == "1"
+        assert auth_module.plaintext_credentials_allowed() is True
+
+    def test_pytest_alone_does_not_open_the_door(self, monkeypatch):
+        """A test run is not itself permission, which is why conftest.py has to ask.
+
+        The guard used to treat pytest's own environment variables as the opt-in. That put
+        test-framework detection inside shipped credential code, where a reader of auth.py
+        could not tell what actually enables plaintext.
+        """
+        _look_like_an_install(monkeypatch)
+        monkeypatch.setenv("PYTEST_VERSION", "9.0.3")
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_auth.py::somewhere (call)")
+
+        assert auth_module.plaintext_credentials_allowed() is False

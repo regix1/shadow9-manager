@@ -1,5 +1,6 @@
 """Tests for the update command, which pulls, reinstalls and restarts the proxy."""
 
+import asyncio
 import json
 import re
 import socket
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 import typer
 
-from shadow9.commands import utils
+from shadow9.commands import probe, utils
 from shadow9.commands.service import SERVICE_NAME
 
 OLD_COMMIT = "aaaaaaaaaaaa"
@@ -649,7 +650,7 @@ class TestServingCheck:
             listener.listen(1)
             port = listener.getsockname()[1]
 
-            assert utils._something_is_listening("127.0.0.1", port) is True
+            assert asyncio.run(probe._something_is_listening("127.0.0.1", port)) is True
 
     def test_a_closed_port_is_not_seen(self) -> None:
         """A refused connection proves the proxy is not serving."""
@@ -658,25 +659,25 @@ class TestServingCheck:
             listener.listen(1)
             port = listener.getsockname()[1]
 
-        assert utils._something_is_listening("127.0.0.1", port) is False
+        assert asyncio.run(probe._something_is_listening("127.0.0.1", port)) is False
 
     def test_waiting_stops_at_the_first_answer(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A proxy that is already up is not waited on."""
 
-        def listening(host: str, port: int) -> bool:
+        async def listening(host: str, port: int) -> bool:
             return True
 
-        monkeypatch.setattr(utils, "_something_is_listening", listening)
+        monkeypatch.setattr(probe, "_something_is_listening", listening)
 
         assert wait_until_serving("127.0.0.1", 1080) is True
 
     def test_waiting_gives_up_when_nothing_answers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The wait is bounded, so a dead proxy is reported rather than hung on."""
 
-        def listening(host: str, port: int) -> bool:
+        async def listening(host: str, port: int) -> bool:
             return False
 
-        monkeypatch.setattr(utils, "_something_is_listening", listening)
+        monkeypatch.setattr(probe, "_something_is_listening", listening)
 
         assert wait_until_serving("127.0.0.1", 1080, timeout_seconds=0.0) is False
 

@@ -14,7 +14,6 @@ from rich.table import Table
 
 from ..auth import AuthManager
 from ..config import Config
-from ..paths import load_master_key
 
 console = Console()
 
@@ -38,12 +37,12 @@ def run_user_modify_wizard(
     try:
         cfg = Config.load(Path(config_path)) if Path(config_path).exists() else Config()
 
-        master_key = load_master_key()
+        # Imported here rather than at the top because commands.user imports this package,
+        # the way wireguard_setup reaches commands.wireguard
+        from ..commands.user import open_store
 
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(),
-            master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network,
+        auth_manager = open_store(
+            cfg, "Credentials are encrypted at rest, so the users cannot be read without it."
         )
 
         users = auth_manager.list_users()

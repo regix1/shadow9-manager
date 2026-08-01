@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.panel import Panel
 
 from ..config import Config
-from ..auth import AuthManager
+from ..auth import AuthManager, MissingMasterKey
 from ..paths import get_paths, load_master_key
 from ..schemas.user import UserCreate
 from ..wizards import run_user_modify_wizard, run_user_list_wizard, display_user_info
@@ -103,6 +103,58 @@ def _parse_allowed_ports(ports: str) -> list[int]:
         raise typer.Exit(1) from e
 
     return parsed
+
+
+def open_store(
+    cfg: Config,
+    consequence: str = "Credentials are encrypted at rest, so no user can be stored without it.",
+) -> AuthManager:
+    """
+    Open the credential store, and say what is missing rather than failing deeper in.
+
+    Every entry point that needs the store opens it through here, so an operator meets the
+    same explanation of a missing master key wherever they run into it. What each one adds
+    is the consequence, because a proxy that will not start and a user that was not created
+    are not the same news.
+
+    Args:
+        cfg: The loaded configuration
+        consequence: One line saying what this particular command cannot do without a key
+
+    Returns:
+        The store for this configuration
+    """
+    try:
+        return AuthManager(
+            credentials_file=cfg.get_credentials_file(),
+            master_key=load_master_key(),
+            tunnel_network=cfg.wireguard.tunnel_network,
+        )
+    except MissingMasterKey as missing:
+        console.print(f"[red]{missing}[/red]")
+        console.print(f"[dim]{consequence}[/dim]")
+        raise typer.Exit(1) from missing
+
+
+def remove_user(auth_manager: AuthManager, username: str) -> bool:
+    """
+    Remove a user and the directory holding their files.
+
+    Deleting the directory is part of what removing a user means, and it was the half the
+    interactive list left out, so a user deleted there kept their files on disk. The
+    restart offer is deliberately left to the caller, because the commands remove several
+    users at once and one offer at the end beats one per user.
+
+    Args:
+        auth_manager: The open credential store
+        username: The user to remove
+
+    Returns:
+        True if the credential was there to remove
+    """
+    removed = auth_manager.remove_user(username)
+    get_paths().delete_user_dir(username)
+    return bool(removed)
 
 
 def register_user_commands(app: typer.Typer) -> None:
@@ -204,11 +256,7 @@ def register_user_commands(app: typer.Typer) -> None:
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
         if dry_run:
-            auth_manager = AuthManager(
-                credentials_file=cfg.get_credentials_file(),
-                master_key=load_master_key(),
-                tunnel_network=cfg.wireguard.tunnel_network,
-            )
+            auth_manager = open_store(cfg)
             final_username, final_password = _credentials_for(
                 auth_manager, username, password
             )
@@ -335,12 +383,7 @@ def register_user_commands(app: typer.Typer) -> None:
         if ports:
             allowed_ports = _parse_allowed_ports(ports)
 
-        master_key = load_master_key()
-
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network
-        )
+        auth_manager = open_store(cfg)
 
         # Generate random values for any not provided
         final_username, final_password = _credentials_for(auth_manager, username, password)
@@ -449,12 +492,7 @@ def register_user_commands(app: typer.Typer) -> None:
         """Implementation of user_remove command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        master_key = load_master_key()
-
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network
-        )
+        auth_manager = open_store(cfg)
 
         users = auth_manager.list_users()
 
@@ -470,10 +508,8 @@ def register_user_commands(app: typer.Typer) -> None:
                 if not confirm:
                     raise typer.Abort()
 
-            paths = get_paths()
             for user in users:
-                auth_manager.remove_user(user)
-                paths.delete_user_dir(user)
+                remove_user(auth_manager, user)
                 console.print(f"[dim]Removed: {user}[/dim]")
             console.print(f"[green]All {len(users)} users removed[/green]")
             _offer_service_restart("Changes will apply after restart.")
@@ -507,10 +543,8 @@ def register_user_commands(app: typer.Typer) -> None:
                     if not confirm:
                         raise typer.Abort()
 
-                paths = get_paths()
                 for user in users:
-                    auth_manager.remove_user(user)
-                    paths.delete_user_dir(user)
+                    remove_user(auth_manager, user)
                     console.print(f"[dim]Removed: {user}[/dim]")
                 console.print(f"[green]All {len(users)} users removed[/green]")
                 _offer_service_restart("Changes will apply after restart.")
@@ -534,11 +568,7 @@ def register_user_commands(app: typer.Typer) -> None:
             if not confirm:
                 raise typer.Abort()
 
-        if auth_manager.remove_user(username):
-            # Also delete user's folder if it exists
-            paths = get_paths()
-            if paths.delete_user_dir(username):
-                console.print(f"[dim]Deleted user folder: {paths.get_user_dir(username)}[/dim]")
+        if remove_user(auth_manager, username):
             console.print(f"[green]User '{username}' removed[/green]")
             _offer_service_restart("Changes will apply after restart.")
         else:
@@ -565,12 +595,7 @@ def register_user_commands(app: typer.Typer) -> None:
         """Implementation of user_list command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        master_key = load_master_key()
-
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network
-        )
+        auth_manager = open_store(cfg)
 
         users = auth_manager.list_users()
 
@@ -619,12 +644,7 @@ def register_user_commands(app: typer.Typer) -> None:
         """Implementation of user_info command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        master_key = load_master_key()
-
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network
-        )
+        auth_manager = open_store(cfg)
 
         # Interactive mode if no username provided
         if username is None:
@@ -762,12 +782,7 @@ def register_user_commands(app: typer.Typer) -> None:
 
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        master_key = load_master_key()
-
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network
-        )
+        auth_manager = open_store(cfg)
 
         # Check user exists
         if username not in auth_manager.list_users():
@@ -870,12 +885,7 @@ def register_user_commands(app: typer.Typer) -> None:
         """Implementation of user_enable command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        master_key = load_master_key()
-
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network
-        )
+        auth_manager = open_store(cfg)
 
         users = auth_manager.list_users()
         if not users:
@@ -953,12 +963,7 @@ def register_user_commands(app: typer.Typer) -> None:
         """Implementation of user_disable command."""
         cfg = Config.load(Path(config)) if Path(config).exists() else Config()
 
-        master_key = load_master_key()
-
-        auth_manager = AuthManager(
-            credentials_file=cfg.get_credentials_file(), master_key=master_key,
-            tunnel_network=cfg.wireguard.tunnel_network
-        )
+        auth_manager = open_store(cfg)
 
         users = auth_manager.list_users()
         if not users:
