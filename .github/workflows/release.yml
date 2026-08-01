@@ -165,20 +165,27 @@ jobs:
           notes="${notes//__REPOSITORY__/$GITHUB_REPOSITORY}"
           notes="${notes//__TAG__/$TAG}"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            git fetch --no-tags origin "refs/tags/$TAG"
+          # Pin the tag before calling the release API. A retry must either create it at
+          # this build or prove that the existing tag already names this build.
+          if git fetch --no-tags origin "refs/tags/$TAG" 2>/dev/null; then
             tag_sha=$(git rev-parse "FETCH_HEAD^{commit}")
             if [ "$tag_sha" != "$BUILD_SHA" ]; then
               echo "$TAG points to $tag_sha, but this run built $BUILD_SHA" >&2
               exit 1
             fi
+          else
+            git tag "$TAG" "$BUILD_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
             echo "$TAG exists, replacing its files"
             gh release upload "$TAG" release/* --clobber
           else
             gh release create "$TAG" release/* \
               --title "$TAG" \
               --notes "$notes" \
-              --target "${{ needs.record.outputs.sha }}" \
+              --verify-tag \
               ${{ inputs.draft && '--draft' || '' }} \
               ${{ inputs.prerelease && '--prerelease' || '' }}
           fi
