@@ -621,6 +621,35 @@ class TestCgroupV1FindsThisProcessNotTheRoot:
         assert budget.limit_bytes == 256 * MIB
         assert budget.source == "cgroup v1"
 
+    def test_a_hybrid_host_checks_v1_when_the_unified_line_has_no_memory_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A unified membership does not mean the memory controller belongs to v2."""
+        unified_mount = tmp_path / "cgroup2"
+        legacy_mount = tmp_path / "cgroup1"
+        (unified_mount / "unified").mkdir(parents=True)
+        (legacy_mount / "docker" / "app").mkdir(parents=True)
+        (legacy_mount / "docker" / "app" / "memory.limit_in_bytes").write_text(
+            str(256 * MIB), encoding="utf-8"
+        )
+        fake = build_fake_proc(
+            tmp_path,
+            mount_lines=[
+                CGROUP2_MOUNT.format(mount=unified_mount.as_posix()),
+                CGROUP1_MOUNT.format(mount=legacy_mount.as_posix()),
+            ],
+            cgroup_line="0::/unified\n7:memory:/docker/app",
+            limit_files={},
+            mem_total_kb=64 * 1024 * 1024,
+            mem_available_kb=60 * 1024 * 1024,
+        )
+        monkeypatch.setattr(memory_budget, "PROC_DIR", str(fake.proc_dir))
+
+        budget = memory_budget._linux_budget()
+
+        assert budget.limit_bytes == 256 * MIB
+        assert budget.source == "cgroup v1"
+
     def test_v1_usage_already_held_is_read_from_usage_in_bytes(self, tmp_path, monkeypatch):
         """v1 names the file differently, and the figure is used the same way.
 
@@ -879,8 +908,8 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
     """`ulimit -v` caps the process, and nothing in /proc or the cgroup tree says so."""
 
     def test_an_address_space_limit_is_taken_over_the_size_of_the_host(
-        self, tmp_path, monkeypatch
-    ):
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """64 GiB of host, no cgroup, and RLIMIT_AS at 256 MiB.
 
         Without this the reader calls tens of gigabytes a measured budget and allows
@@ -894,6 +923,10 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
             mem_total_kb=64 * 1024 * 1024,
             mem_available_kb=60 * 1024 * 1024,
         )
+        (fake.proc_dir / "self" / "status").write_text(
+            "VmSize:\t131072 kB\n", encoding="utf-8"
+        )
+
         def capped_at_256_mib() -> int:
             return 256 * MIB
 
@@ -907,7 +940,52 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
         assert "ulimit -v" in budget.detail
         assert compute_hash_permits(budget, relay_reserve_bytes=0, cpu_count=64).permits == 1
 
-    def test_the_looser_of_the_two_is_left_where_it_is(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "status_text",
+        [
+            "MemFree:\t0 kB\n",
+            "VmSize:\tnot a number kB\n",
+            "VmSize:\t131072\n",
+            "VmSize:\t0 kB\n",
+        ],
+        ids=["absent", "not-a-number", "no-unit", "zero"],
+    )
+    def test_a_virtual_size_it_cannot_read_falls_back_rather_than_assuming_none(
+        self, status_text: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RLIMIT_AS is set and /proc/self/status will not say how much is already spent.
+
+        Sizing permits under RLIMIT_AS needs that reading, so a value it cannot read has
+        to land on the fallback. Reading it as "nothing is charged yet" would let 64 GiB
+        of host decide the permit count, which is the out-of-memory crash this module
+        exists to prevent.
+        """
+        fake = build_fake_proc(
+            tmp_path,
+            mount_lines=[],
+            cgroup_line="",
+            limit_files={},
+            mem_total_kb=64 * 1024 * 1024,
+            mem_available_kb=60 * 1024 * 1024,
+        )
+        (fake.proc_dir / "self" / "status").write_text(status_text, encoding="utf-8")
+
+        def capped_at_256_mib() -> int:
+            return 256 * MIB
+
+        monkeypatch.setattr(memory_budget, "PROC_DIR", str(fake.proc_dir))
+        monkeypatch.setattr(memory_budget, "_address_space_limit", capped_at_256_mib)
+
+        budget = memory_budget._linux_budget()
+
+        assert budget.measured is False
+        assert budget.limit_bytes == memory_budget.FALLBACK_BUDGET
+        assert budget.usable_bytes == memory_budget.FALLBACK_BUDGET
+        assert compute_hash_permits(budget, relay_reserve_bytes=0, cpu_count=64).permits == 1
+
+    def test_the_looser_of_the_two_is_left_where_it_is(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An 8 GiB RLIMIT_AS over a 384 MiB cgroup changes nothing and says nothing."""
         fake = build_fake_proc(
             tmp_path,
@@ -920,6 +998,10 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
             mem_total_kb=8 * 1024 * 1024,
             mem_available_kb=7 * 1024 * 1024,
         )
+        (fake.proc_dir / "self" / "status").write_text(
+            "VmSize:\t131072 kB\n", encoding="utf-8"
+        )
+
         def capped_at_8_gib() -> int:
             return 8 * GIB
 
@@ -930,6 +1012,79 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
 
         assert budget.limit_bytes == 384 * MIB
         assert "ulimit -v" not in budget.detail
+
+    def test_each_limit_is_compared_with_the_usage_it_covers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Other processes in a cgroup do not consume this process's address space."""
+        fake = build_fake_proc(
+            tmp_path,
+            mount_lines=[CGROUP2_MOUNT],
+            cgroup_line="0::/system.slice/shadow9.service",
+            limit_files={
+                "system.slice/shadow9.service": {
+                    "memory.max": str(GIB),
+                    "memory.current": str(600 * MIB),
+                }
+            },
+            mem_total_kb=64 * 1024 * 1024,
+            mem_available_kb=60 * 1024 * 1024,
+        )
+        (fake.proc_dir / "self" / "status").write_text(
+            "VmSize:\t327680 kB\n", encoding="utf-8"
+        )
+
+        def capped_at_512_mib() -> int:
+            return 512 * MIB
+
+        monkeypatch.setattr(memory_budget, "PROC_DIR", str(fake.proc_dir))
+        monkeypatch.setattr(memory_budget, "_address_space_limit", capped_at_512_mib)
+
+        budget = memory_budget._linux_budget()
+        chosen = compute_hash_permits(budget, relay_reserve_bytes=0, cpu_count=32)
+        share = budget.shared_between(2)
+        shared = compute_hash_permits(share, relay_reserve_bytes=0, cpu_count=32)
+
+        assert budget.limit_bytes == 512 * MIB
+        assert budget.current_bytes == 320 * MIB
+        assert chosen.permits == 1
+        assert share.limit_bytes == 512 * MIB
+        assert share.current_bytes == 320 * MIB
+        assert shared.permits == 1
+
+    def test_the_cgroup_limit_still_binds_when_its_usage_leaves_less_room(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tighter per-process number does not replace the shared cgroup constraint."""
+        fake = build_fake_proc(
+            tmp_path,
+            mount_lines=[CGROUP2_MOUNT],
+            cgroup_line="0::/system.slice/shadow9.service",
+            limit_files={
+                "system.slice/shadow9.service": {
+                    "memory.max": str(GIB),
+                    "memory.current": str(760 * MIB),
+                }
+            },
+            mem_total_kb=64 * 1024 * 1024,
+            mem_available_kb=60 * 1024 * 1024,
+        )
+        (fake.proc_dir / "self" / "status").write_text(
+            "VmSize:\t163840 kB\n", encoding="utf-8"
+        )
+
+        def capped_at_512_mib() -> int:
+            return 512 * MIB
+
+        monkeypatch.setattr(memory_budget, "PROC_DIR", str(fake.proc_dir))
+        monkeypatch.setattr(memory_budget, "_address_space_limit", capped_at_512_mib)
+
+        budget = memory_budget._linux_budget()
+        chosen = compute_hash_permits(budget, relay_reserve_bytes=0, cpu_count=32)
+
+        assert budget.source == "cgroup v2"
+        assert budget.current_bytes == 760 * MIB
+        assert chosen.permits == 1
 
     def test_no_such_limit_leaves_the_budget_alone(self):
         """The ordinary host has RLIM_INFINITY here and must keep its own figures."""

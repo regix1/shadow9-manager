@@ -35,6 +35,17 @@ FALLBACK_BUDGET = 256 * MIB
 
 
 @dataclass(frozen=True)
+class MemoryLimit:
+    """One ceiling paired with the memory already charged beneath it."""
+
+    limit_bytes: int
+    current_bytes: int
+    source: str
+    detail: str
+    shared: bool
+
+
+@dataclass(frozen=True)
 class MemoryBudget:
     """How much memory is available, and where that figure came from."""
 
@@ -42,35 +53,75 @@ class MemoryBudget:
     available_bytes: int
     source: str
     detail: str
-    # What the cgroup holding the ceiling already uses. memory.max applies to every
-    # process in the unit, so a Tor bridge sharing it has already spent part of the
-    # budget. Zero where nothing reports it.
+    # What is already charged beneath the limit named by source. A cgroup reading covers
+    # every process in the unit, while an RLIMIT_AS reading covers this process alone.
+    # Zero where nothing reports it.
     current_bytes: int = 0
     # False when the figures are an assumption rather than a reading. "No ceiling is
     # set" and "the ceiling could not be read" look the same from outside and mean
     # opposite things, and reading the second as the first is how a process inside a
     # 256 MiB cgroup decides it may run sixteen password hashes.
     measured: bool = True
+    # Set when cgroup memory and RLIMIT_AS both apply. They need separate usage figures:
+    # the cgroup's total under its limit and this process's virtual size under RLIMIT_AS.
+    limits: tuple[MemoryLimit, ...] = ()
 
     @property
     def usable_bytes(self) -> int:
-        """The smaller of the two.
+        """The smallest limit or free-memory reading.
 
-        A cgroup ceiling does not conjure free RAM, and free RAM does not let a process
-        exceed its ceiling, so only the minimum is safe in both directions.
+        A cgroup ceiling does not conjure free RAM, and neither free RAM nor a cgroup
+        allowance lets a process exceed RLIMIT_AS. Only the minimum is safe under all
+        of them.
         """
-        return min(self.limit_bytes, self.available_bytes)
+        limit = min(
+            (item.limit_bytes for item in self.limits), default=self.limit_bytes
+        )
+        return min(limit, self.available_bytes)
 
     def shared_between(self, processes: int) -> "MemoryBudget":
-        """This budget divided among processes that all draw on it.
+        """Divide shared limits among processes that all draw on them.
 
         A cgroup ceiling is charged to the unit rather than to a process, so workers
         under one MemoryMax hold shares of it and not copies. Each sizing itself against
         the whole thing is how four of them come to plan sixteen concurrent hashes
-        inside a budget that allowed for four.
+        inside a budget that allowed for four. RLIMIT_AS is already per process and stays
+        unchanged.
         """
         if processes <= 1:
             return self
+        if self.limits:
+            available = self.available_bytes // processes
+            limits = tuple(
+                MemoryLimit(
+                    limit_bytes=(
+                        item.limit_bytes // processes if item.shared else item.limit_bytes
+                    ),
+                    current_bytes=(
+                        item.current_bytes // processes
+                        if item.shared
+                        else item.current_bytes
+                    ),
+                    source=item.source,
+                    detail=(
+                        f"{item.detail}, one share of {processes}"
+                        if item.shared
+                        else item.detail
+                    ),
+                    shared=item.shared,
+                )
+                for item in self.limits
+            )
+            binding = _binding_limit(limits, available)
+            return MemoryBudget(
+                limit_bytes=binding.limit_bytes,
+                available_bytes=available,
+                source=binding.source,
+                detail=binding.detail,
+                current_bytes=binding.current_bytes,
+                measured=self.measured,
+                limits=limits,
+            )
         return MemoryBudget(
             limit_bytes=self.limit_bytes // processes,
             available_bytes=self.available_bytes // processes,
@@ -437,25 +488,56 @@ def _address_space_limit() -> Optional[int]:
     return soft
 
 
-def _narrowed_to_address_space(budget: MemoryBudget) -> MemoryBudget:
-    """The same budget cut to RLIMIT_AS, where that is the tighter of the two.
+def _process_virtual_bytes() -> int:
+    """This process's current virtual size from /proc/self/status."""
+    with open(os.path.join(PROC_DIR, "self", "status"), encoding="utf-8") as handle:
+        for line in handle:
+            key, _, rest = line.partition(":")
+            if key != "VmSize":
+                continue
+            parts = rest.split()
+            if len(parts) != 2 or parts[1].lower() != "kb":
+                raise ValueError(f"unexpected VmSize value: {rest.strip()!r}")
+            size = int(parts[0]) * 1024
+            if size <= 0:
+                raise ValueError(f"unexpected VmSize value: {rest.strip()!r}")
+            return size
+    raise ValueError("/proc/self/status has no VmSize")
 
-    Left alone when there is no such limit or it is the looser one, so the ordinary host
-    keeps the figure and the reason it already had.
+
+def _narrowed_to_address_space(budget: MemoryBudget) -> MemoryBudget:
+    """Add RLIMIT_AS as a separate per-process memory limit.
+
+    Cgroup usage belongs with the cgroup ceiling. RLIMIT_AS instead covers this process's
+    virtual size, so the two remaining amounts are compared without moving either usage
+    figure under the other limit.
     """
     address_space = _address_space_limit()
-    if address_space is None or address_space >= budget.limit_bytes:
+    if address_space is None:
         return budget
-    return MemoryBudget(
-        limit_bytes=address_space,
-        available_bytes=min(budget.available_bytes, address_space),
-        source=f"RLIMIT_AS under {budget.source}",
-        detail=(
-            f"ulimit -v caps this process at {address_space // MIB} MiB, below "
-            f"{budget.limit_bytes // MIB} MiB from {budget.detail}"
+    virtual = _process_virtual_bytes()
+    limits = (
+        *_budget_limits(budget),
+        MemoryLimit(
+            limit_bytes=address_space,
+            current_bytes=virtual,
+            source=f"RLIMIT_AS under {budget.source}",
+            detail=(
+                f"ulimit -v caps this process at {address_space // MIB} MiB, alongside "
+                f"{budget.limit_bytes // MIB} MiB from {budget.detail}"
+            ),
+            shared=False,
         ),
-        current_bytes=budget.current_bytes,
+    )
+    binding = _binding_limit(limits, budget.available_bytes)
+    return MemoryBudget(
+        limit_bytes=binding.limit_bytes,
+        available_bytes=budget.available_bytes,
+        source=binding.source,
+        detail=binding.detail,
+        current_bytes=binding.current_bytes,
         measured=budget.measured,
+        limits=limits,
     )
 
 
@@ -488,18 +570,24 @@ def _linux_budget() -> MemoryBudget:
         if unified is None or legacy is None:
             return _unmeasured_budget("/proc/self/mountinfo could not be read")
 
-        # Which hierarchy is mounted decides the label, not which lookup happened to
-        # return a number: a v2 host with no ceiling set is still a v2 host.
         found: Optional[CgroupLimit] = None
-        flavour = "no cgroups"
+        flavour = (
+            "cgroup v2" if unified else "cgroup v1" if legacy else "no cgroups"
+        )
         if unified:
-            flavour = "cgroup v2"
-            found = _cgroup2_limit(unified)
-        if found is None and legacy:
-            # A hybrid host mounts both, and a process can be placed in the v1 memory
-            # controller with no line in the unified hierarchy at all.
-            flavour = "cgroup v1"
-            found = _cgroup1_limit(legacy)
+            unified_limit = _cgroup2_limit(unified)
+            if unified_limit is not None:
+                found = unified_limit
+        if legacy:
+            # A hybrid host can list this process in both hierarchies while the memory
+            # controller belongs only to v1. A completed v2 walk with no memory files is
+            # not proof that the v1 hierarchy has no ceiling.
+            legacy_limit = _cgroup1_limit(legacy)
+            if legacy_limit is not None and (
+                found is None or legacy_limit.limit_bytes < found.limit_bytes
+            ):
+                flavour = "cgroup v1"
+                found = legacy_limit
         if found is None and (unified or legacy):
             return _unmeasured_budget(
                 f"{flavour} is mounted and this process's own cgroup is not in "
@@ -669,6 +757,41 @@ MIN_PERMITS = 1
 MAX_PERMITS = 16
 
 
+def _budget_limits(budget: MemoryBudget) -> tuple[MemoryLimit, ...]:
+    """The independently enforced limits carried by one budget."""
+    if budget.limits:
+        return budget.limits
+    return (
+        MemoryLimit(
+            limit_bytes=budget.limit_bytes,
+            current_bytes=budget.current_bytes,
+            source=budget.source,
+            detail=budget.detail,
+            shared=True,
+        ),
+    )
+
+
+def _limit_room(limit: MemoryLimit, available_bytes: int) -> int:
+    """Memory left for hashing beneath one limit before relay buffers are counted."""
+    spendable = int(min(limit.limit_bytes, available_bytes) * HEADROOM_FRACTION)
+    return spendable - max(INTERPRETER_RESERVE, limit.current_bytes)
+
+
+def _binding_limit(
+    limits: tuple[MemoryLimit, ...], available_bytes: int
+) -> MemoryLimit:
+    """The limit that leaves the least room for password hashing."""
+    binding = limits[0]
+    room = _limit_room(binding, available_bytes)
+    for item in limits[1:]:
+        item_room = _limit_room(item, available_bytes)
+        if item_room < room:
+            binding = item
+            room = item_room
+    return binding
+
+
 def argon2_bytes_per_hash() -> int:
     """Memory one concurrent argon2 verification reserves.
 
@@ -685,21 +808,30 @@ def argon2_bytes_per_hash() -> int:
 def _baseline_bytes(budget: MemoryBudget) -> int:
     """Memory that is spoken for before any hashing, and cannot be planned twice.
 
-    A cgroup ceiling covers every process in the unit, not this interpreter alone. The
-    systemd unit starts Tor bridge processes into the same cgroup, and several hundred
-    megabytes of Tor is several hundred megabytes this process may not have. What the
-    cgroup already holds includes this interpreter, so it replaces the fixed estimate
-    rather than adding to it.
+    A cgroup ceiling covers every process in the unit, while RLIMIT_AS covers this
+    process's virtual size. The binding limit supplies its own reading. Either one
+    includes this interpreter, so it replaces the fixed estimate rather than adding to
+    it.
 
     It is a reading taken once, at startup. A bridge started later is not in it, which
     is why the count is re-read rather than trusted for the life of the process.
     """
-    return max(INTERPRETER_RESERVE, budget.current_bytes)
+    binding = _binding_limit(_budget_limits(budget), budget.available_bytes)
+    return max(INTERPRETER_RESERVE, binding.current_bytes)
+
+
+def _planned_for_limit(
+    limit: MemoryLimit, relay_reserve_bytes: int, permits: int
+) -> int:
+    """Peak memory charged beneath one limit."""
+    baseline = max(INTERPRETER_RESERVE, limit.current_bytes)
+    return baseline + relay_reserve_bytes + permits * argon2_bytes_per_hash()
 
 
 def _planned_bytes(budget: MemoryBudget, relay_reserve_bytes: int, permits: int) -> int:
     """Everything this process plans to hold at peak, hashing included."""
-    return _baseline_bytes(budget) + relay_reserve_bytes + permits * argon2_bytes_per_hash()
+    binding = _binding_limit(_budget_limits(budget), budget.available_bytes)
+    return _planned_for_limit(binding, relay_reserve_bytes, permits)
 
 
 def _over_ceiling(budget: MemoryBudget, relay_reserve_bytes: int, permits: int) -> bool:
@@ -713,7 +845,11 @@ def _over_ceiling(budget: MemoryBudget, relay_reserve_bytes: int, permits: int) 
     refuse: a machine whose page cache is full this second reports very little free and
     will report plenty a moment later. _over_limit is the question worth refusing over.
     """
-    return _planned_bytes(budget, relay_reserve_bytes, permits) > budget.usable_bytes
+    return any(
+        _planned_for_limit(item, relay_reserve_bytes, permits)
+        > min(item.limit_bytes, budget.available_bytes)
+        for item in _budget_limits(budget)
+    )
 
 
 def _over_limit(budget: MemoryBudget, relay_reserve_bytes: int, permits: int) -> bool:
@@ -726,7 +862,10 @@ def _over_limit(budget: MemoryBudget, relay_reserve_bytes: int, permits: int) ->
     allocation can have and a process refused on that number would be refused every time
     the machine happened to be busy.
     """
-    return _planned_bytes(budget, relay_reserve_bytes, permits) > budget.limit_bytes
+    return any(
+        _planned_for_limit(item, relay_reserve_bytes, permits) > item.limit_bytes
+        for item in _budget_limits(budget)
+    )
 
 
 def _shortfall(budget: MemoryBudget, relay_reserve_bytes: int, permits: int) -> str:
@@ -802,20 +941,26 @@ def compute_hash_permits(
             it for one hash, so there is no permit count this process could start with
     """
     per_hash = argon2_bytes_per_hash()
-    spendable = int(budget.usable_bytes * HEADROOM_FRACTION)
-    baseline = _baseline_bytes(budget)
+    limits = _budget_limits(budget)
+    binding = _binding_limit(limits, budget.available_bytes)
+    spendable = int(
+        min(binding.limit_bytes, budget.available_bytes) * HEADROOM_FRACTION
+    )
+    baseline = max(INTERPRETER_RESERVE, binding.current_bytes)
     for_hashing = spendable - baseline - relay_reserve_bytes
 
     if for_hashing < per_hash:
         if budget.measured and _over_limit(budget, relay_reserve_bytes, MIN_PERMITS):
-            planned = _planned_bytes(budget, relay_reserve_bytes, MIN_PERMITS)
+            fixed = _binding_limit(limits, _NO_LIMIT)
+            fixed_baseline = max(INTERPRETER_RESERVE, fixed.current_bytes)
+            planned = _planned_for_limit(fixed, relay_reserve_bytes, MIN_PERMITS)
             raise MemoryCeilingTooLow(
                 f"There is not enough memory here to verify one password. "
-                f"{planned // MIB} MiB is needed: {baseline // MIB} MiB for the "
+                f"{planned // MIB} MiB is needed: {fixed_baseline // MIB} MiB for the "
                 f"interpreter and the running daemon, {relay_reserve_bytes // MIB} MiB "
                 f"of relay buffers, and {per_hash // MIB} MiB for a single argon2 hash. "
-                f"The limit is {budget.limit_bytes // MIB} MiB, read from "
-                f"{budget.source} ({budget.detail}). Raise that limit above "
+                f"The limit is {fixed.limit_bytes // MIB} MiB, read from "
+                f"{fixed.source} ({fixed.detail}). Raise that limit above "
                 f"{planned // MIB} MiB, or lower server.max_connections, or lower "
                 f"argon2's memory cost, or set auth.max_concurrent_auth to start with a "
                 f"number you have chosen and accept the risk."
