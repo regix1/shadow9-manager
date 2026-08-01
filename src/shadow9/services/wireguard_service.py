@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, fields, replace
@@ -30,6 +31,7 @@ from operator import attrgetter
 from pathlib import Path
 from typing import Optional
 
+from .. import __version__
 from ..auth import AuthManager, Credential
 from ..config import Config
 from ..paths import get_config_dir, lock_file, write_file_safely
@@ -105,19 +107,35 @@ NODE_CHECKSUM_FILE = "SHA256SUMS"
 
 # CI collects the OpenWrt builds under node/packages, beside node/dist. The route keeps
 # accepting Go architecture names so it can use the same allowlist as the raw binaries.
+# The version becomes part of these filenames, so a value outside the release character
+# set never reaches one. A copy that cannot report its version still runs every other
+# command: it names packages nothing on disk matches, so the hub reports an incomplete set
+# and sends the caller to the releases page, which is the path an install without CI
+# packages already takes.
+_NAMEABLE_VERSION = (
+    __version__
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?", __version__)
+    else ""
+)
+_PACKAGE_VERSION = _NAMEABLE_VERSION or "0.0.0"
+
 NODE_PACKAGE_FILES: dict[str, dict[str, str]] = {
     "ipk": {
-        "amd64": "shadow9-node_0.1.0-r1_x86_64.ipk",
-        "arm64": "shadow9-node_0.1.0-r1_aarch64_generic.ipk",
-        "mipsle": "shadow9-node_0.1.0-r1_mipsel_24kc.ipk",
+        "amd64": f"shadow9-node_{_PACKAGE_VERSION}-r1_x86_64.ipk",
+        "arm64": f"shadow9-node_{_PACKAGE_VERSION}-r1_aarch64_generic.ipk",
+        "mipsle": f"shadow9-node_{_PACKAGE_VERSION}-r1_mipsel_24kc.ipk",
     },
     "apk": {
-        "amd64": "shadow9-node-0.1.0-r1_x86-64.apk",
-        "arm64": "shadow9-node-0.1.0-r1_armsr-armv8.apk",
-        "mipsle": "shadow9-node-0.1.0-r1_ramips-mt7621.apk",
+        "amd64": f"shadow9-node-{_PACKAGE_VERSION}-r1_x86-64.apk",
+        "arm64": f"shadow9-node-{_PACKAGE_VERSION}-r1_armsr-armv8.apk",
+        "mipsle": f"shadow9-node-{_PACKAGE_VERSION}-r1_ramips-mt7621.apk",
     },
 }
-NODE_RELEASE_URL = "https://github.com/regix1/shadow9-manager/releases/tag/v0.1.0"
+NODE_RELEASE_URL = (
+    f"https://github.com/regix1/shadow9-manager/releases/tag/v{_NAMEABLE_VERSION}"
+    if _NAMEABLE_VERSION
+    else "https://github.com/regix1/shadow9-manager/releases"
+)
 
 # Said wherever the node binary is offered. The download has no server authentication of
 # its own, exactly as enrollment does not, and the answer is the same one: a value the
@@ -1320,13 +1338,6 @@ def enroll_peer(
     """
     require_peer_fields()
 
-    hub_private_key = load_hub_private_key()
-    if hub_private_key is None:
-        raise ValueError(
-            "This host has no WireGuard hub. Run 'shadow9 wg init' before a node can join."
-        )
-    hub_key = derive_public_key(hub_private_key)
-
     if not is_valid_key(public_key):
         raise ValueError("The public key sent is not a WireGuard public key")
 
@@ -1334,6 +1345,13 @@ def enroll_peer(
     parsed_routes = tuple(parse_network(route) for route in routes)
 
     with lock_file(hub_key_path()):
+        hub_private_key = load_hub_private_key()
+        if hub_private_key is None:
+            raise ValueError(
+                "This host has no WireGuard hub. Run 'shadow9 wg init' before a node can join."
+            )
+        hub_key = derive_public_key(hub_private_key)
+
         auth_manager.reload_credentials()
         checked_token = check_join_request(
             token_id,
@@ -1429,13 +1447,13 @@ def refresh_peer(
     mac: str,
 ) -> Refresh:
     """Authenticate a node and return the complete settings it should now apply."""
-    hub_private_key = load_hub_private_key()
-    if hub_private_key is None:
-        raise ValueError(
-            "This host has no WireGuard hub. Run 'shadow9 wg init' before a node can refresh."
-        )
-
     with lock_file(hub_key_path()):
+        hub_private_key = load_hub_private_key()
+        if hub_private_key is None:
+            raise ValueError(
+                "This host has no WireGuard hub. Run 'shadow9 wg init' before a node can refresh."
+            )
+
         auth_manager.reload_credentials()
         credential = auth_manager.get_credential(name)
         peer = peer_from_credential(credential) if credential is not None else None
@@ -1528,15 +1546,19 @@ def checked_peer_name(name: str) -> str:
     return cleaned
 
 
-def checked_endpoint(endpoint: str) -> str:
+_DEFAULT_ENDPOINT_PORT = 51820
+
+
+def checked_endpoint(endpoint: str, default_port: int = _DEFAULT_ENDPOINT_PORT) -> str:
     """
     Check an endpoint is a host and a port peers can dial.
 
     Args:
         endpoint: The `host:port` peers should use, or a bare host
+        default_port: The port to add when the endpoint does not name one
 
     Returns:
-        The endpoint, with the default port added when none was given
+        The endpoint, with `default_port` added when none was given
 
     Raises:
         ValueError: If there is no host, or the port is not a port
@@ -1545,13 +1567,16 @@ def checked_endpoint(endpoint: str) -> str:
     if not cleaned:
         raise ValueError("An endpoint needs an address peers can reach")
 
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        return f"{cleaned}:{default_port}"
+
     host, separator, port = cleaned.rpartition(":")
     if not separator:
-        return f"{cleaned}:{_DEFAULT_ENDPOINT_PORT}"
+        return f"{cleaned}:{default_port}"
 
     # An IPv6 literal is full of colons, so only a bracketed one carries a port
     if ":" in host and not host.endswith("]"):
-        return f"[{cleaned}]:{_DEFAULT_ENDPOINT_PORT}"
+        return f"[{cleaned}]:{default_port}"
 
     if not host:
         raise ValueError(f"Endpoint '{cleaned}' has a port but no address in front of it")
@@ -1565,9 +1590,6 @@ def checked_endpoint(endpoint: str) -> str:
         raise ValueError(f"Endpoint '{cleaned}' names port {number}, which is not a port")
 
     return cleaned
-
-
-_DEFAULT_ENDPOINT_PORT = 51820
 
 
 def _claim_for(topology: Topology, name: str) -> AddressClaim:

@@ -737,7 +737,6 @@ def device_add(
 def _device_add_impl(name: str, full_tunnel: bool, obfuscate: bool, config: str) -> None:
     """Implementation of device add."""
     cfg = _load_config(config)
-    hub_private_key = _require_hub_private_key()
 
     try:
         peer_name = checked_peer_name(name)
@@ -746,6 +745,7 @@ def _device_add_impl(name: str, full_tunnel: bool, obfuscate: bool, config: str)
         raise typer.Exit(1) from error
 
     with lock_file(hub_key_path()):
+        hub_private_key = _require_hub_private_key()
         auth_manager = _auth_manager(cfg)
         auth_manager.reload_credentials()
         topology = _topology(cfg, auth_manager, derive_public_key(hub_private_key))
@@ -1114,7 +1114,9 @@ def _with_hub_settings(
         ValueError: If any value is not one the hub can use
     """
     if endpoint is not None:
-        cfg.wireguard.hub_endpoint = checked_endpoint(endpoint)
+        cfg.wireguard.hub_endpoint = checked_endpoint(
+            endpoint, port if port is not None else cfg.wireguard.listen_port
+        )
     if network is not None:
         parse_network(network)
         cfg.wireguard.tunnel_network = network

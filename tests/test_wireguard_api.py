@@ -16,9 +16,13 @@ Nothing reaches the network. The TestClient calls the app in-process, and the hu
 its token file and its configs all live under `tmp_path`.
 """
 
+import asyncio
 import hashlib
 import json
+import os
 import secrets
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta
@@ -28,12 +32,19 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from shadow9 import paths
-from shadow9.api.app import create_enrollment_app
-from shadow9.api.deps import get_auth_manager, get_config
+from shadow9 import __version__, paths
+from shadow9.api.app import create_app, create_enrollment_app
+from shadow9.api.deps import (
+    get_auth_manager,
+    get_config,
+    get_current_admin,
+    get_user_service,
+)
 from shadow9.auth import AuthManager
 from shadow9.config import Config
+from shadow9.repositories.user_repository import UserRepository
 from shadow9.services import wireguard_service
+from shadow9.services.user_service import UserService
 from shadow9.services.wireguard_service import (
     NODE_ARCHITECTURES,
     JoinToken,
@@ -175,6 +186,78 @@ class _Hub:
     def hub_config_text(self) -> str:
         """The hub's own rendered config."""
         return (self.root / "config" / "wireguard" / "wg0.conf").read_text(encoding="utf-8")
+
+
+def test_creating_a_user_keeps_every_wireguard_field(hub: "_Hub") -> None:
+    repository = UserRepository(
+        credentials_file=hub.root / "config" / "api-users.enc",
+        master_key="wireguard-api-test-master-key",
+        salt_file=hub.root / "config" / "api-users.salt",
+        max_concurrent_hashes=1,
+    )
+    service = UserService(repository=repository, config=hub.config)
+    app = create_app(enable_cors=False)
+
+    def service_override() -> UserService:
+        return service
+
+    def admin_override() -> str:
+        return "test-admin"
+
+    app.dependency_overrides[get_user_service] = service_override
+    app.dependency_overrides[get_current_admin] = admin_override
+
+    peer = generate_keypair()
+    expires_at = "2031-01-02T03:04:05Z"
+    request = {
+        "username": "wireguard-user",
+        "password": "StrongPassword1!",
+        "wg_public_key": peer.public_key,
+        "wg_address": "10.9.0.25",
+        "wg_routes": ["192.168.50.0/24"],
+        "wg_role": "node",
+        "wg_endpoint": "node.example:53000",
+        "wg_keepalive": 25,
+        "wg_expires_at": expires_at,
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/users", json=request)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert set(body) == {
+        "username",
+        "use_tor",
+        "bridge_type",
+        "security_level",
+        "allowed_ports",
+        "rate_limit",
+        "bind_port",
+        "logging_enabled",
+        "enabled",
+        "created_at",
+        "last_used",
+        "wg_public_key",
+        "wg_address",
+        "wg_routes",
+        "wg_role",
+        "wg_endpoint",
+        "wg_keepalive",
+        "wg_expires_at",
+    }
+    assert "password_hash" not in body
+
+    stored = asyncio.run(repository.get("wireguard-user"))
+    assert stored is not None
+    assert stored.wg_public_key == peer.public_key
+    assert stored.wg_address == "10.9.0.25"
+    assert stored.wg_routes == ["192.168.50.0/24"]
+    assert stored.wg_role is PeerRole.NODE
+    assert stored.wg_endpoint == "node.example:53000"
+    assert stored.wg_keepalive == 25
+    assert stored.wg_expires_at is not None
+    assert stored.wg_expires_at.isoformat().startswith("2031-01-02T03:04:05")
 
 
 class TestTheAnswer:
@@ -773,6 +856,98 @@ class TestServingTheNodeBinary:
 
 class TestServingTheNodePackages:
     """OpenWrt packages use the binary route's allowlist and confinement checks."""
+
+    def test_package_names_and_release_url_follow_reported_version(self) -> None:
+        assert __version__ != "0.1.0"
+        expected = {
+            "ipk": {
+                "amd64": f"shadow9-node_{__version__}-r1_x86_64.ipk",
+                "arm64": f"shadow9-node_{__version__}-r1_aarch64_generic.ipk",
+                "mipsle": f"shadow9-node_{__version__}-r1_mipsel_24kc.ipk",
+            },
+            "apk": {
+                "amd64": f"shadow9-node-{__version__}-r1_x86-64.apk",
+                "arm64": f"shadow9-node-{__version__}-r1_armsr-armv8.apk",
+                "mipsle": f"shadow9-node-{__version__}-r1_ramips-mt7621.apk",
+            },
+        }
+        assert expected == wireguard_service.NODE_PACKAGE_FILES
+        expected_url = f"https://github.com/regix1/shadow9-manager/releases/tag/v{__version__}"
+        assert expected_url == wireguard_service.NODE_RELEASE_URL
+
+    def test_a_reported_version_cannot_become_a_package_path(self) -> None:
+        test_root = Path(os.environ["SHADOW9_HOME"])
+        source_root = Path(paths.__file__).resolve().parents[1]
+        environment = os.environ.copy()
+        environment["SHADOW9_HOME"] = str(test_root)
+        environment["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(source_root), environment.get("PYTHONPATH")) if part
+        )
+        program = """
+import shadow9
+
+shadow9.__version__ = "1.2.3/../../outside"
+from shadow9.services import wireguard_service
+
+for packages in wireguard_service.NODE_PACKAGE_FILES.values():
+    for name in packages.values():
+        if "outside" in name or "/" in name or "\\\\" in name:
+            raise SystemExit(f"A version containing a path reached {name}")
+if "outside" in wireguard_service.NODE_RELEASE_URL:
+    raise SystemExit("A version containing a path reached the release URL")
+raise SystemExit(0)
+"""
+
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=test_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+
+    def test_a_version_it_cannot_read_still_leaves_every_command_usable(self) -> None:
+        """
+        A copy with no installed metadata and no VERSION file reports "unknown". That has
+        to cost the node packages and nothing else, because this module is imported on the
+        way to every command, so refusing to load it would take the whole CLI down.
+        """
+        test_root = Path(os.environ["SHADOW9_HOME"])
+        source_root = Path(paths.__file__).resolve().parents[1]
+        environment = os.environ.copy()
+        environment["SHADOW9_HOME"] = str(test_root)
+        environment["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(source_root), environment.get("PYTHONPATH")) if part
+        )
+        program = """
+import shadow9
+
+shadow9.__version__ = "unknown"
+import shadow9.cli
+from shadow9.services import wireguard_service
+
+for packages in wireguard_service.NODE_PACKAGE_FILES.values():
+    for name in packages.values():
+        if "unknown" in name:
+            raise SystemExit(f"A version it could not read reached {name}")
+if wireguard_service.NODE_RELEASE_URL.endswith("vunknown"):
+    raise SystemExit("A version it could not read reached the release URL")
+raise SystemExit(0)
+"""
+
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=test_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
 
     @staticmethod
     def _build_packages(hub: "_Hub", *entries: tuple[str, str]) -> dict[tuple[str, str], bytes]:

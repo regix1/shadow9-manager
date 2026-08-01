@@ -10,8 +10,10 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import types
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
@@ -181,6 +183,48 @@ class TestInit:
         assert "UDP 51820" in _flat(output)
         assert "Keep TCP 8080, the admin API port, closed to the internet" in _flat(output)
         assert "requires iptables" in _flat(output)
+
+    def test_a_bare_endpoint_uses_the_selected_listen_port(
+        self, runner: CliRunner, cli_app: Typer, hub_root: Path
+    ) -> None:
+        result = runner.invoke(
+            cli_app,
+            [
+                "wg",
+                "init",
+                "--endpoint",
+                "vpn.example",
+                "--port",
+                "53000",
+                "--config",
+                _config_file(hub_root),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        result = runner.invoke(
+            cli_app, ["wg", "device", "add", "phone", "--config", _config_file(hub_root)]
+        )
+
+        assert result.exit_code == 0, result.output
+        peer_config = (_wireguard_dir(hub_root) / "phone.conf").read_text(encoding="utf-8")
+        assert "Endpoint = vpn.example:53000" in peer_config
+
+    def test_a_bracketed_ipv6_endpoint_without_a_port_keeps_one_pair_of_brackets(
+        self,
+    ) -> None:
+        assert (
+            wireguard_service.checked_endpoint("[2001:db8::1]")
+            == "[2001:db8::1]:51820"
+        )
+        assert (
+            wireguard_service.checked_endpoint("vpn.example:53000", 53001)
+            == "vpn.example:53000"
+        )
+        assert (
+            wireguard_service.checked_endpoint("[2001:db8::1]:53000", 53001)
+            == "[2001:db8::1]:53000"
+        )
 
     def test_noninteractive_init_names_the_missing_endpoint_flag(
         self,
@@ -1205,6 +1249,91 @@ class TestDeviceAdd:
 
         with pytest.raises(StoreOpened):
             wg_commands._device_add_impl("phone", False, False, "config.yaml")
+
+    def test_key_rotation_cannot_leave_a_device_config_with_the_old_hub_key(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _init_hub(runner, cli_app, hub_root)
+        key_path = _wireguard_dir(hub_root) / "hub.key"
+        old_key = key_path.read_text(encoding="utf-8").strip()
+
+        real_key_read = wg_commands._require_hub_private_key
+        real_lock = wg_commands.lock_file
+        key_read = threading.Event()
+        release_key = threading.Event()
+        device_holds_lock = threading.Event()
+        rotation_attempted = threading.Event()
+        rotation_holds_lock = threading.Event()
+
+        def stalled_key_read() -> str:
+            key = real_key_read()
+            key_read.set()
+            if not release_key.wait(10):
+                raise TimeoutError("The key read was never released")
+            return key
+
+        @contextmanager
+        def observed_lock(path: Path) -> Iterator[None]:
+            thread_name = threading.current_thread().name
+            rotating = thread_name.startswith("rotation")
+            if rotating:
+                rotation_attempted.set()
+            with real_lock(path):
+                if thread_name.startswith("device"):
+                    device_holds_lock.set()
+                if rotating:
+                    rotation_holds_lock.set()
+                yield
+
+        def rotate_key() -> None:
+            wg_commands._init_impl(
+                endpoint=HUB_ENDPOINT,
+                network=None,
+                port=None,
+                interface="wg0",
+                masquerade=None,
+                api_url=None,
+                token_hours=24,
+                force=True,
+                no_apply=True,
+                config=_config_file(hub_root),
+            )
+
+        monkeypatch.setattr(wg_commands, "_require_hub_private_key", stalled_key_read)
+        monkeypatch.setattr(wg_commands, "lock_file", observed_lock)
+
+        with (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="device") as device_pool,
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="rotation") as rotation_pool,
+        ):
+            device = device_pool.submit(
+                wg_commands._device_add_impl,
+                "phone",
+                False,
+                False,
+                _config_file(hub_root),
+            )
+            try:
+                assert key_read.wait(5)
+                rotation = rotation_pool.submit(rotate_key)
+                assert rotation_attempted.wait(5)
+                if not device_holds_lock.is_set():
+                    assert rotation_holds_lock.wait(5)
+                    rotation.result(timeout=10)
+            finally:
+                release_key.set()
+
+            device.result(timeout=10)
+            rotation.result(timeout=10)
+
+        new_key = key_path.read_text(encoding="utf-8").strip()
+        hub_config = (_wireguard_dir(hub_root) / "wg0.conf").read_text(encoding="utf-8")
+        assert new_key != old_key
+        assert f"PrivateKey = {new_key}" in hub_config
 
     def test_a_device_gets_a_config_and_the_output_says_the_hub_made_the_key(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path

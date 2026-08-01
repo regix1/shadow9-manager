@@ -72,15 +72,8 @@ class UserService:
 
         # Create credential model
         credential = Credential(
-            username=data.username,
+            **data.model_dump(exclude={"password"}),
             password_hash=password_hash,
-            use_tor=data.use_tor,
-            bridge_type=data.bridge_type,
-            security_level=data.security_level,
-            allowed_ports=data.allowed_ports,
-            rate_limit=data.rate_limit,
-            bind_port=data.bind_port,
-            logging_enabled=data.logging_enabled,
             enabled=True,
         )
 
