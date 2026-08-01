@@ -9,6 +9,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .. import __version__
 from .endpoints import health, server, users, wireguard
 
 
@@ -40,7 +41,7 @@ def docs_enabled() -> bool:
 
 def create_app(
     title: str = "Shadow9 Manager API",
-    version: str = "1.0.0",
+    version: str = __version__,
     description: str = "RESTful API for Shadow9 SOCKS5 proxy manager",
     enable_cors: bool = True,
 ) -> FastAPI:
@@ -98,7 +99,7 @@ def create_app(
 
 def create_enrollment_app(
     title: str = "Shadow9 Enrollment API",
-    version: str = "1.0.0",
+    version: str = __version__,
     description: str = "WireGuard enrollment and node downloads",
 ) -> FastAPI:
     """Create the public app used by WireGuard nodes."""

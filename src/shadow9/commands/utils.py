@@ -720,7 +720,20 @@ def _upstream_branch(repo_root: Path) -> str:
 
 
 def _project_version(repo_root: Path) -> str:
-    """Read the version out of pyproject.toml so the operator can see what moved."""
+    """
+    Read a checkout's version so the operator can see what moved.
+
+    VERSION is the one the Release workflow writes. pyproject.toml is still read as
+    a fallback, because this runs against the checkout as it was *before* a pull:
+    updating from a commit that predates the VERSION file has to report the number
+    that commit actually carried, not "unknown".
+    """
+    try:
+        recorded = (repo_root / "VERSION").read_text(encoding="utf-8").strip()
+        if recorded:
+            return recorded
+    except OSError:
+        pass
     try:
         text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
     except OSError:

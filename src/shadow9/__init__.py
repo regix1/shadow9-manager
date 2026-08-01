@@ -7,7 +7,30 @@ A security-focused SOCKS5 proxy implementation with:
 - Tor network connectivity for .onion access
 """
 
-__version__ = "1.0.0"
+from importlib.metadata import PackageNotFoundError, version as installed_version
+from pathlib import Path
+
+
+def _read_version() -> str:
+    """
+    The version this copy reports, from installed metadata or the VERSION file.
+
+    An installed copy carries the number in its package metadata, which the build
+    takes from VERSION. A source checkout has no metadata, so the same file is read
+    directly rather than reporting something a release never produced.
+    """
+    try:
+        return installed_version("shadow9-manager")
+    except PackageNotFoundError:
+        pass
+    try:
+        source = Path(__file__).resolve().parents[2] / "VERSION"
+        return source.read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+__version__ = _read_version()
 __author__ = "Shadow9 Team"
 
 from .socks5_server import Socks5Server

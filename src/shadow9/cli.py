@@ -44,6 +44,7 @@ _load_env()
 import typer
 from rich.console import Console
 
+from . import __version__
 from .commands import (
     register_server_commands,
     register_user_commands,
@@ -68,7 +69,7 @@ app = typer.Typer(
 
 def version_callback(value: bool):
     if value:
-        console.print("shadow9-manager version 1.0.0")
+        console.print(f"shadow9-manager version {__version__}")
         raise typer.Exit()
 
 

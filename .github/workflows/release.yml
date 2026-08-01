@@ -26,19 +26,18 @@ permissions:
   contents: read
 
 jobs:
-  # Reuses the CI workflow rather than repeating the six-target matrix, so a
-  # release is built exactly the way every push is built.
-  build:
-    uses: ./.github/workflows/node-packages.yml
-    with:
-      version: ${{ inputs.version }}
-
-  publish:
-    name: Create the release
-    needs: build
+  # The tag you type here is the only place a version is decided. This job writes
+  # it into VERSION and commits it, so `shadow9 update`, which reads a git
+  # checkout rather than a build artifact, reports the release it pulled.
+  record:
+    name: Record the version
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      bare: ${{ steps.version.outputs.bare }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
 
@@ -54,6 +53,42 @@ jobs:
           fi
           echo "tag=v$bare" >> "$GITHUB_OUTPUT"
           echo "bare=$bare" >> "$GITHUB_OUTPUT"
+
+      # A push made with GITHUB_TOKEN does not start another workflow run, so
+      # this cannot loop back into the build.
+      - name: Commit the version
+        id: commit
+        run: |
+          printf '%s\n' "${{ steps.version.outputs.bare }}" > VERSION
+          if git diff --quiet -- VERSION; then
+            echo "VERSION already reads ${{ steps.version.outputs.bare }}"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add VERSION
+            git commit -m "Release ${{ steps.version.outputs.tag }}"
+            git push
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # Reuses the CI workflow rather than repeating the six-target matrix, so a
+  # release is built exactly the way every push is built.
+  build:
+    needs: record
+    uses: ./.github/workflows/node-packages.yml
+    with:
+      version: ${{ needs.record.outputs.bare }}
+
+  publish:
+    name: Create the release
+    needs: [record, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.record.outputs.sha }}
 
       - name: Gather every built file
         uses: actions/download-artifact@v8
@@ -80,7 +115,7 @@ jobs:
       - name: Create the release and attach the files
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.record.outputs.tag }}
         run: |
           notes=$(cat <<'EOF'
           OpenWrt node client for the shadow9 WireGuard hub.
@@ -134,7 +169,7 @@ jobs:
             gh release create "$TAG" release/* \
               --title "$TAG" \
               --notes "$notes" \
-              --target "$GITHUB_SHA" \
+              --target "${{ needs.record.outputs.sha }}" \
               ${{ inputs.draft && '--draft' || '' }} \
               ${{ inputs.prerelease && '--prerelease' || '' }}
           fi

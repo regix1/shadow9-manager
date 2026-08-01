@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shadow9-manager"
-version = "1.0.0"
+# Set by the Release workflow from the tag being released, which commits the
+# change, so an installed copy reports the release it came from.
+dynamic = ["version"]
 description = "Secure SOCKS5 proxy with Tor network support"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -70,6 +72,9 @@ qr = [
 [project.scripts]
 shadow9 = "shadow9.cli:cli"
 shadow9-api = "shadow9.api.app:run_server"
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
