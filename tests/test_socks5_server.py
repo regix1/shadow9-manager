@@ -9,17 +9,26 @@ import socket
 import struct
 import threading
 import time
+from pathlib import Path
 from typing import Optional
+from unittest.mock import AsyncMock, Mock
 
+import typer
+from typer.testing import CliRunner
+
+import shadow9.socks5_server as socks5_module
+from shadow9.commands import server as server_commands
 from shadow9.socks5_server import (
     Socks5Server,
     Socks5AuthMethod,
     Socks5Command,
     Socks5AddressType,
     Socks5Reply,
+    ConnectionInfo,
 )
 from shadow9.auth import AuthManager
 from shadow9.bridges import TorBridgeConnector
+from shadow9.memory_budget import HashPermits
 
 
 @pytest.fixture
@@ -447,6 +456,202 @@ class TestSocks5ServerResources:
         finally:
             await server.stop()
 
+    @pytest.mark.asyncio
+    async def test_stop_closes_an_established_relay(self, auth_manager: AuthManager) -> None:
+        """Stopping the proxy ends active relays and waits for both sockets to close."""
+        target_connected = asyncio.Event()
+        target_closed = asyncio.Event()
+
+        async def hold_target(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            target_connected.set()
+            try:
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                target_closed.set()
+
+        target = await asyncio.start_server(hold_target, "127.0.0.1", 0)
+        target_port = target.sockets[0].getsockname()[1]
+        proxy = Socks5Server(
+            host="127.0.0.1",
+            port=0,
+            auth_manager=auth_manager,
+            allow_localhost=True,
+        )
+        await proxy.start()
+        assert proxy._server is not None
+        proxy_port = proxy._server.sockets[0].getsockname()[1]
+        client_reader, client_writer = await _open_proxy_connection(
+            proxy_port,
+            b"directuser",
+            b"SecurePass123!@#",
+            "127.0.0.1",
+            target_port,
+            Socks5AddressType.IPV4,
+        )
+
+        try:
+            reply = await client_reader.readexactly(10)
+            assert reply[1] == Socks5Reply.SUCCEEDED
+            await asyncio.wait_for(target_connected.wait(), timeout=1)
+
+            await asyncio.wait_for(proxy.stop(), timeout=1)
+
+            assert await asyncio.wait_for(client_reader.read(1), timeout=0.5) == b""
+            await asyncio.wait_for(target_closed.wait(), timeout=0.5)
+        finally:
+            client_writer.close()
+            await client_writer.wait_closed()
+            await proxy.stop()
+            target.close()
+            await target.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_monitoring_callback_failure_does_not_send_another_reply(
+        self, auth_manager: AuthManager
+    ) -> None:
+        """A monitoring failure cannot append a failure reply after SOCKS success."""
+
+        async def hold_target(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        async def fail_monitoring(info: ConnectionInfo) -> None:
+            raise RuntimeError(f"monitoring failed for {info.target_port}")
+
+        target = await asyncio.start_server(hold_target, "127.0.0.1", 0)
+        target_port = target.sockets[0].getsockname()[1]
+        proxy = Socks5Server(
+            host="127.0.0.1",
+            port=0,
+            auth_manager=auth_manager,
+            allow_localhost=True,
+        )
+        proxy.set_connection_callback(fail_monitoring)
+        await proxy.start()
+        assert proxy._server is not None
+        proxy_port = proxy._server.sockets[0].getsockname()[1]
+        client_reader, client_writer = await _open_proxy_connection(
+            proxy_port,
+            b"directuser",
+            b"SecurePass123!@#",
+            "127.0.0.1",
+            target_port,
+            Socks5AddressType.IPV4,
+        )
+
+        try:
+            reply = await client_reader.readexactly(10)
+            assert reply[1] == Socks5Reply.SUCCEEDED
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(client_reader.read(1), timeout=0.2)
+        finally:
+            client_writer.close()
+            await client_writer.wait_closed()
+            await proxy.stop()
+            target.close()
+            await target.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_client_half_close_keeps_a_late_target_reply(
+        self, auth_manager: AuthManager
+    ) -> None:
+        """The target may answer after the client has finished sending its request."""
+        target_done = asyncio.Event()
+
+        async def reply_after_eof(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                assert await reader.read() == b"request body"
+                writer.write(b"late reply")
+                await writer.drain()
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                target_done.set()
+
+        target = await asyncio.start_server(reply_after_eof, "127.0.0.1", 0)
+        target_port = target.sockets[0].getsockname()[1]
+        proxy = Socks5Server(
+            host="127.0.0.1",
+            port=0,
+            auth_manager=auth_manager,
+            allow_localhost=True,
+        )
+        await proxy.start()
+        assert proxy._server is not None
+        proxy_port = proxy._server.sockets[0].getsockname()[1]
+        client_reader, client_writer = await _open_proxy_connection(
+            proxy_port,
+            b"directuser",
+            b"SecurePass123!@#",
+            "127.0.0.1",
+            target_port,
+            Socks5AddressType.IPV4,
+        )
+
+        try:
+            reply = await client_reader.readexactly(10)
+            assert reply[1] == Socks5Reply.SUCCEEDED
+            client_writer.write(b"request body")
+            await client_writer.drain()
+            client_writer.write_eof()
+
+            assert await asyncio.wait_for(client_reader.readexactly(10), timeout=1) == b"late reply"
+            await asyncio.wait_for(target_done.wait(), timeout=1)
+        finally:
+            client_writer.close()
+            await client_writer.wait_closed()
+            await proxy.stop()
+            target.close()
+            await target.wait_closed()
+
+    def test_configured_limits_are_used_by_relays_and_memory_reservation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Runtime limits and the relay memory reservation use configured values."""
+        chosen = socks5_module.choose_hash_permits(1, 0)
+        reservations: list[int] = []
+
+        def record_choice(configured: int | None, relay_reserve_bytes: int) -> HashPermits:
+            reservations.append(relay_reserve_bytes)
+            return chosen
+
+        monkeypatch.setattr(socks5_module, "choose_hash_permits", record_choice)
+
+        proxy = Socks5Server(
+            max_connections=7,
+            max_concurrent_auth=1,
+            connection_timeout=4,
+            relay_timeout=9,
+            buffer_size=4096,
+        )
+
+        assert proxy.CONNECTION_TIMEOUT == 4
+        assert proxy.RELAY_TIMEOUT == 9
+        assert proxy.MAX_BUFFER_SIZE == 4096
+        assert reservations == [7 * 2 * 4096]
+
+        proxy.CONNECTION_TIMEOUT = 3
+        proxy.RELAY_TIMEOUT = 8
+        proxy.MAX_BUFFER_SIZE = 2048
+        assert (proxy.CONNECTION_TIMEOUT, proxy.RELAY_TIMEOUT, proxy.MAX_BUFFER_SIZE) == (
+            3,
+            8,
+            2048,
+        )
+
 
 class _FakeResolver:
     """Stands in for loop.getaddrinfo so a test can say where a name points.
@@ -502,15 +707,15 @@ class _FakeResolver:
         ]
 
 
-async def _request_connect_once(
+async def _open_proxy_connection(
     port: int,
     username: bytes,
     password: bytes,
     target_host: str,
     target_port: int,
     address_type: Socks5AddressType = Socks5AddressType.DOMAIN,
-) -> int:
-    """Log in and send one CONNECT request, returning the SOCKS5 reply code byte."""
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Log in and send one CONNECT request while leaving the client stream open."""
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     try:
         writer.write(struct.pack("!BBB", 0x05, 1, Socks5AuthMethod.USERNAME_PASSWORD))
@@ -534,7 +739,26 @@ async def _request_connect_once(
         request += struct.pack("!H", target_port)
         writer.write(request)
         await writer.drain()
+    except BaseException:
+        writer.close()
+        raise
 
+    return reader, writer
+
+
+async def _request_connect_once(
+    port: int,
+    username: bytes,
+    password: bytes,
+    target_host: str,
+    target_port: int,
+    address_type: Socks5AddressType = Socks5AddressType.DOMAIN,
+) -> int:
+    """Log in and send one CONNECT request, returning the SOCKS5 reply code byte."""
+    reader, writer = await _open_proxy_connection(
+        port, username, password, target_host, target_port, address_type
+    )
+    try:
         return struct.unpack("!BBBB4sH", await reader.readexactly(10))[1]
     finally:
         writer.close()
@@ -1246,6 +1470,37 @@ class TestSocks5ServerAccessPolicy:
         assert f"user{cycles - 1}" in server._user_requests
 
     @pytest.mark.asyncio
+    async def test_account_limit_allows_a_correct_password_from_a_new_source(
+        self, auth_manager: AuthManager
+    ) -> None:
+        """Distributed failures cannot stop a new source from proving the password."""
+        attempts = 5
+        server = Socks5Server(
+            host="127.0.0.1",
+            port=0,
+            auth_manager=auth_manager,
+            max_failed_attempts=attempts,
+        )
+        verified = AsyncMock(return_value=True)
+        server._verify_credentials = verified
+
+        for octet in range(server.ACCOUNT_ATTEMPT_FACTOR):
+            for _ in range(attempts):
+                server._record_auth_failure(f"198.51.100.{octet}", "testuser")
+
+        await server.start()
+        assert server._server is not None
+        port = server._server.sockets[0].getsockname()[1]
+        try:
+            status = await _authenticate_once(port, b"testuser", b"correct password")
+
+            assert status == 0x00
+            verified.assert_awaited_once_with("testuser", "correct password")
+            assert server._account_failures == {}
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
     async def test_lockout_bounds_guesses_against_an_account_not_just_a_source(self, auth_manager):
         """Spreading guesses across source addresses must not buy more attempts.
 
@@ -1363,6 +1618,120 @@ class TestSocks5ServerAccessPolicy:
             assert server._auth_failures == {}
         finally:
             await server.stop()
+
+
+class TestServeConfiguration:
+    """The serve command rejects invalid settings before it starts external resources."""
+
+    @pytest.mark.asyncio
+    async def test_serve_passes_proxy_runtime_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The configured connection, relay, and buffer values reach Socks5Server."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "server:\n"
+            "  host: 127.0.0.1\n"
+            "  port: 1080\n"
+            "  max_connections: 17\n"
+            "  connection_timeout: 6\n"
+            "  relay_timeout: 41\n"
+            "  buffer_size: 8192\n"
+            "tor:\n"
+            "  enabled: false\n",
+            encoding="utf-8",
+        )
+        auth = Mock()
+        auth.list_users.return_value = ["directuser"]
+        auth.get_user_tor_preference.return_value = False
+        proxy = Mock()
+        proxy.start = AsyncMock(side_effect=RuntimeError("end after construction"))
+        proxy.stop = AsyncMock()
+        proxy_type = Mock(return_value=proxy)
+        monkeypatch.setattr(server_commands, "console", Mock())
+        monkeypatch.setattr(server_commands, "setup_logging", Mock())
+        monkeypatch.setattr(server_commands, "load_master_key", Mock(return_value="test key"))
+        monkeypatch.setattr(server_commands, "AuthManager", Mock(return_value=auth))
+        monkeypatch.setattr(server_commands, "Socks5Server", proxy_type)
+
+        with pytest.raises(RuntimeError, match="end after construction"):
+            await server_commands._serve(str(config_path), None, None)
+
+        settings = proxy_type.call_args.kwargs
+        assert settings["connection_timeout"] == 6
+        assert settings["relay_timeout"] == 41
+        assert settings["buffer_size"] == 8192
+
+    @pytest.mark.asyncio
+    async def test_serve_reports_every_invalid_file_setting_before_credentials(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """File and environment validation runs before the credential store is opened."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "server:\n  port: 0\n  max_connections: 0\ntor:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+        console = Mock()
+        load_key = Mock(side_effect=AssertionError("credential loading must not run"))
+        monkeypatch.setattr(server_commands, "console", console)
+        monkeypatch.setattr(server_commands, "setup_logging", Mock())
+        monkeypatch.setattr(server_commands, "load_master_key", load_key)
+
+        with pytest.raises(typer.Exit) as raised:
+            await server_commands._serve(str(config_path), None, None)
+
+        assert raised.value.exit_code == 1
+        messages = [str(call.args[0]) for call in console.print.call_args_list]
+        assert any("Invalid server port: 0" in message for message in messages)
+        assert any("max_connections must be positive" in message for message in messages)
+        load_key.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_serve_rejects_a_zero_cli_port(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit port zero is rejected instead of being replaced by the file value."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("tor:\n  enabled: false\n", encoding="utf-8")
+        load_key = Mock(side_effect=AssertionError("credential loading must not run"))
+        monkeypatch.setattr(server_commands, "console", Mock())
+        monkeypatch.setattr(server_commands, "setup_logging", Mock())
+        monkeypatch.setattr(server_commands, "load_master_key", load_key)
+
+        with pytest.raises(typer.Exit) as raised:
+            await server_commands._serve(str(config_path), None, 0)
+
+        assert raised.value.exit_code == 1
+        load_key.assert_not_called()
+
+    def test_serve_exits_nonzero_when_no_users_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A start with no users reports failure to the service manager."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("tor:\n  enabled: false\n", encoding="utf-8")
+        auth = Mock()
+        auth.list_users.return_value = []
+        monkeypatch.setattr(server_commands, "console", Mock())
+        monkeypatch.setattr(server_commands, "setup_logging", Mock())
+        monkeypatch.setattr(server_commands, "load_master_key", Mock(return_value="test key"))
+        monkeypatch.setattr(server_commands, "AuthManager", Mock(return_value=auth))
+
+        assert asyncio.run(server_commands._serve(str(config_path), None, None)) is False
+
+        stopped = AsyncMock(return_value=False)
+        monkeypatch.setattr(server_commands, "_serve", stopped)
+        app = typer.Typer()
+        server_commands.register_server_commands(app)
+
+        result = CliRunner().invoke(
+            app,
+            ["serve", "--config", str(config_path), "--host", "127.0.0.1"],
+        )
+
+        assert result.exit_code == 1
+        stopped.assert_awaited_once()
 
 
 class TestSocks5Enums:

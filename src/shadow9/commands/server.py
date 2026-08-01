@@ -6,11 +6,9 @@ Contains serve and stop commands for managing the SOCKS5 proxy server.
 
 import asyncio
 import signal
-import subprocess
-import sys
 import traceback
 from pathlib import Path
-from typing import NamedTuple, Optional, Annotated
+from typing import Optional, Annotated
 
 import structlog
 import typer
@@ -28,6 +26,18 @@ from ..wizards import run_serve_wizard, show_serve_preview
 
 console = Console()
 logger = structlog.get_logger(__name__)
+
+
+def _validate_config(cfg: Config) -> None:
+    """Print every configuration error and stop before resources are started."""
+    errors = cfg.validate()
+    if not errors:
+        return
+
+    console.print("[red]Invalid configuration:[/red]")
+    for error in errors:
+        console.print(f"  [red]{error}[/red]")
+    raise typer.Exit(1)
 
 
 def register_server_commands(app: typer.Typer) -> None:
@@ -80,7 +90,9 @@ def register_server_commands(app: typer.Typer) -> None:
             port = cfg.server.port
 
         try:
-            asyncio.run(_serve(config, host, port))
+            started = asyncio.run(_serve(config, host, port))
+            if not started:
+                raise typer.Exit(1)
         except (typer.Exit, typer.Abort):
             raise
         except KeyboardInterrupt:
@@ -129,13 +141,14 @@ def register_server_commands(app: typer.Typer) -> None:
         programs. The port is a last resort, and a process this cannot recognise is named
         and confirmed before anything is sent to it.
         """
+        from . import probe
         from .utils import stop_running_server
 
         if stop_running_server().was_running:
             console.print("[green]Server stopped[/green]")
             return
 
-        holder = _listener_on_port(port)
+        holder = probe.listener_on_port(port)
         if holder is None:
             console.print(
                 f"[yellow]No Shadow9 service or process found, and nothing is listening "
@@ -152,99 +165,13 @@ def register_server_commands(app: typer.Typer) -> None:
                 console.print("[yellow]Left it running[/yellow]")
                 raise typer.Exit(1)
 
-        if not _terminate(holder.pid):
+        if not probe.terminate(holder.pid):
             console.print(f"[red]Could not stop PID {holder.pid}[/red]")
             raise typer.Exit(1)
         console.print(f"[green]Stopped PID {holder.pid} ({holder.name}) on port {port}[/green]")
 
 
-class PortHolder(NamedTuple):
-    """The process listening on a port, and whether it looks like ours."""
-
-    pid: int
-    name: str
-    looks_like_shadow9: bool
-
-
-def _listener_on_port(port: int) -> PortHolder | None:
-    """
-    Find the process listening on exactly this port.
-
-    The port is compared as a number rather than as text. Matching the string ":1080"
-    against a netstat line also matches ":10801", which is a different service.
-
-    Args:
-        port: The TCP port to look for
-
-    Returns:
-        The listening process, or None when nothing holds the port
-    """
-    pid = _listening_pid(port)
-    if pid is None:
-        return None
-    name = _process_name(pid)
-    return PortHolder(pid, name, "shadow9" in name.lower() or "python" in name.lower())
-
-
-def _listening_pid(port: int) -> int | None:
-    """Ask the platform which process is listening on a port."""
-    if sys.platform == "win32":
-        try:
-            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            # proto, local address, foreign address, state, pid
-            if len(parts) < 5 or parts[3] != "LISTENING":
-                continue
-            _, _, local_port = parts[1].rpartition(":")
-            if local_port.isdigit() and int(local_port) == port and parts[4].isdigit():
-                return int(parts[4])
-        return None
-
-    try:
-        result = subprocess.run(["lsof", "-t", f"-i:{port}"], capture_output=True, text=True)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    found = [entry for entry in result.stdout.split() if entry.isdigit()]
-    return int(found[0]) if found else None
-
-
-def _process_name(pid: int) -> str:
-    """Best effort name for a pid, so the operator is told what they are about to stop."""
-    try:
-        if sys.platform == "win32":
-            result = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-            )
-            first = result.stdout.strip().splitlines()[:1]
-            return first[0].split(",")[0].strip('"') if first else "unknown"
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True
-        )
-        return result.stdout.strip() or "unknown"
-    except (OSError, subprocess.SubprocessError, IndexError):
-        return "unknown"
-
-
-def _terminate(pid: int) -> bool:
-    """Ask a process to stop, and say whether the request was accepted."""
-    try:
-        if sys.platform == "win32":
-            result = subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)], capture_output=True, text=True
-            )
-        else:
-            result = subprocess.run(["kill", str(pid)], capture_output=True, text=True)
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> None:
+async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> bool:
     """Async implementation of serve command."""
     config_file = Path(config_path)
 
@@ -264,12 +191,14 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> 
         if not config_file.exists():
             console.print("[yellow]No config file found, using defaults[/yellow]")
         cfg = Config.load(config_file)
+        _validate_config(cfg)
 
         # Apply CLI overrides
-        if host:
+        if host is not None:
             cfg.server.host = host
-        if port:
+        if port is not None:
             cfg.server.port = port
+        _validate_config(cfg)
 
         # Setup logging
         setup_logging(cfg.log)
@@ -299,7 +228,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> 
             console.print("[red]No users configured.[/red]")
             console.print("\nCreate a user first:")
             console.print("  [cyan]shadow9 user generate[/cyan]")
-            return
+            return False
 
         # Group users by bridge type (only those needing Tor)
         users = auth_manager.list_users()
@@ -423,6 +352,9 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> 
             upstream_proxies=upstream_proxies,
             bridge_base_port=dynamic_bridge_base_port,
             max_connections=cfg.server.max_connections,
+            connection_timeout=cfg.server.connection_timeout,
+            relay_timeout=cfg.server.relay_timeout,
+            buffer_size=cfg.server.buffer_size,
             max_concurrent_auth=cfg.auth.max_concurrent_auth,
             block_private_ranges=cfg.security.block_private_ranges,
             allow_localhost=cfg.security.allow_localhost,
@@ -555,3 +487,5 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> 
 
         if server is not None:
             console.print("[green]Server stopped[/green]")
+
+    return True

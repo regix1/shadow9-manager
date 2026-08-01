@@ -158,6 +158,7 @@ class Socks5Server:
     BRIDGE_CONNECTION_TIMEOUT = 120  # Longer timeout for Snowflake/bridge connections
     ONION_CONNECTION_TIMEOUT = 180  # Even longer for .onion (6-hop circuits)
     RELAY_TIMEOUT = 600  # 10 minutes for large transfers
+    TLS_RECORD_TIMEOUT = 1.0
 
     # Connection tuning
     LISTEN_BACKLOG = 256  # TCP listen queue size
@@ -221,6 +222,9 @@ class Socks5Server:
         allowed_commands: Optional[set[Socks5Command]] = None,
         bridge_base_port: int = 9100,
         max_connections: int = 100,
+        connection_timeout: int | None = None,
+        relay_timeout: int | None = None,
+        buffer_size: int | None = None,
         max_concurrent_auth: Optional[int] = None,
         block_private_ranges: bool = True,
         allow_localhost: bool = False,
@@ -241,6 +245,9 @@ class Socks5Server:
             allowed_commands: Set of allowed SOCKS5 commands (default: CONNECT only)
             bridge_base_port: Base port for dynamically created Tor bridge instances
             max_connections: Maximum number of connections handled at the same time
+            connection_timeout: Seconds allowed for handshakes, connections, and writes
+            relay_timeout: Seconds a relay direction may wait for more input
+            buffer_size: Bytes read and reserved per relay direction
             max_concurrent_auth: Maximum password verifications running at the same time,
                 or None to size it from the memory this process is allowed to use
             block_private_ranges: Refuse destinations that are not on the public internet
@@ -258,6 +265,12 @@ class Socks5Server:
         self.allowed_commands = allowed_commands or {Socks5Command.CONNECT}
         self._bridge_base_port = bridge_base_port
         self.max_connections = max_connections
+        if connection_timeout is not None:
+            self.CONNECTION_TIMEOUT = connection_timeout
+        if relay_timeout is not None:
+            self.RELAY_TIMEOUT = relay_timeout
+        if buffer_size is not None:
+            self.MAX_BUFFER_SIZE = buffer_size
         # The relay holds one buffer in each direction for every connection, and that
         # memory is not available to password hashing, so the two caps are sized against
         # one budget rather than each assuming it has the whole of it.
@@ -283,6 +296,7 @@ class Socks5Server:
         self._lockout_seconds = lockout_duration_minutes * 60
 
         self._server: Optional[asyncio.Server] = None
+        self._handler_tasks: dict[asyncio.Future[None], asyncio.StreamWriter] = {}
         self._connections: dict[str, ConnectionInfo] = {}
         self._running = False
         self._started_at: Optional[datetime] = None
@@ -401,11 +415,30 @@ class Socks5Server:
         else:
             log_method(event, **kwargs)
 
-    def _make_user_handler(self, allowed_user: str):
+    def _start_handler(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        allowed_user: str | None = None,
+    ) -> None:
+        """Start and retain a client handler until all of its cleanup has finished."""
+        task = asyncio.create_task(self._handle_client(reader, writer, allowed_user=allowed_user))
+        self._handler_tasks[task] = writer
+        task.add_done_callback(self._finish_handler)
+
+    def _finish_handler(self, task: asyncio.Future[None]) -> None:
+        """Forget a completed handler and close its admitted client transport."""
+        writer = self._handler_tasks.pop(task, None)
+        if writer is not None:
+            writer.close()
+
+    def _make_user_handler(
+        self, allowed_user: str
+    ) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], None]:
         """Create a client handler that only allows a specific user."""
 
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-            await self._handle_client(reader, writer, allowed_user=allowed_user)
+        def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            self._start_handler(reader, writer, allowed_user=allowed_user)
 
         return handler
 
@@ -567,7 +600,7 @@ class Socks5Server:
     async def start(self) -> None:
         """Start the SOCKS5 server."""
         self._server = await asyncio.start_server(
-            self._handle_client,
+            self._start_handler,
             self.host,
             self.port,
             reuse_address=True,
@@ -659,14 +692,34 @@ class Socks5Server:
                 await self._blocked_host_watch
             self._blocked_host_watch = None
 
-        # Stop main server
+        # Stop accepting before taking the handler snapshot. The callbacks above create
+        # and retain each task synchronously, so every admitted client is now represented.
         if self._server:
             self._server.close()
+
+        user_listeners = list(self._user_listeners.items())
+        for _, (server, _) in user_listeners:
+            server.close()
+
+        current_task = asyncio.current_task()
+        handlers = [
+            (task, writer)
+            for task, writer in self._handler_tasks.items()
+            if task is not current_task and not task.done()
+        ]
+        for task, writer in handlers:
+            writer.close()
+            task.cancel()
+        if handlers:
+            await asyncio.gather(*(task for task, _ in handlers), return_exceptions=True)
+            await asyncio.gather(
+                *(writer.wait_closed() for _, writer in handlers), return_exceptions=True
+            )
+
+        if self._server:
             await self._server.wait_closed()
 
-        # Stop all user-specific listeners
-        for port, (server, username) in list(self._user_listeners.items()):
-            server.close()
+        for port, (server, username) in user_listeners:
             await server.wait_closed()
             logger.info("User listener stopped", username=username, port=port)
         self._user_listeners.clear()
@@ -947,7 +1000,16 @@ class Socks5Server:
 
             # Notify connection callback
             if self._on_connection:
-                await self._on_connection(conn_info)
+                try:
+                    await self._on_connection(conn_info)
+                except Exception as e:
+                    self._log_if_allowed(
+                        "error",
+                        "Connection monitoring callback failed",
+                        username=username,
+                        client=conn_id,
+                        error=str(e),
+                    )
 
             # Setup DPI bypass if security level requires it
             dpi_bypass = None
@@ -1008,6 +1070,8 @@ class Socks5Server:
             # _relay closes this too, but the handler can raise before ever reaching it
             if target_writer is not None:
                 target_writer.close()
+                with suppress(Exception):
+                    await target_writer.wait_closed()
             writer.close()
             try:
                 await writer.wait_closed()
@@ -1087,11 +1151,12 @@ class Socks5Server:
 
         source = self._peer_address(writer)
 
-        # Refused before the hash, not after. An attempt that costs 64 MB of argon2 is
-        # worth making for an attacker even when it can never succeed, and the cost is
-        # paid for unknown usernames too because the dummy hash runs for those. Answering
-        # a locked-out attempt for free is the whole point of the lockout.
-        if self._is_locked_out(source, username):
+        # A source that spent its own budget is refused before the hash. The account-wide
+        # count is still kept, but it cannot refuse a new source before the password is
+        # checked because that would let a crowd of addresses lock out the account owner.
+        if self.max_failed_attempts > 0 and self._spent_attempts(
+            self._auth_failures, (source, username), self.max_failed_attempts
+        ):
             self._log_if_allowed(
                 "warning",
                 "Authentication refused, too many failed attempts",
@@ -1520,6 +1585,17 @@ class Socks5Server:
     ) -> None:
         """Relay data between client and target with optional DPI bypass."""
 
+        async def send_eof(writer: asyncio.StreamWriter) -> None:
+            """Finish one write direction without discarding the peer's remaining input."""
+            if not writer.can_write_eof():
+                writer.close()
+                return
+            try:
+                writer.write_eof()
+                await asyncio.wait_for(writer.drain(), timeout=self.CONNECTION_TIMEOUT)
+            except (asyncio.TimeoutError, ConnectionError, OSError, NotImplementedError):
+                writer.close()
+
         async def relay_to_target() -> None:
             first_packet = True
             try:
@@ -1533,7 +1609,69 @@ class Socks5Server:
                     # Apply DPI bypass to first packet (TLS ClientHello)
                     if first_packet and dpi_bypass and dpi_bypass.config.enabled:
                         first_packet = False
-                        fragments = dpi_bypass.fragment_for_bypass(data)
+                        is_tls = data[0] == 0x16
+                        record_complete = not is_tls
+                        if is_tls:
+                            first_record = bytearray(data)
+                            deadline = asyncio.get_running_loop().time() + self.TLS_RECORD_TIMEOUT
+
+                            while (
+                                len(first_record) < 5
+                                and len(first_record) < self.MAX_BUFFER_SIZE
+                            ):
+                                if len(first_record) >= 2 and first_record[1] != 0x03:
+                                    is_tls = False
+                                    record_complete = True
+                                    break
+                                remaining_time = deadline - asyncio.get_running_loop().time()
+                                if remaining_time <= 0:
+                                    break
+                                try:
+                                    more = await asyncio.wait_for(
+                                        client_reader.read(
+                                            min(
+                                                5 - len(first_record),
+                                                self.MAX_BUFFER_SIZE - len(first_record),
+                                            )
+                                        ),
+                                        timeout=remaining_time,
+                                    )
+                                except asyncio.TimeoutError:
+                                    break
+                                if not more:
+                                    break
+                                first_record.extend(more)
+
+                            if len(first_record) >= 2 and first_record[1] != 0x03:
+                                is_tls = False
+                                record_complete = True
+                            elif len(first_record) >= 5:
+                                record_size = 5 + int.from_bytes(first_record[3:5], "big")
+                                if record_size <= self.MAX_BUFFER_SIZE:
+                                    while len(first_record) < record_size:
+                                        remaining_time = (
+                                            deadline - asyncio.get_running_loop().time()
+                                        )
+                                        if remaining_time <= 0:
+                                            break
+                                        try:
+                                            more = await asyncio.wait_for(
+                                                client_reader.read(record_size - len(first_record)),
+                                                timeout=remaining_time,
+                                            )
+                                        except asyncio.TimeoutError:
+                                            break
+                                        if not more:
+                                            break
+                                        first_record.extend(more)
+                                    record_complete = len(first_record) >= record_size
+
+                            data = bytes(first_record)
+
+                        if not is_tls or record_complete:
+                            fragments = dpi_bypass.fragment_for_bypass(data)
+                        else:
+                            fragments = [data]
                         for i, fragment in enumerate(fragments):
                             target_writer.write(fragment)
                             # drain() waits on the peer reading; read() has RELAY_TIMEOUT
@@ -1551,6 +1689,7 @@ class Socks5Server:
                             target_writer.drain(), timeout=self.CONNECTION_TIMEOUT
                         )
                         conn_info.bytes_sent += len(data)
+                await send_eof(target_writer)
             except (asyncio.TimeoutError, ConnectionError, OSError) as e:
                 self._log_if_allowed(
                     "debug",
@@ -1559,8 +1698,10 @@ class Socks5Server:
                     target=f"{conn_info.target_addr}:{conn_info.target_port}",
                     error=str(e) or type(e).__name__,
                 )
-            finally:
                 target_writer.close()
+            except BaseException:
+                target_writer.close()
+                raise
 
         async def relay_to_client() -> None:
             try:
@@ -1573,6 +1714,7 @@ class Socks5Server:
                     client_writer.write(data)
                     await asyncio.wait_for(client_writer.drain(), timeout=self.CONNECTION_TIMEOUT)
                     conn_info.bytes_received += len(data)
+                await send_eof(client_writer)
             except (asyncio.TimeoutError, ConnectionError, OSError) as e:
                 self._log_if_allowed(
                     "debug",
@@ -1581,8 +1723,10 @@ class Socks5Server:
                     target=f"{conn_info.target_addr}:{conn_info.target_port}",
                     error=str(e) or type(e).__name__,
                 )
-            finally:
                 client_writer.close()
+            except BaseException:
+                client_writer.close()
+                raise
 
         # Run both relay tasks concurrently
         results = await asyncio.gather(relay_to_target(), relay_to_client(), return_exceptions=True)
@@ -1599,6 +1743,9 @@ class Socks5Server:
                     target=f"{conn_info.target_addr}:{conn_info.target_port}",
                     error=str(result) or type(result).__name__,
                 )
+
+        target_writer.close()
+        client_writer.close()
 
         # Only log connection details if user allows logging
         self._log_if_allowed(

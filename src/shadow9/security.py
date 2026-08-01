@@ -63,7 +63,6 @@ class DPIBypassConfig:
     desync_method: str = "split"  # split, fake, disorder
 
     # TLS record fragmentation
-    fragment_tls_records: bool = True
     tls_record_split_size: int = 1  # Very small records confuse DPI
 
     # HTTP-specific bypass (for HTTP CONNECT)
@@ -73,26 +72,20 @@ class DPIBypassConfig:
 
 @dataclass
 class SecurityConfig:
-    """Security and evasion configuration."""
+    """
+    Security and evasion configuration.
+
+    Only settings the relay actually applies live here. Fields for TLS wrapping, traffic
+    padding, common-port use and DNS-leak prevention used to sit alongside these, set by
+    the presets and read by nothing, so an operator who chose paranoid was told they had
+    protections that were never applied to a single byte. Anything added here needs a
+    runtime path that reads it, and `test_security.py` checks that every field has one.
+    """
 
     level: SecurityLevel = SecurityLevel.BASIC
 
-    # TLS Settings
-    tls_enabled: bool = True
-
     # DPI Bypass (modern techniques)
     dpi_bypass: DPIBypassConfig = field(default_factory=DPIBypassConfig)
-
-    # Traffic obfuscation
-    padding_enabled: bool = False
-    padding_min: int = 16
-    padding_max: int = 256
-
-    # Port settings
-    use_common_ports: bool = True  # 80, 443, 8080
-
-    # DNS
-    prevent_dns_leaks: bool = True
 
 
 class DPIBypass:
@@ -232,21 +225,26 @@ class DPIBypass:
 
         Returns list of data chunks to send separately.
         """
-        fragments = [data]
+        split_points: set[int] = set()
 
         # Apply TLS ClientHello splitting
         if self.config.split_tls_hello:
-            new_fragments = []
-            for frag in fragments:
-                new_fragments.extend(self.split_tls_client_hello(frag, self.config.split_position))
-            fragments = new_fragments
+            tls_fragments = self.split_tls_client_hello(data, self.config.split_position)
+            if len(tls_fragments) > 1:
+                split_points.add(len(tls_fragments[0]))
 
         # Apply SNI fragmentation
         if self.config.fragment_sni:
-            new_fragments = []
-            for frag in fragments:
-                new_fragments.extend(self.fragment_sni(frag))
-            fragments = new_fragments
+            sni_fragments = self.fragment_sni(data)
+            if len(sni_fragments) > 1:
+                split_points.add(len(sni_fragments[0]))
+
+        fragments: list[bytes] = []
+        start = 0
+        for split_point in sorted(split_points):
+            fragments.append(data[start:split_point])
+            start = split_point
+        fragments.append(data[start:])
 
         # Apply desync if enabled
         if self.config.desync_enabled:
@@ -290,38 +288,29 @@ class DPIBypass:
 def get_security_preset(level: SecurityLevel) -> SecurityConfig:
     """Get security configuration preset."""
     presets = {
+        # none and basic are the same to the relay: both leave DPI bypass off. Basic is
+        # kept because it is the default on every stored user record, so removing it
+        # would make those records unreadable, and it is what an operator picks to say
+        # "no evasion" without picking "none".
         SecurityLevel.NONE: SecurityConfig(
             level=SecurityLevel.NONE,
-            tls_enabled=False,
             dpi_bypass=DPIBypassConfig(enabled=False),
-            padding_enabled=False,
-            prevent_dns_leaks=False,
         ),
         SecurityLevel.BASIC: SecurityConfig(
             level=SecurityLevel.BASIC,
-            tls_enabled=True,
             dpi_bypass=DPIBypassConfig(enabled=False),
-            padding_enabled=False,
-            prevent_dns_leaks=True,
         ),
         SecurityLevel.MODERATE: SecurityConfig(
             level=SecurityLevel.MODERATE,
-            tls_enabled=True,
             dpi_bypass=DPIBypassConfig(
                 enabled=True,
                 split_tls_hello=True,
                 fragment_sni=True,
                 desync_enabled=False,
             ),
-            padding_enabled=True,
-            padding_min=32,
-            padding_max=128,
-            use_common_ports=True,
-            prevent_dns_leaks=True,
         ),
         SecurityLevel.PARANOID: SecurityConfig(
             level=SecurityLevel.PARANOID,
-            tls_enabled=True,
             dpi_bypass=DPIBypassConfig(
                 enabled=True,
                 split_tls_hello=True,
@@ -330,15 +319,9 @@ def get_security_preset(level: SecurityLevel) -> SecurityConfig:
                 sni_split_position=1,
                 desync_enabled=True,
                 desync_method="split",
-                fragment_tls_records=True,
                 tls_record_split_size=1,
                 fake_packets_enabled=False,  # Requires raw sockets
             ),
-            padding_enabled=True,
-            padding_min=64,
-            padding_max=512,
-            use_common_ports=True,
-            prevent_dns_leaks=True,
         ),
     }
     return presets.get(level, presets[SecurityLevel.BASIC])
