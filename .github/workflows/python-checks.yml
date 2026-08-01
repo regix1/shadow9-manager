@@ -1,0 +1,109 @@
+name: Python checks
+
+# Existing ruff and mypy issues set the starting ceilings. Lower a ceiling when
+# its check reports fewer issues so later increases still fail.
+#
+# Both counts are the ones this job sees on Linux. mypy follows sys.platform, so it
+# skips the Windows-only branches and reports fewer errors here than the same version
+# does on a Windows checkout: 90 against 97. Match a ceiling to the runner, not to a
+# development machine, or every run ends up asking for a number it will never reach.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/python-checks.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/python-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Check Python
+    runs-on: ubuntu-latest
+    env:
+      RUFF_CEILING: 561
+      MYPY_CEILING: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install tools
+        run: python -m pip install '.[dev]' 'ruff==0.16.1' 'mypy==2.3.0'
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Ruff
+        run: |
+          output="$RUNNER_TEMP/ruff.json"
+          set +e
+          python -m ruff check --output-format=json . > "$output"
+          status=$?
+          set -e
+
+          if [ "$status" -gt 1 ]; then
+            echo "ruff could not complete; exit code $status" >&2
+            exit "$status"
+          fi
+
+          count=$(python -c 'import json, sys; print(len(json.load(sys.stdin)))' < "$output")
+          if [ "$count" -gt "$RUFF_CEILING" ]; then
+            difference=$((count - RUFF_CEILING))
+            echo "ruff ceiling: $RUFF_CEILING; new count: $count; difference: +$difference" >&2
+            exit 1
+          fi
+
+          if [ "$count" -lt "$RUFF_CEILING" ]; then
+            echo "ruff found $count issues; the ceiling can now be lowered from $RUFF_CEILING to $count"
+          else
+            echo "ruff found $count issues, matching the ceiling of $RUFF_CEILING"
+          fi
+
+      - name: Mypy
+        run: |
+          output="$RUNNER_TEMP/mypy.txt"
+          set +e
+          python -m mypy src/shadow9 > "$output" 2>&1
+          status=$?
+          set -e
+          cat "$output"
+
+          if [ "$status" -gt 1 ]; then
+            echo "mypy could not complete; exit code $status" >&2
+            exit "$status"
+          fi
+
+          summary=$(tail -n 1 "$output")
+          if [[ "$summary" == Success:\ no\ issues\ found* ]]; then
+            count=0
+          elif [[ "$summary" =~ ^Found\ ([0-9]+)\ errors?\ in\  ]]; then
+            count="${BASH_REMATCH[1]}"
+          else
+            echo "could not read mypy's final line: $summary" >&2
+            exit 1
+          fi
+
+          if [ "$count" -gt "$MYPY_CEILING" ]; then
+            difference=$((count - MYPY_CEILING))
+            echo "mypy ceiling: $MYPY_CEILING; new count: $count; difference: +$difference" >&2
+            exit 1
+          fi
+
+          if [ "$count" -lt "$MYPY_CEILING" ]; then
+            echo "mypy found $count errors; the ceiling can now be lowered from $MYPY_CEILING to $count"
+          else
+            echo "mypy found $count errors, matching the ceiling of $MYPY_CEILING"
+          fi
