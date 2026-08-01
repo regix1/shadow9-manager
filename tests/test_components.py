@@ -130,6 +130,37 @@ class TestStoppingTor:
         assert result.exit_code == 1
 
 
+class TestBootPersistence:
+    """Stopping Tor is not the same as keeping it stopped across a reboot."""
+
+    @pytest.mark.parametrize("action", ["enable", "disable"])
+    def test_it_asks_systemd(self, action: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran = _Ran()
+        monkeypatch.setattr(subprocess, "run", ran)
+
+        result = runner.invoke(app, ["components", action, "tor"])
+
+        assert result.exit_code == 0, result.stdout
+        assert ["systemctl", action, "tor"] in ran.calls
+
+    def test_disable_says_it_did_not_stop_anything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Otherwise an operator assumes disable stopped it and walks away."""
+        monkeypatch.setattr(subprocess, "run", _Ran())
+
+        result = runner.invoke(app, ["components", "disable", "tor"])
+
+        assert "still running" in plain(result.stdout)
+
+    @pytest.mark.parametrize("action", ["enable", "disable"])
+    def test_the_transports_still_refuse(self, action: str) -> None:
+        result = runner.invoke(app, ["components", action, "obfs4proxy"])
+
+        assert result.exit_code == 1
+        assert "not a service" in plain(result.stdout)
+
+
 class TestStartAndRestart:
     @pytest.mark.parametrize("action", ["start", "restart"])
     def test_it_asks_systemd_for_tor(self, action: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,6 +171,40 @@ class TestStartAndRestart:
 
         assert result.exit_code == 0, result.stdout
         assert ["systemctl", action, "tor"] in ran.calls
+
+
+class TestTabCompletion:
+    """Without a completer the shell lists files, because the script ends -o default."""
+
+    def test_it_offers_every_component(self) -> None:
+        assert components_commands.complete_component("") == [
+            "tor",
+            "obfs4proxy",
+            "snowflake-client",
+        ]
+
+    def test_it_narrows_on_what_was_typed(self) -> None:
+        assert components_commands.complete_component("t") == ["tor"]
+        assert components_commands.complete_component("s") == ["snowflake-client"]
+
+    def test_no_match_gives_nothing_rather_than_everything(self) -> None:
+        assert components_commands.complete_component("zzz") == []
+
+    @pytest.mark.parametrize("action", ["start", "stop", "restart"])
+    def test_every_action_has_the_completer_attached(self, action: str) -> None:
+        """A completer that exists but is not wired up is the same as none at all."""
+        group = next(item for item in app.registered_groups if item.name == "components")
+        assert group.typer_instance is not None
+        found = next(
+            item for item in group.typer_instance.registered_commands if item.name == action
+        )
+        assert found.callback is not None
+        argument = found.callback.__annotations__["name"]
+
+        assert any(
+            getattr(piece, "autocompletion", None) is components_commands.complete_component
+            for piece in getattr(argument, "__metadata__", ())
+        ), f"'{action}' takes a component name with no completer"
 
 
 class TestNaming:

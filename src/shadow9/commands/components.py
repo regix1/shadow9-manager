@@ -53,6 +53,22 @@ COMPONENTS = (
 )
 
 
+def complete_component(incomplete: str) -> list[str]:
+    """
+    Offer the component names on tab.
+
+    Without this the shell falls back to listing files, because the completion script
+    registers `complete -o default` and a command that returns nothing gets filenames.
+
+    Args:
+        incomplete: What has been typed so far
+
+    Returns:
+        The component names that start with it
+    """
+    return [item.name for item in COMPONENTS if item.name.startswith(incomplete)]
+
+
 def find_component(name: str) -> Component:
     """
     Look up a component by the name used on the command line.
@@ -198,7 +214,10 @@ def register_component_commands(app: typer.Typer) -> None:
 
     @components_app.command("start")
     def components_start(
-        name: Annotated[str, typer.Argument(help="Component to start")],
+        name: Annotated[
+            str,
+            typer.Argument(help="Component to start", autocompletion=complete_component),
+        ],
     ) -> None:
         """Start a component."""
         component = find_component(name)
@@ -212,7 +231,10 @@ def register_component_commands(app: typer.Typer) -> None:
 
     @components_app.command("restart")
     def components_restart(
-        name: Annotated[str, typer.Argument(help="Component to restart")],
+        name: Annotated[
+            str,
+            typer.Argument(help="Component to restart", autocompletion=complete_component),
+        ],
     ) -> None:
         """Restart a component."""
         component = find_component(name)
@@ -224,9 +246,52 @@ def register_component_commands(app: typer.Typer) -> None:
             raise typer.Exit(1)
         console.print(f"[green]{component.label} restarted[/green]")
 
+    @components_app.command("enable")
+    def components_enable(
+        name: Annotated[
+            str,
+            typer.Argument(help="Component to start on boot", autocompletion=complete_component),
+        ],
+    ) -> None:
+        """Start a component on boot."""
+        component = find_component(name)
+        if component.unit is None:
+            _refuse_on_demand(component)
+
+        _require_systemd()
+        if not _run_unit_action("enable", component.unit or ""):
+            raise typer.Exit(1)
+        console.print(f"[green]{component.label} will start on boot[/green]")
+
+    @components_app.command("disable")
+    def components_disable(
+        name: Annotated[
+            str,
+            typer.Argument(
+                help="Component to stop starting on boot", autocompletion=complete_component
+            ),
+        ],
+    ) -> None:
+        """Stop a component starting on boot, without stopping it now."""
+        component = find_component(name)
+        if component.unit is None:
+            _refuse_on_demand(component)
+
+        _require_systemd()
+        if not _run_unit_action("disable", component.unit or ""):
+            raise typer.Exit(1)
+        console.print(f"[green]{component.label} will not start on boot[/green]")
+        console.print(
+            f"[dim]It is still running now if it was. Use 'shadow9 components stop {name}' "
+            f"to stop it.[/dim]"
+        )
+
     @components_app.command("stop")
     def components_stop(
-        name: Annotated[str, typer.Argument(help="Component to stop")],
+        name: Annotated[
+            str,
+            typer.Argument(help="Component to stop", autocompletion=complete_component),
+        ],
         yes: Annotated[
             bool,
             typer.Option("--yes", "-y", help="Do not ask when something else depends on it"),
