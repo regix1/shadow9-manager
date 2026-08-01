@@ -69,6 +69,35 @@ func (r Router) WriteRefreshKey(refreshKey string) error {
 	return nil
 }
 
+func (r Router) checkOwnership(tunnel Tunnel) error {
+	sections := []struct {
+		path   string
+		saved  string
+		wanted string
+	}{
+		{"network." + tunnel.Interface, nodeSection + ".interface", tunnel.Interface},
+		{"firewall." + tunnel.Zone, nodeSection + ".zone", tunnel.Zone},
+	}
+	for _, section := range sections {
+		if _, err := r.Get(section.path); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return fmt.Errorf("checking %s before writing it: %w", section.path, err)
+		}
+		owner, err := r.Get(section.saved)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("checking %s before writing %s: %w", section.saved, section.path, err)
+		}
+		if err != nil || owner != section.wanted {
+			return fmt.Errorf(
+				"%s already exists, and %s does not show that shadow9 owns it",
+				section.path, section.saved)
+		}
+	}
+	return nil
+}
+
 // WriteTunnel writes the network, firewall and settings configuration, then
 // commits and reloads.
 //
@@ -77,6 +106,9 @@ func (r Router) WriteRefreshKey(refreshKey string) error {
 // router is left exactly as it was.
 func (r Router) WriteTunnel(tunnel Tunnel, hub string) error {
 	if err := tunnel.Validate(); err != nil {
+		return err
+	}
+	if err := r.checkOwnership(tunnel); err != nil {
 		return err
 	}
 	// uci cannot create the package file itself, and a node that installed
@@ -89,7 +121,9 @@ func (r Router) WriteTunnel(tunnel Tunnel, hub string) error {
 		return err
 	}
 
-	r.ClearPeers(tunnel.Interface)
+	if err := r.ClearPeers(tunnel.Interface); err != nil {
+		return r.revertAll(err)
+	}
 
 	staged := [][]Command{
 		tunnel.NetworkCommands(),
@@ -98,8 +132,7 @@ func (r Router) WriteTunnel(tunnel Tunnel, hub string) error {
 	}
 	for _, commands := range staged {
 		if err := r.Apply(commands); err != nil {
-			r.revertAll()
-			return err
+			return r.revertAll(err)
 		}
 	}
 
@@ -212,8 +245,17 @@ func (r Router) restoreAfter(cause error, snapshots []Snapshot) error {
 // revertAll discards staged changes after a failure. A revert that itself
 // fails is not reported, because the error being handled is the one worth
 // telling the operator about.
-func (r Router) revertAll() {
+func (r Router) revertAll(cause error) error {
+	var revertErrors []error
 	for _, pkg := range packages {
-		_, _ = r.run(uciTimeout, "", "uci", "-q", "revert", pkg)
+		out, err := r.run(uciTimeout, "", "uci", "revert", pkg)
+		if err != nil {
+			revertErrors = append(revertErrors,
+				fmt.Errorf("reverting uncommitted %s configuration: %w: %s", pkg, err, out))
+		}
 	}
+	if revertErr := errors.Join(revertErrors...); revertErr != nil {
+		return fmt.Errorf("%w; staged changes could not be fully reverted: %v", cause, revertErr)
+	}
+	return cause
 }

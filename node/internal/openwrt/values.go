@@ -1,6 +1,7 @@
 package openwrt
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -59,7 +60,13 @@ func SplitEndpoint(endpoint string) (host string, port int, err error) {
 // LanNetwork returns the router's LAN subnet in CIDR form, which is what a
 // site gateway advertises to the rest of the tunnel.
 func LanNetwork(router Router) (string, error) {
-	address := router.Get("network.lan.ipaddr")
+	address, err := router.Get("network.lan.ipaddr")
+	if errors.Is(err, ErrNotFound) {
+		return "", fmt.Errorf("network.lan.ipaddr is not set")
+	}
+	if err != nil {
+		return "", err
+	}
 	if address == "" {
 		return "", fmt.Errorf("network.lan.ipaddr is not set")
 	}
@@ -75,8 +82,12 @@ func LanNetwork(router Router) (string, error) {
 		return network.String(), nil
 	}
 
-	mask := router.Get("network.lan.netmask")
-	if mask == "" {
+	mask, err := router.Get("network.lan.netmask")
+	if errors.Is(err, ErrNotFound) {
+		mask = "255.255.255.0"
+	} else if err != nil {
+		return "", err
+	} else if mask == "" {
 		mask = "255.255.255.0"
 	}
 	ip := net.ParseIP(address).To4()
@@ -94,8 +105,12 @@ func LanNetwork(router Router) (string, error) {
 
 // Hostname returns the router's configured hostname, or an empty string when
 // it has none.
-func Hostname(router Router) string {
-	return router.Get("system.@system[0].hostname")
+func Hostname(router Router) (string, error) {
+	hostname, err := router.Get("system.@system[0].hostname")
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	return hostname, err
 }
 
 // PeerName turns a hostname into a name the hub will accept: 3 to 64 letters,

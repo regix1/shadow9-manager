@@ -116,10 +116,18 @@ func TestLanNetworkSaysSoWhenThereIsNoLanAddress(t *testing.T) {
 func TestHostnameReadsTheSystemSection(t *testing.T) {
 	shell := newFakeShell()
 	shell.addSection("system", "", "system", map[string][]string{"hostname": {"branch-gateway"}})
-	if got := Hostname(Router{Shell: shell}); got != "branch-gateway" {
+	got, err := Hostname(Router{Shell: shell})
+	if err != nil {
+		t.Fatalf("Hostname: %v", err)
+	}
+	if got != "branch-gateway" {
 		t.Errorf("the hostname came out as %q", got)
 	}
-	if got := Hostname(Router{Shell: newFakeShell()}); got != "" {
+	got, err = Hostname(Router{Shell: newFakeShell()})
+	if err != nil {
+		t.Fatalf("Hostname: %v", err)
+	}
+	if got != "" {
 		t.Errorf("a router with no hostname gave %q", got)
 	}
 }

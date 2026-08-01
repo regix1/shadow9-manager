@@ -200,10 +200,74 @@ func TestJoiningTwiceDoesNotDuplicateAnything(t *testing.T) {
 	}
 }
 
-// A peer left by an older version of this client is anonymous, so it cannot be
-// deleted by name. It still has to go, or the interface keeps talking to a hub
-// the operator has moved away from.
-func TestAnAnonymousPeerFromAnEarlierJoinIsRemoved(t *testing.T) {
+func TestWriteTunnelRefusesForeignInterface(t *testing.T) {
+	shell := newFakeShell()
+	shell.addSection("network", "lan", "interface", map[string][]string{
+		"ipaddr": {"192.168.1.1"},
+		"proto":  {"static"},
+	})
+	shell.addSection("network", "operator_peer", PeerSectionType("lan"), map[string][]string{
+		"public_key": {"operatoroperatoroperatoroperatoroperatorop="},
+	})
+	want := shell.render("network")
+	tunnel := siteGateway()
+	tunnel.Interface = "lan"
+
+	err := (Router{Shell: shell}).WriteTunnel(tunnel, "http://203.0.113.10:8080")
+	if err == nil {
+		t.Fatal("WriteTunnel replaced an existing interface that shadow9 does not own")
+	}
+	if got := shell.render("network"); got != want {
+		t.Errorf("the foreign interface or peer changed.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestWriteTunnelRefusesForeignZone(t *testing.T) {
+	shell := newFakeShell()
+	shell.addSection("firewall", "lan", "zone", map[string][]string{
+		"name":    {"lan"},
+		"network": {"lan"},
+	})
+	want := shell.render("firewall")
+	tunnel := siteGateway()
+	tunnel.Zone = "lan"
+
+	err := (Router{Shell: shell}).WriteTunnel(tunnel, "http://203.0.113.10:8080")
+	if err == nil {
+		t.Fatal("WriteTunnel replaced an existing zone that shadow9 does not own")
+	}
+	if got := shell.render("firewall"); got != want {
+		t.Errorf("the foreign zone changed.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestWriteTunnelKeepsOperatorPeer(t *testing.T) {
+	shell := newFakeShell("shadow9")
+	shell.addSection("network", DefaultInterface, "interface", map[string][]string{
+		"proto": {"wireguard"},
+	})
+	shell.addSection("firewall", DefaultZone, "zone", map[string][]string{
+		"name": {DefaultZone},
+	})
+	shell.addSection("shadow9", "node", "node", map[string][]string{
+		"interface": {DefaultInterface},
+		"zone":      {DefaultZone},
+	})
+	shell.addSection("network", "operator_peer", PeerSectionType(DefaultInterface), map[string][]string{
+		"public_key": {"operatoroperatoroperatoroperatoroperatorop="},
+	})
+
+	if err := (Router{Shell: shell}).WriteTunnel(siteGateway(), "http://203.0.113.10:8080"); err != nil {
+		t.Fatalf("WriteTunnel: %v", err)
+	}
+	if !strings.Contains(shell.render("network"), "operatoroperator") {
+		t.Errorf("the operator peer was removed:\n%s", shell.render("network"))
+	}
+}
+
+// An anonymous peer cannot be proven to belong to shadow9, even if an older
+// version may have created it. It must be left for the operator to identify.
+func TestAnAnonymousPeerFromAnEarlierJoin(t *testing.T) {
 	shell := newFakeShell()
 	shell.addSection("network", "", PeerSectionType(DefaultInterface), map[string][]string{
 		"public_key": {"oldoldoldoldoldoldoldoldoldoldoldoldoldoldo="},
@@ -211,8 +275,8 @@ func TestAnAnonymousPeerFromAnEarlierJoinIsRemoved(t *testing.T) {
 	if err := (Router{Shell: shell}).WriteTunnel(siteGateway(), "http://203.0.113.10:8080"); err != nil {
 		t.Fatalf("WriteTunnel: %v", err)
 	}
-	if strings.Contains(shell.render("network"), "oldoldold") {
-		t.Errorf("the peer from an earlier join is still there:\n%s", shell.render("network"))
+	if !strings.Contains(shell.render("network"), "oldoldold") {
+		t.Errorf("the anonymous peer was removed:\n%s", shell.render("network"))
 	}
 }
 
@@ -227,10 +291,18 @@ func TestFindZoneForNetworkReadsTheZoneCarryingTheLan(t *testing.T) {
 	shell.addSection("firewall", "", "zone", map[string][]string{
 		"name": {"trusted"}, "network": {"lan", "guest"},
 	})
-	if got := FindZoneForNetwork(Router{Shell: shell}, "lan"); got != "trusted" {
+	got, err := FindZoneForNetwork(Router{Shell: shell}, "lan")
+	if err != nil {
+		t.Fatalf("FindZoneForNetwork: %v", err)
+	}
+	if got != "trusted" {
 		t.Errorf("the LAN zone came back as %q, want \"trusted\"", got)
 	}
-	if got := FindZoneForNetwork(Router{Shell: shell}, "iot"); got != "" {
+	got, err = FindZoneForNetwork(Router{Shell: shell}, "iot")
+	if err != nil {
+		t.Fatalf("FindZoneForNetwork: %v", err)
+	}
+	if got != "" {
 		t.Errorf("a network in no zone came back as %q, want an empty string", got)
 	}
 }
@@ -295,6 +367,20 @@ func TestAFailedWriteCommitsNothingAndReloadsNothing(t *testing.T) {
 	}
 	if len(shell.reloaded) != 0 {
 		t.Errorf("services were reloaded after a failure: %v", shell.reloaded)
+	}
+}
+
+func TestAStagingFailureIncludesRevertFailure(t *testing.T) {
+	shell := newFakeShell()
+	shell.failing["uci set firewall.wgvpn.mtu_fix"] = "uci: I/O error"
+	shell.failing["uci revert network"] = "uci: revert failed"
+
+	err := (Router{Shell: shell}).WriteTunnel(siteGateway(), "http://203.0.113.10:8080")
+	if err == nil {
+		t.Fatal("WriteTunnel succeeded despite uci and its recovery both failing")
+	}
+	if !strings.Contains(err.Error(), "revert failed") {
+		t.Errorf("the recovery failure is missing from the error: %v", err)
 	}
 }
 

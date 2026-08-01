@@ -18,8 +18,8 @@ import (
 type answering map[string]string
 
 func (a answering) Run(_ context.Context, _ openwrt.Stdin, name string, args ...string) ([]byte, error) {
-	if name == "uci" && len(args) == 3 && args[0] == "-q" && args[1] == "get" {
-		if value, known := a[args[2]]; known {
+	if name == "uci" && len(args) == 2 && args[0] == "get" {
+		if value, known := a[args[1]]; known {
 			return []byte(value + "\n"), nil
 		}
 		return nil, fmt.Errorf("uci: Entry not found")
@@ -327,13 +327,25 @@ func TestChooseLanZoneFindsTheZoneCarryingTheLan(t *testing.T) {
 		"firewall.@zone[1].name":    "trusted",
 		"firewall.@zone[1].network": "lan guest",
 	})
-	if got := chooseLanZone("", router); got != "trusted" {
+	got, err := chooseLanZone("", router)
+	if err != nil {
+		t.Fatalf("chooseLanZone: %v", err)
+	}
+	if got != "trusted" {
 		t.Errorf("the LAN zone came out as %q", got)
 	}
-	if got := chooseLanZone("given", router); got != "given" {
+	got, err = chooseLanZone("given", router)
+	if err != nil {
+		t.Fatalf("chooseLanZone: %v", err)
+	}
+	if got != "given" {
 		t.Errorf("chooseLanZone ignored what was passed: %q", got)
 	}
-	if got := chooseLanZone("", routerAnswering(nil)); got != openwrt.DefaultLanZone {
+	got, err = chooseLanZone("", routerAnswering(nil))
+	if err != nil {
+		t.Fatalf("chooseLanZone: %v", err)
+	}
+	if got != openwrt.DefaultLanZone {
 		t.Errorf("with nothing to read the LAN zone came out as %q", got)
 	}
 }

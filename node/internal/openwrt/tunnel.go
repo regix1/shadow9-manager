@@ -1,6 +1,7 @@
 package openwrt
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -248,20 +249,33 @@ func (t Tunnel) SettingsCommands(hub string) []Command {
 // called "lan" on a stock image but nothing guarantees it, and writing a
 // forwarding to a zone that does not exist produces a firewall that does not
 // forward with no error at the time it is written.
-func FindZoneForNetwork(router Router, network string) string {
+func FindZoneForNetwork(router Router, network string) (string, error) {
 	const mostZonesWorthReading = 32
 	for i := 0; i < mostZonesWorthReading; i++ {
 		key := fmt.Sprintf("firewall.@zone[%d]", i)
-		name := router.Get(key + ".name")
+		name, err := router.Get(key + ".name")
+		if errors.Is(err, ErrNotFound) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
 		if name == "" {
-			return ""
+			return "", nil
 		}
 		// uci get prints a list as its values separated by spaces.
-		for _, member := range strings.Fields(router.Get(key + ".network")) {
+		members, err := router.Get(key + ".network")
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		for _, member := range strings.Fields(members) {
 			if member == network {
-				return name
+				return name, nil
 			}
 		}
 	}
-	return ""
+	return "", nil
 }

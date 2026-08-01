@@ -6,11 +6,14 @@ package openwrt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+var ErrNotFound = errors.New("UCI entry not found")
 
 // Stdin is text supplied to a command without putting it in the process list.
 type Stdin string
@@ -94,12 +97,22 @@ func (r Router) run(timeout time.Duration, stdin Stdin, name string, args ...str
 // Get reads a single UCI value. A missing value is an empty string, which is
 // what "uci -q get" already does, so a caller checks for "" rather than an
 // error it cannot act on.
-func (r Router) Get(key string) string {
-	out, err := r.run(uciTimeout, "", "uci", "-q", "get", key)
+func (r Router) Get(key string) (string, error) {
+	out, err := r.run(uciTimeout, "", "uci", "get", key)
 	if err != nil {
-		return ""
+		if uciNotFound(out, err) {
+			return "", fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		if message := strings.TrimSpace(string(out)); message != "" {
+			return "", fmt.Errorf("reading %s: %w: %s", key, err, message)
+		}
+		return "", fmt.Errorf("reading %s: %w", key, err)
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out)), nil
+}
+
+func uciNotFound(out []byte, err error) bool {
+	return bytes.Contains(out, []byte("Entry not found")) || strings.Contains(err.Error(), "Entry not found")
 }
 
 // Apply runs commands in order and stops at the first one that fails, unless
@@ -151,14 +164,16 @@ func (r Router) Require(name, packageName string) error {
 // each one goes, so this always deletes index zero until uci reports there is
 // nothing left. The bound stops a uci that never reports failure from
 // spinning forever.
-func (r Router) ClearPeers(iface string) {
-	const mostPeersWorthClearing = 64
-	key := fmt.Sprintf("network.@%s[0]", PeerSectionType(iface))
-	for i := 0; i < mostPeersWorthClearing; i++ {
-		if _, err := r.run(uciTimeout, "", "uci", "-q", "delete", key); err != nil {
-			return
-		}
+func (r Router) ClearPeers(iface string) error {
+	key := "network." + PeerSectionName(iface)
+	out, err := r.run(uciTimeout, "", "uci", "delete", key)
+	if err == nil || uciNotFound(out, err) {
+		return nil
 	}
+	if message := strings.TrimSpace(string(out)); message != "" {
+		return fmt.Errorf("deleting %s: %w: %s", key, err, message)
+	}
+	return fmt.Errorf("deleting %s: %w", key, err)
 }
 
 // PeerSectionType is the UCI section type netifd looks up peers by. It must

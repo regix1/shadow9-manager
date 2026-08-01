@@ -198,7 +198,11 @@ func join(args []string) error {
 	if err != nil {
 		return err
 	}
-	tunnel.LanZone = chooseLanZone(options.lanZone, router)
+	lanZone, err := chooseLanZone(options.lanZone, router)
+	if err != nil {
+		return err
+	}
+	tunnel.LanZone = lanZone
 	if tunnel.TakesOverTheDefaultRoute() {
 		fmt.Fprintf(os.Stderr,
 			"Note: the hub's allowed IPs contain a default route, so all of this router's\n"+
@@ -231,8 +235,14 @@ func refresh(args []string) error {
 		return fmt.Errorf("%w. This does not look like an OpenWrt router", err)
 	}
 
-	name := router.Get("shadow9.node.name")
-	keyText := router.Get("shadow9.node.refresh_key")
+	name, err := savedValue(router, "shadow9.node.name")
+	if err != nil {
+		return err
+	}
+	keyText, err := savedValue(router, "shadow9.node.refresh_key")
+	if err != nil {
+		return err
+	}
 	if name == "" || keyText == "" {
 		fmt.Println("This node has not enrolled; nothing to refresh.")
 		return nil
@@ -241,27 +251,47 @@ func refresh(args []string) error {
 	if err != nil {
 		return err
 	}
-	hub := router.Get("shadow9.node.hub")
+	hub, err := savedValue(router, "shadow9.node.hub")
+	if err != nil {
+		return err
+	}
 	if hub == "" {
 		return errors.New("the saved hub URL is empty")
 	}
-	iface := router.Get("shadow9.node.interface")
+	iface, err := savedValue(router, "shadow9.node.interface")
+	if err != nil {
+		return err
+	}
 	if iface == "" {
 		iface = openwrt.DefaultInterface
 	}
-	zone := router.Get("shadow9.node.zone")
+	zone, err := savedValue(router, "shadow9.node.zone")
+	if err != nil {
+		return err
+	}
 	if zone == "" {
 		zone = openwrt.DefaultZone
 	}
-	lanZone := router.Get("shadow9.node.lan_zone")
+	lanZone, err := savedValue(router, "shadow9.node.lan_zone")
+	if err != nil {
+		return err
+	}
 	if lanZone == "" {
 		lanZone = openwrt.DefaultLanZone
 	}
-	privateKey, err := wgkey.Parse(router.Get("shadow9.node.private_key"))
+	privateText, err := savedValue(router, "shadow9.node.private_key")
+	if err != nil {
+		return err
+	}
+	privateKey, err := wgkey.Parse(privateText)
 	if err != nil {
 		return fmt.Errorf("the saved private key is unusable: %w", err)
 	}
-	currentRevision, err := savedNumber(router.Get("shadow9.node.revision"), "revision")
+	revisionText, err := savedValue(router, "shadow9.node.revision")
+	if err != nil {
+		return err
+	}
+	currentRevision, err := savedNumber(revisionText, "revision")
 	if err != nil {
 		return err
 	}
@@ -279,16 +309,27 @@ func refresh(args []string) error {
 	if err := router.Require("wg", "wireguard-tools"); err != nil {
 		return err
 	}
-	listenPort, err := savedNumber(router.Get("network."+iface+".listen_port"), "listen port")
+	listenText, err := savedValue(router, "network."+iface+".listen_port")
 	if err != nil {
 		return err
 	}
-	mtuOverride, err := savedOverride(router.Get("shadow9.node.mtu_override"), "MTU", false)
+	listenPort, err := savedNumber(listenText, "listen port")
 	if err != nil {
 		return err
 	}
-	keepaliveOverride, err := savedOverride(
-		router.Get("shadow9.node.keepalive_override"), "keepalive", true)
+	mtuText, err := savedValue(router, "shadow9.node.mtu_override")
+	if err != nil {
+		return err
+	}
+	mtuOverride, err := savedOverride(mtuText, "MTU", false)
+	if err != nil {
+		return err
+	}
+	keepaliveText, err := savedValue(router, "shadow9.node.keepalive_override")
+	if err != nil {
+		return err
+	}
+	keepaliveOverride, err := savedOverride(keepaliveText, "keepalive", true)
 	if err != nil {
 		return err
 	}
@@ -314,6 +355,14 @@ func savedNumber(text, name string) (int, error) {
 		return 0, fmt.Errorf("the saved %s is unusable", name)
 	}
 	return value, nil
+}
+
+func savedValue(router openwrt.Router, key string) (string, error) {
+	value, err := router.Get(key)
+	if errors.Is(err, openwrt.ErrNotFound) {
+		return "", nil
+	}
+	return value, err
 }
 
 func savedOverride(text, name string, zeroAllowed bool) (*int, error) {
@@ -347,7 +396,10 @@ func chooseName(given string, router openwrt.Router) (string, error) {
 	if given != "" {
 		return openwrt.PeerName(given)
 	}
-	hostname := openwrt.Hostname(router)
+	hostname, err := openwrt.Hostname(router)
+	if err != nil {
+		return "", err
+	}
 	if hostname == "" {
 		return "", fmt.Errorf("this router has no hostname set, pass -name")
 	}
@@ -379,8 +431,15 @@ func chooseRoutes(advertise string, noRoutes bool, router openwrt.Router) ([]str
 }
 
 func chooseKey(keepKey bool, iface, name string, router openwrt.Router) (private, public wgkey.Key, err error) {
-	if router.Get("shadow9.node.name") == name {
-		stored := router.Get("shadow9.node.private_key")
+	savedName, err := savedValue(router, "shadow9.node.name")
+	if err != nil {
+		return private, public, err
+	}
+	if savedName == name {
+		stored, err := savedValue(router, "shadow9.node.private_key")
+		if err != nil {
+			return private, public, err
+		}
 		private, err = wgkey.Parse(stored)
 		if err != nil {
 			return private, public, fmt.Errorf("the saved private key for %s is unusable: %w", name, err)
@@ -391,7 +450,10 @@ func chooseKey(keepKey bool, iface, name string, router openwrt.Router) (private
 	if !keepKey {
 		return wgkey.Generate()
 	}
-	stored := router.Get("network." + iface + ".private_key")
+	stored, err := savedValue(router, "network."+iface+".private_key")
+	if err != nil {
+		return private, public, err
+	}
 	if stored == "" {
 		return private, public, fmt.Errorf(
 			"-keep-key was given but network.%s.private_key is empty, so there is no key to keep", iface)
@@ -407,14 +469,18 @@ func chooseKey(keepKey bool, iface, name string, router openwrt.Router) (private
 // chooseLanZone falls back to the flag, then to reading which zone carries the
 // LAN, then to the stock name. A forwarding written to a zone that does not
 // exist produces a firewall that quietly forwards nothing.
-func chooseLanZone(given string, router openwrt.Router) string {
+func chooseLanZone(given string, router openwrt.Router) (string, error) {
 	if given != "" {
-		return given
+		return given, nil
 	}
-	if found := openwrt.FindZoneForNetwork(router, "lan"); found != "" {
-		return found
+	found, err := openwrt.FindZoneForNetwork(router, "lan")
+	if err != nil {
+		return "", err
 	}
-	return openwrt.DefaultLanZone
+	if found != "" {
+		return found, nil
+	}
+	return openwrt.DefaultLanZone, nil
 }
 
 func buildTunnel(answer enroll.Response, privateKey wgkey.Key,
