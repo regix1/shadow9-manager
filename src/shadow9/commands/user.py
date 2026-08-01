@@ -290,7 +290,11 @@ def register_user_commands(app: typer.Typer) -> None:
             console.print("\n[bold]Password:[/bold]")
             console.print("  [dim]Leave blank for a secure random password.[/dim]\n")
             password_input = typer.prompt(
-                "  Password (enter for random)", default="", show_default=False, hide_input=False
+                "  Password (enter for random)",
+                default="",
+                show_default=False,
+                hide_input=True,
+                confirmation_prompt=True,
             )
             if password_input.strip():
                 password = password_input.strip()
