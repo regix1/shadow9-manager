@@ -53,6 +53,7 @@ from .commands import (
     register_api_commands,
     register_wireguard_commands,
     register_component_commands,
+    register_bridge_commands,
 )
 console = Console()
 
@@ -131,6 +132,7 @@ register_util_commands(app)
 register_api_commands(app)
 register_wireguard_commands(app)
 register_component_commands(app)
+register_bridge_commands(app)
 
 
 # Entry point for the CLI

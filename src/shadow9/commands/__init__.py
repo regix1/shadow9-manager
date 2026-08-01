@@ -17,6 +17,7 @@ from .utils import register_util_commands
 from .api import register_api_commands
 from .wireguard import register_wireguard_commands
 from .components import register_component_commands
+from .bridges import register_bridge_commands
 
 __all__ = [
     "register_server_commands",
@@ -26,4 +27,5 @@ __all__ = [
     "register_api_commands",
     "register_wireguard_commands",
     "register_component_commands",
+    "register_bridge_commands",
 ]
