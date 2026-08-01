@@ -998,6 +998,85 @@ class TestStoredRecordsAreChecked:
 
         assert creds_file.read_bytes() == original
 
+    def test_an_out_of_range_port_update_keeps_the_store_readable(
+        self, tmp_path: Path
+    ) -> None:
+        creds_file = tmp_path / "credentials.enc"
+        auth = AuthManager(credentials_file=creds_file)
+        auth.add_credential(
+            StoredCredential(
+                username="alice",
+                password_hash=_CHEAP_HASHER.hash("alice"),
+                created_at="2026-01-01T00:00:00",
+            )
+        )
+
+        rejected = False
+        try:
+            auth.update_credential("alice", {"allowed_ports": [70000]})
+        except ValueError:
+            rejected = True
+
+        reloaded = AuthManager(credentials_file=creds_file)
+        assert reloaded.list_users() == ["alice"]
+        assert reloaded.load_error is None
+        assert rejected is True
+
+    def test_a_negative_rate_limit_update_keeps_the_store_readable(
+        self, tmp_path: Path
+    ) -> None:
+        creds_file = tmp_path / "credentials.enc"
+        auth = AuthManager(credentials_file=creds_file)
+        auth.add_credential(
+            StoredCredential(
+                username="alice",
+                password_hash=_CHEAP_HASHER.hash("alice"),
+                created_at="2026-01-01T00:00:00",
+            )
+        )
+
+        rejected = False
+        try:
+            auth.update_credential("alice", {"rate_limit": -1})
+        except ValueError:
+            rejected = True
+
+        reloaded = AuthManager(credentials_file=creds_file)
+        assert reloaded.list_users() == ["alice"]
+        assert reloaded.load_error is None
+        assert rejected is True
+
+    def test_an_invalid_added_credential_keeps_the_store_readable(
+        self, tmp_path: Path
+    ) -> None:
+        creds_file = tmp_path / "credentials.enc"
+        auth = AuthManager(credentials_file=creds_file)
+        auth.add_credential(
+            StoredCredential(
+                username="alice",
+                password_hash=_CHEAP_HASHER.hash("alice"),
+                created_at="2026-01-01T00:00:00",
+            )
+        )
+
+        rejected = False
+        try:
+            auth.add_credential(
+                StoredCredential(
+                    username="bob",
+                    password_hash=_CHEAP_HASHER.hash("bob"),
+                    created_at="2026-01-01T00:00:00",
+                    allowed_ports=[70000],
+                )
+            )
+        except ValueError:
+            rejected = True
+
+        reloaded = AuthManager(credentials_file=creds_file)
+        assert reloaded.list_users() == ["alice"]
+        assert reloaded.load_error is None
+        assert rejected is True
+
     def test_a_hash_nothing_can_verify_is_refused_at_load(self, tmp_path):
         """Every other field was checked, so this one loaded clean and failed at login.
 

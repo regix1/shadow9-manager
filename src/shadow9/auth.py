@@ -991,6 +991,11 @@ class AuthManager:
                 logger.warning("User already exists", username=credential.username)
                 return False
 
+            _checked_credential(
+                credential.username,
+                _record_for_file(credential),
+                self._tunnel_network,
+            )
             self._credentials[credential.username] = credential
             self._save_credentials()
 
@@ -1030,7 +1035,7 @@ class AuthManager:
             The stored record, or None if there is no such user
 
         Raises:
-            ValueError: when a peer setting is not one a config could be rendered from
+            ValueError: when the completed record is not one the loader would accept
         """
         with self._mutating():
             cred = self._credentials.get(username)
@@ -1041,12 +1046,14 @@ class AuthManager:
                 if name in _CREDENTIAL_FIELDS:
                     setattr(cred, name, value)
 
-            # checked before the write rather than after, because the load refuses a
+            # Checked before the write rather than after, because the load refuses a
             # record it cannot use and refusing is what sets load_error, which stops every
-            # later write. A peer key with a character missing would otherwise be written
-            # here and lock the whole store on the next start, with the users it holds
-            # still on disk and no way in. Raising leaves _mutating to put the table back.
-            _check_peer_fields(cred, self._tunnel_network)
+            # later write. Raising here leaves _mutating to put the table back.
+            _checked_credential(
+                username,
+                _record_for_file(cred),
+                self._tunnel_network,
+            )
 
             self._save_credentials()
 
