@@ -86,7 +86,7 @@ Shadow9 routes SOCKS5 traffic through the Tor network with per-user settings. Ea
 
 ## Requirements
 
-- **Python** — 3.10 or higher
+- **Python** — 3.12 or higher
 - **OS** — Linux, macOS, or Windows
 - **Tor** — 0.4.8+ recommended for Conflux support
 - **Pluggable transports** — obfs4proxy and snowflake-client (optional, for bridges)

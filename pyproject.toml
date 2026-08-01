@@ -9,7 +9,10 @@ name = "shadow9-manager"
 dynamic = ["version"]
 description = "Secure SOCKS5 proxy with Tor network support"
 readme = "README.md"
-requires-python = ">=3.10"
+# 3.12 is the floor because the tunnel-network check keys off IPv4Network.is_private, and
+# 3.10 and 3.11 report 0.0.0.0/0 as private. On those versions a tunnel network covering
+# the whole internet is accepted instead of refused.
+requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
     {name = "Shadow9 Team"}
@@ -19,8 +22,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Internet :: Proxy Servers",
     "Topic :: Security",
@@ -81,10 +82,10 @@ where = ["src"]
 
 [tool.black]
 line-length = 100
-target-version = ['py310', 'py311', 'py312']
+target-version = ['py312']
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 
@@ -96,7 +97,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["F", "E", "W", "UP", "B", "SIM", "RUF"]
