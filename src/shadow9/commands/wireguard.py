@@ -1487,14 +1487,29 @@ def _print_join_command(cfg: Config, public_key: str, api_url: Optional[str], ho
     _print_firewall_notice(cfg)
     _print_node_download(url)
 
-    console.print("\n[bold]Run this on the machine that should join:[/bold]")
+    console.print("\n[bold]Choose the command for the machine that should join:[/bold]")
+    console.print("\n[bold]OpenWrt router with shadow9-node installed:[/bold]")
     # soft_wrap keeps the token on one line. A token rich has folded across a terminal
     # width is a token that gets copied wrong, and the error it produces is "not
     # recognised by this hub", which points nowhere near the real cause
+    console.print(
+        f"  [cyan]shadow9-node join -hub {url} -token {issued}[/cyan]",
+        soft_wrap=True,
+    )
+    console.print(
+        "[dim]The router advertises its detected LAN by default. Add "
+        "-advertise 192.168.1.0/24 to choose it explicitly, or -no-routes if "
+        "this router should not be a site gateway.[/dim]"
+    )
+
+    console.print("\n[bold]On another host with Shadow9 Manager installed:[/bold]")
     console.print(f"  [cyan]shadow9 wg join --url {url} --token {issued}[/cyan]", soft_wrap=True)
     console.print(
-        f"[dim]Add --route 192.168.1.0/24 if that machine is a gateway for a LAN. "
-        f"The token is good for one join and expires in {hours} hours.[/dim]"
+        "[dim]Add --route 192.168.1.0/24 if that machine is a gateway for a LAN.[/dim]"
+    )
+    console.print(
+        f"[dim]Both commands contain the same one-use token. Run only one. "
+        f"The token expires in {hours} hours.[/dim]"
     )
     console.print(
         "[dim]The last part of the token is the hub's public key, which is not a "

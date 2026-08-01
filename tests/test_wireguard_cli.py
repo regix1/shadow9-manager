@@ -183,13 +183,18 @@ class TestInit:
         assert key_file.exists()
         assert hub_config.exists()
         assert "ListenPort = 51820" in hub_config.read_text()
-        assert "shadow9 wg join" in _flat(output)
-        assert "--token" in _flat(output)
-        assert "host firewall and the cloud firewall or security group" in _flat(output)
-        assert "TCP 8081" in _flat(output)
-        assert "UDP 51820" in _flat(output)
-        assert "Keep TCP 8080, the admin API port, closed to the internet" in _flat(output)
-        assert "requires iptables" in _flat(output)
+        flat = _flat(output)
+        assert "shadow9-node join -hub http://198.51.100.7:8081 -token " in flat
+        assert "-advertise 192.168.1.0/24" in flat
+        assert "shadow9 wg join --url http://198.51.100.7:8081 --token " in flat
+        assert "shadow9-node wg join" not in flat
+        assert "shadow9-node join --url" not in flat
+        assert "Both commands contain the same one-use token. Run only one." in flat
+        assert "host firewall and the cloud firewall or security group" in flat
+        assert "TCP 8081" in flat
+        assert "UDP 51820" in flat
+        assert "Keep TCP 8080, the admin API port, closed to the internet" in flat
+        assert "requires iptables" in flat
 
     def test_a_bare_endpoint_uses_the_selected_listen_port(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path
@@ -582,7 +587,7 @@ class TestInit:
         output = _flat(_init_hub(runner, cli_app, hub_root))
 
         assert output.index("Hub activation") < output.index(
-            "Run this on the machine that should join"
+            "Choose the command for the machine that should join"
         )
 
     def test_no_apply_runs_no_host_commands(
