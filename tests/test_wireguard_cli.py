@@ -491,6 +491,67 @@ class TestInit:
         assert not (_wireguard_dir(hub_root) / "hub.key").exists()
         assert not (_wireguard_dir(hub_root) / "wg0.conf").exists()
 
+    def test_force_stops_the_interface_and_preserves_the_boot_config(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        target = system_dir / "wg0.conf"
+        target.write_text("hand written\n", encoding="utf-8")
+        config = _wireguard_dir(hub_root) / "wg0.conf"
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick", "systemctl", "sysctl", "iptables"},
+            outputs={("wg", "show", "interfaces"): "wg0\n"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+
+        output = _flat(_init_hub(runner, cli_app, hub_root, "--force"))
+
+        down = host.commands.index(("wg-quick", "down", "wg0"))
+        up = host.commands.index(("wg-quick", "up", str(config)))
+        assert down < up
+        assert target.is_symlink()
+        assert target.resolve() == config.resolve()
+        saved = system_dir / "wg0.conf.before-shadow9"
+        assert saved.read_text(encoding="utf-8") == "hand written\n"
+        assert "Previous boot config" in output
+
+    def test_force_with_no_apply_leaves_the_existing_interface_and_boot_config_alone(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        target = system_dir / "wg0.conf"
+        target.write_text("hand written\n", encoding="utf-8")
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick"},
+            outputs={("wg", "show", "interfaces"): "wg0\n"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+
+        output = _flat(_init_hub(runner, cli_app, hub_root, "--force", "--no-apply"))
+
+        assert ("wg-quick", "down", "wg0") not in host.commands
+        assert not any(command[:2] == ("wg-quick", "up") for command in host.commands)
+        assert not target.is_symlink()
+        assert target.read_text(encoding="utf-8") == "hand written\n"
+        assert "Host activation was skipped by --no-apply" in output
+
     def test_a_root_failure_keeps_the_wg_quick_message_in_the_summary(
         self,
         runner: CliRunner,
@@ -770,6 +831,172 @@ class TestInit:
         rewritten = (_wireguard_dir(hub_root) / "wg0.conf").read_text()
         assert "MASQUERADE" in rewritten
         assert "-o eth0" in rewritten
+
+
+class TestRestore:
+    @pytest.mark.parametrize(
+        ("interface", "selection"),
+        [("wg0", []), ("office", ["--interface", "office"])],
+    )
+    def test_restore_uses_the_newest_saved_config_for_the_selected_interface(
+        self,
+        interface: str,
+        selection: list[str],
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        generated = _wireguard_dir(hub_root) / f"{interface}.conf"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text("shadow9\n", encoding="utf-8")
+        target = system_dir / f"{interface}.conf"
+        target.symlink_to(generated.resolve())
+        first = system_dir / f"{interface}.conf.before-shadow9"
+        latest = system_dir / f"{interface}.conf.before-shadow9.1"
+        first.write_text("first\n", encoding="utf-8")
+        latest.write_text("latest\n", encoding="utf-8")
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick"},
+            outputs={("wg", "show", "interfaces"): f"{interface}\n"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+
+        result = runner.invoke(
+            cli_app,
+            [
+                "wg",
+                "restore",
+                *selection,
+                "--force",
+                "--config",
+                _config_file(hub_root),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        down = host.commands.index(("wg-quick", "down", interface))
+        up = host.commands.index(("wg-quick", "up", interface))
+        assert down < up
+        assert target.read_text(encoding="utf-8") == "latest\n"
+        assert first.read_text(encoding="utf-8") == "first\n"
+        assert not latest.exists()
+        shadow9_link = system_dir / f"{interface}.conf.shadow9"
+        assert shadow9_link.is_symlink()
+        assert shadow9_link.resolve() == generated.resolve()
+        assert f"Interface '{interface}' is up" in _flat(result.output)
+
+    def test_restore_refuses_to_replace_a_config_that_is_not_shadow9s_link(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        target = system_dir / "wg0.conf"
+        target.write_text("current\n", encoding="utf-8")
+        saved = system_dir / "wg0.conf.before-shadow9"
+        saved.write_text("saved\n", encoding="utf-8")
+        host = _Host(root=True)
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "restore", "--force", "--config", _config_file(hub_root)],
+        )
+
+        assert result.exit_code == 1
+        assert "not Shadow9's managed config link" in _flat(result.output)
+        assert target.read_text(encoding="utf-8") == "current\n"
+        assert saved.read_text(encoding="utf-8") == "saved\n"
+        assert host.commands == []
+
+    def test_restore_rolls_back_when_the_saved_interface_will_not_start(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        generated = _wireguard_dir(hub_root) / "office.conf"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text("shadow9\n", encoding="utf-8")
+        target = system_dir / "office.conf"
+        saved = system_dir / "office.conf.before-shadow9"
+        saved.write_text("saved\n", encoding="utf-8")
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick"},
+            outputs={("wg", "show", "interfaces"): "office\n"},
+            returncodes={("wg-quick", "up", "office"): 1},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+
+        result = runner.invoke(
+            cli_app,
+            [
+                "wg",
+                "restore",
+                "--interface",
+                "office",
+                "--force",
+                "--config",
+                _config_file(hub_root),
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "preserved config was put back" in _flat(result.output)
+        assert not target.exists()
+        assert saved.read_text(encoding="utf-8") == "saved\n"
+        assert ("wg-quick", "down", str(generated)) in host.commands
+        assert ("wg-quick", "up", "office") in host.commands
+        assert ("wg-quick", "up", str(generated)) in host.commands
+
+    def test_restore_can_be_cancelled_without_changing_either_config(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        generated = _wireguard_dir(hub_root) / "wg0.conf"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text("shadow9\n", encoding="utf-8")
+        target = system_dir / "wg0.conf"
+        target.symlink_to(generated.resolve())
+        saved = system_dir / "wg0.conf.before-shadow9"
+        saved.write_text("saved\n", encoding="utf-8")
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick"},
+            outputs={("wg", "show", "interfaces"): "wg0\n"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "restore", "--config", _config_file(hub_root)],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert target.is_symlink()
+        assert saved.read_text(encoding="utf-8") == "saved\n"
+        assert not any(command[0] == "wg-quick" for command in host.commands)
 
 
 class TestJoinToken:
@@ -1776,12 +2003,54 @@ class TestTheWizard:
         host = _Host(binaries={"wg"}, outputs={("wg", "show", "interfaces"): "wg0\n"})
         monkeypatch.setattr(wg_commands, "_host", host)
 
-        result = runner.invoke(cli_app, ["wg", "setup", "--config", _config_file(hub_root)])
+        result = runner.invoke(
+            cli_app,
+            ["wg", "setup", "--config", _config_file(hub_root)],
+            input="n\n",
+        )
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0, result.output
         assert "interface 'wg0' already exists" in _flat(result.output)
+        assert "Replace the existing WireGuard interface and boot config?" in _flat(result.output)
         assert "Step 1: the address peers dial" not in _flat(result.output)
         assert "Endpoint" not in _flat(result.output)
+
+    def test_the_wizard_replaces_the_interface_after_confirmation(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        system_dir.mkdir(parents=True)
+        target = system_dir / "wg0.conf"
+        target.write_text("hand written\n", encoding="utf-8")
+        config = _wireguard_dir(hub_root) / "wg0.conf"
+        host = _Host(
+            root=True,
+            binaries={"wg", "wg-quick", "systemctl", "sysctl", "iptables"},
+            outputs={("wg", "show", "interfaces"): "wg0\n"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+        answers = "\n".join(["y", ROUTABLE_ENDPOINT, "10.9.0.0/24", "51820", "n", "y"]) + "\n"
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "setup", "--config", _config_file(hub_root)],
+            input=answers,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert ("wg-quick", "down", "wg0") in host.commands
+        assert ("wg-quick", "up", str(config)) in host.commands
+        assert target.is_symlink()
+        saved = system_dir / "wg0.conf.before-shadow9"
+        assert saved.read_text(encoding="utf-8") == "hand written\n"
 
     def test_the_wizard_refuses_an_endpoint_it_cannot_use(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path

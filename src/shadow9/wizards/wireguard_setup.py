@@ -62,9 +62,19 @@ def run_wireguard_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> Option
     from ..commands.wireguard import _interface_clash
 
     clash = _interface_clash(cfg.wireguard.interface)
+    replace_interface = False
     if clash is not None:
-        console.print(f"[red]{clash}[/red]")
-        raise typer.Exit(1)
+        console.print(f"[yellow]{clash}[/yellow]")
+        console.print(
+            "[dim]Replacing it stops that interface and preserves a conflicting boot "
+            "config beside the original path.[/dim]"
+        )
+        if not typer.confirm(
+            "Replace the existing WireGuard interface and boot config?", default=False
+        ):
+            console.print("[yellow]Left as it was.[/yellow]")
+            return None
+        replace_interface = True
 
     if load_hub_private_key() is not None:
         console.print("[yellow]This host already has a WireGuard hub key.[/yellow]")
@@ -110,6 +120,7 @@ def run_wireguard_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> Option
         force=True,
         no_apply=False,
         config=config_path,
+        replace_interface=replace_interface,
     )
 
     return answers

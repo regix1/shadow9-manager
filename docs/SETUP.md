@@ -61,6 +61,7 @@ Other options worth knowing:
 | `--port` | A different UDP port. |
 | `--masquerade-interface eth0` | Only needed if full-tunnel devices should reach the internet. |
 | `--token-hours` | How long the printed join token lasts. Default 24. |
+| `--force` | Stop and replace the selected interface and boot config, and replace the hub key. Every peer must rejoin. |
 | `--no-apply` | Write the key and config without changing the host or starting the tunnel. |
 
 `shadow9 wg setup` walks the same thing with prompts, including the endpoint suggestion.
@@ -81,12 +82,36 @@ the other three. The summary keeps the text printed by a failed command, so an e
 as `wg0 already exists` is not flattened into a permission hint.
 
 Before writing a hub key or config, init checks for a live WireGuard interface with the
-selected name and for `/etc/wireguard/<name>.conf`. If this host already runs `wg0`, choose
-another name, for example:
+selected name and for `/etc/wireguard/<name>.conf`. If this host already runs `wg0`, either
+choose another name:
 
 ```
 shadow9 wg init --interface s9hub --endpoint 203.0.113.10:51820
 ```
+
+Or deliberately replace it:
+
+```
+shadow9 wg init --force --endpoint 203.0.113.10:51820
+```
+
+The forced path stops the live interface before starting shadow9's replacement. A
+conflicting boot config is moved beside itself as `wg0.conf.before-shadow9` (with a numeric
+suffix if needed), then replaced by shadow9's link. `shadow9 wg setup` asks for the same
+confirmation interactively.
+
+To put the newest preserved config back and restart that interface:
+
+```
+shadow9 wg restore
+shadow9 wg restore --interface office
+```
+
+The configured interface is used when `--interface` is omitted, so the first command restores
+`wg0` on a default setup. Use `--backup /etc/wireguard/office.conf.before-shadow9` to select a
+specific saved version and `--force` to skip confirmation. Restore only replaces Shadow9's
+managed link (or an empty target), keeps that link as `<interface>.conf.shadow9`, and rolls the
+filesystem back if the preserved interface cannot start.
 
 The chosen name is saved in `wireguard.interface`. Hub config regeneration, endpoint
 changes, device configs, activation, the FORWARD rule and handshake checks keep using it.
@@ -117,9 +142,9 @@ sudo ln -s /opt/shadow9/config/wireguard/wg0.conf /etc/wireguard/wg0.conf
 sudo systemctl enable wg-quick@wg0
 ```
 
-If `/etc/wireguard/wg0.conf` already exists, init stops before writing anything and tells
-you to use `--interface`. Inspect the existing file before moving or removing it; shadow9
-does not replace it.
+If `/etc/wireguard/wg0.conf` already exists, init stops before writing anything unless
+`--force` was given. The forced path preserves the old entry before installing shadow9's
+link.
 
 `wg-quick` reads the file when the interface comes up, so after a change that rewrites
 the hub config, restart it:

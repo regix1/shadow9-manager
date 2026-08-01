@@ -274,7 +274,11 @@ def init(
         int, typer.Option("--token-hours", help="How long the printed join token lasts")
     ] = DEFAULT_TOKEN_HOURS,
     force: Annotated[
-        bool, typer.Option("--force", help="Replace an existing hub key. Every peer must rejoin")
+        bool,
+        typer.Option(
+            "--force",
+            help="Replace an existing interface, boot config, and hub key. Every peer must rejoin",
+        ),
     ] = False,
     no_apply: Annotated[
         bool, typer.Option("--no-apply", help="Write the config but do not bring it up")
@@ -318,6 +322,8 @@ def _init_impl(
     force: bool,
     no_apply: bool,
     config: str,
+    *,
+    replace_interface: bool | None = None,
 ) -> None:
     """Implementation of init."""
     config_file = Path(config)
@@ -329,8 +335,9 @@ def _init_impl(
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
 
+    replace = force if replace_interface is None else replace_interface
     clash = _interface_clash(cfg.wireguard.interface)
-    if clash is not None:
+    if clash is not None and not replace:
         console.print(f"[red]{clash}[/red]")
         raise typer.Exit(1)
 
@@ -426,7 +433,9 @@ def _init_impl(
     if no_apply:
         activation = _manual_activation(rendered.written[0], topology.tunnel_network.version)
     else:
-        activation = _activate_hub(rendered.written[0], topology.tunnel_network.version)
+        activation = _activate_hub(
+            rendered.written[0], topology.tunnel_network.version, replace=replace
+        )
 
     if not topology.hub.endpoint:
         console.print(
@@ -449,6 +458,44 @@ def _init_impl(
     _print_activation_summary(activation)
     _print_cleartext_notice()
     _print_join_command(cfg, keypair.public_key, api_url, token_hours)
+
+
+@wg_app.command("restore")
+def restore(
+    interface: Annotated[
+        str | None,
+        typer.Option(
+            "--interface",
+            "-i",
+            help="Interface whose preserved config should return (configured interface if omitted)",
+        ),
+    ] = None,
+    backup: Annotated[
+        Path | None,
+        typer.Option(
+            "--backup",
+            "-b",
+            help="Specific .before-shadow9 config to restore (newest if omitted)",
+        ),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="Skip the confirmation prompt")
+    ] = False,
+    config: Annotated[
+        str, typer.Option("--config", "-c", help="Path to configuration file")
+    ] = DEFAULT_CONFIG_FILE,
+) -> None:
+    """Restore a WireGuard config preserved by a forced hub setup."""
+    try:
+        cfg = _load_config(config)
+        selected = checked_interface(interface or cfg.wireguard.interface)
+        saved = _saved_config(selected, backup)
+        _restore_config(selected, saved, force)
+    except (OSError, ValueError) as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
 
 
 @wg_app.command("token")
@@ -1090,6 +1137,207 @@ def _interface_clash(interface: str, host: Host | None = None) -> str | None:
     return None
 
 
+def _saved_config(interface: str, backup: Path | None = None) -> Path:
+    """Select a config preserved before Shadow9 took over an interface."""
+    system_dir = Path(os.path.abspath(WIREGUARD_SYSTEM_DIR))
+    prefix = f"{interface}.conf.before-shadow9"
+
+    if backup is not None:
+        candidate = Path(os.path.abspath(backup.expanduser()))
+        suffix = candidate.name.removeprefix(prefix)
+        named_for_interface = candidate.name.startswith(prefix) and (
+            not suffix or (suffix.startswith(".") and suffix[1:].isdigit())
+        )
+        if candidate.parent != system_dir or not named_for_interface:
+            raise ValueError(
+                f"{candidate} is not a preserved config for interface '{interface}' in {system_dir}"
+            )
+        if not candidate.exists() and not candidate.is_symlink():
+            raise ValueError(f"Preserved WireGuard config not found: {candidate}")
+        return candidate
+
+    try:
+        entries = list(system_dir.iterdir())
+    except OSError as error:
+        raise ValueError(
+            f"Could not read preserved WireGuard configs in {system_dir}: {error}"
+        ) from error
+
+    candidates: list[tuple[int, Path]] = []
+    for entry in entries:
+        suffix = entry.name.removeprefix(prefix)
+        if entry.name == prefix:
+            revision = 0
+        elif entry.name.startswith(prefix) and suffix.startswith(".") and suffix[1:].isdigit():
+            revision = int(suffix[1:])
+        else:
+            continue
+        if entry.exists() or entry.is_symlink():
+            candidates.append((revision, entry))
+
+    if not candidates:
+        raise ValueError(
+            f"No preserved config was found for interface '{interface}' in {system_dir}"
+        )
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
+def _restore_config(
+    interface: str,
+    saved: Path,
+    force: bool,
+    host: Host | None = None,
+) -> None:
+    """Replace Shadow9's system config with a preserved config and bring it up."""
+    machine = host or _host
+    target = WIREGUARD_SYSTEM_DIR / f"{interface}.conf"
+    generated = config_path(interface)
+
+    if machine.is_windows():
+        raise ValueError("WireGuard system configs can only be restored on Linux")
+
+    try:
+        occupied = target.exists() or target.is_symlink()
+        managed = (
+            occupied
+            and target.is_symlink()
+            and target.resolve(strict=False) == generated.resolve(strict=False)
+        )
+    except (OSError, RuntimeError) as error:
+        raise ValueError(
+            f"Could not inspect the current WireGuard config at {target}: {error}"
+        ) from error
+
+    if occupied and not managed:
+        raise ValueError(
+            f"Refusing to replace {target}: it is not Shadow9's managed config link. "
+            f"The preserved config remains at {saved}."
+        )
+    if not machine.is_root():
+        raise ValueError(f"Root is required to restore {saved} to {target}")
+
+    binary = machine.which("wg-quick")
+    if binary is None:
+        raise ValueError("wg-quick is required to restore a WireGuard interface")
+    interfaces = machine.interfaces()
+    if interfaces is None:
+        raise ValueError("Could not determine which WireGuard interfaces are running")
+    was_live = interface in interfaces
+    if was_live and not occupied and not generated.is_file():
+        raise ValueError(
+            f"Interface '{interface}' is running, but its Shadow9 config is missing at {generated}"
+        )
+
+    console.print(
+        f"[yellow]Restoring {saved} replaces Shadow9's boot config for interface "
+        f"'{interface}' and restarts that interface.[/yellow]"
+    )
+    if not force and not typer.confirm("Restore this WireGuard config?", default=False):
+        console.print("[dim]Keeping the Shadow9 interface[/dim]")
+        return
+
+    if was_live:
+        down_arg = interface if occupied else str(generated)
+        console.print(f"[cyan]Stopping interface '{interface}' before restoring it.[/cyan]")
+        try:
+            stopped = machine.run([binary, "down", down_arg])
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError(f"Could not stop interface '{interface}': {error}") from error
+        if stopped.returncode != 0:
+            detail = (
+                stopped.stderr.strip()
+                or stopped.stdout.strip()
+                or f"wg-quick exited {stopped.returncode}"
+            )
+            raise ValueError(
+                f"Could not stop interface '{interface}': {detail}. The backup was not changed."
+            )
+
+    displaced: Path | None = None
+    if occupied:
+        displaced = target.with_name(f"{target.name}.shadow9")
+        suffix = 1
+        while displaced.exists() or displaced.is_symlink():
+            displaced = target.with_name(f"{target.name}.shadow9.{suffix}")
+            suffix += 1
+
+    try:
+        if displaced is not None:
+            target.replace(displaced)
+        saved.replace(target)
+    except OSError as error:
+        try:
+            if displaced is not None and not target.exists() and not target.is_symlink():
+                displaced.replace(target)
+        except OSError as rollback_error:
+            raise ValueError(
+                f"Could not restore {saved}: {error}. Could not put the Shadow9 link back: "
+                f"{rollback_error}"
+            ) from error
+        if was_live:
+            restart_arg = interface if occupied else str(generated)
+            try:
+                restarted = machine.run([binary, "up", restart_arg])
+            except (OSError, subprocess.SubprocessError) as restart_error:
+                raise ValueError(
+                    f"Could not restore {saved}: {error}. The Shadow9 config was put back, "
+                    f"but its interface could not restart: {restart_error}"
+                ) from error
+            if restarted.returncode != 0:
+                detail = restarted.stderr.strip() or restarted.stdout.strip()
+                raise ValueError(
+                    f"Could not restore {saved}: {error}. The Shadow9 config was put back, "
+                    f"but its interface could not restart: "
+                    f"{detail or f'wg-quick exited {restarted.returncode}'}"
+                ) from error
+        raise ValueError(f"Could not restore {saved}: {error}") from error
+
+    try:
+        started = machine.run([binary, "up", interface])
+    except (OSError, subprocess.SubprocessError) as error:
+        started = subprocess.CompletedProcess([binary, "up", interface], 1, "", str(error))
+
+    if started.returncode != 0:
+        detail = (
+            started.stderr.strip()
+            or started.stdout.strip()
+            or f"wg-quick exited {started.returncode}"
+        )
+        try:
+            target.replace(saved)
+            if displaced is not None:
+                displaced.replace(target)
+        except OSError as rollback_error:
+            raise ValueError(
+                f"The restored interface did not start: {detail}. Rollback also failed: "
+                f"{rollback_error}. The preserved paths must be repaired manually."
+            ) from rollback_error
+
+        restart_detail = ""
+        if was_live:
+            restart_arg = interface if occupied else str(generated)
+            try:
+                restarted = machine.run([binary, "up", restart_arg])
+            except (OSError, subprocess.SubprocessError) as error:
+                restart_detail = f" The previous interface could not be restarted: {error}."
+            else:
+                if restarted.returncode != 0:
+                    message = restarted.stderr.strip() or restarted.stdout.strip()
+                    restart_detail = (
+                        f" The previous interface could not be restarted: "
+                        f"{message or f'wg-quick exited {restarted.returncode}'}."
+                    )
+        raise ValueError(
+            f"The restored interface did not start: {detail}. The preserved config was put back "
+            f"at {saved}.{restart_detail}"
+        )
+
+    console.print(f"[green]Restored WireGuard config:[/green] {target}")
+    if displaced is not None:
+        console.print(f"[dim]Shadow9's config link was kept at {displaced}[/dim]")
+    console.print(f"[green]Interface '{interface}' is up.[/green]")
+
+
 def _with_hub_settings(
     cfg: Config,
     endpoint: Optional[str],
@@ -1592,20 +1840,24 @@ def _manual_activation(
 
 
 def _activate_hub(
-    path: Path, network_version: int, host: Host | None = None
+    path: Path,
+    network_version: int,
+    host: Host | None = None,
+    *,
+    replace: bool = False,
 ) -> ActivationResult:
     """Apply the four independent host changes needed by a hub."""
     machine = host or _host
     interface = path.stem
     return ActivationResult(
-        interface=_apply_config(path, machine),
-        boot=_enable_at_boot(path, machine),
+        interface=_apply_config(path, machine, replace=replace),
+        boot=_enable_at_boot(path, machine, replace=replace),
         forwarding=_enable_forwarding(network_version, machine),
         forward_rule=_allow_forwarding(interface, network_version, machine),
     )
 
 
-def _apply_config(path: Path, host: Host | None = None) -> ActivationStep:
+def _apply_config(path: Path, host: Host | None = None, *, replace: bool = False) -> ActivationStep:
     """
     Bring the tunnel up, or say exactly what to run when this host cannot.
 
@@ -1630,6 +1882,34 @@ def _apply_config(path: Path, host: Host | None = None) -> ActivationStep:
         console.print(f"[dim]Install wireguard-tools, then: {command}[/dim]")
         return ActivationStep("Interface up", False, "wg-quick was not found")
 
+    interfaces = machine.interfaces() if replace else None
+    if interfaces is not None and path.stem in interfaces:
+        console.print(f"\n[cyan]Stopping the existing interface: wg-quick down {path.stem}[/cyan]")
+        try:
+            stopped = machine.run([binary, "down", path.stem])
+        except (OSError, subprocess.SubprocessError) as error:
+            command = _root_command(f"wg-quick down {shlex.quote(path.stem)}", machine)
+            console.print(f"[yellow]Could not run wg-quick: {error}[/yellow]")
+            console.print(f"[dim]Run it yourself: {command}[/dim]")
+            return ActivationStep("Interface up", False, f"existing interface: {error}")
+
+        if stopped.returncode != 0:
+            detail = (
+                stopped.stderr.strip()
+                or stopped.stdout.strip()
+                or f"wg-quick exited {stopped.returncode}"
+            )
+            console.print(
+                f"[yellow]Could not stop the existing interface: {detail}. "
+                "The replacement was not started.[/yellow]"
+            )
+            if not machine.is_root():
+                command = _root_command(f"wg-quick down {shlex.quote(path.stem)}", machine)
+                console.print(f"[dim]Root may be needed. Try: {command}[/dim]")
+            return ActivationStep("Interface up", False, f"existing interface: {detail}")
+
+        console.print("[green]Existing interface stopped.[/green]")
+
     console.print(f"\n[cyan]Bringing the tunnel up: wg-quick up {path}[/cyan]")
     try:
         result = machine.run([binary, "up", str(path)])
@@ -1653,7 +1933,7 @@ def _apply_config(path: Path, host: Host | None = None) -> ActivationStep:
     return ActivationStep("Interface up", False, detail)
 
 
-def _enable_at_boot(path: Path, host: Host) -> ActivationStep:
+def _enable_at_boot(path: Path, host: Host, *, replace: bool = False) -> ActivationStep:
     """Link the rendered config into systemd's location and enable its unit."""
     interface = path.stem
     target = WIREGUARD_SYSTEM_DIR / path.name
@@ -1681,12 +1961,43 @@ def _enable_at_boot(path: Path, host: Host) -> ActivationStep:
                 existing = "a directory"
             else:
                 existing = "a file"
-            console.print(f"[yellow]{target} is already {existing}; it was left alone.[/yellow]")
-            console.print(
-                f"[dim]Start shadow9's config without replacing it: "
-                f"{_root_command(f'wg-quick up {shlex.quote(str(path))}', host)}[/dim]"
-            )
-            return ActivationStep("Starts at boot", False, f"{target} already exists")
+            if not replace:
+                console.print(
+                    f"[yellow]{target} is already {existing}; it was left alone.[/yellow]"
+                )
+                console.print(
+                    f"[dim]Start shadow9's config without replacing it: "
+                    f"{_root_command(f'wg-quick up {shlex.quote(str(path))}', host)}[/dim]"
+                )
+                return ActivationStep("Starts at boot", False, f"{target} already exists")
+
+            saved = target.with_name(f"{target.name}.before-shadow9")
+            suffix = 1
+            while saved.exists() or saved.is_symlink():
+                saved = target.with_name(f"{target.name}.before-shadow9.{suffix}")
+                suffix += 1
+
+            if not host.is_root():
+                move_command = _root_command(shlex.join(["mv", str(target), str(saved)]), host)
+                console.print(f"[yellow]Root is needed to preserve and replace {target}.[/yellow]")
+                console.print(f"[dim]Run: {move_command}[/dim]")
+                console.print(f"[dim]Then: {link_command}[/dim]")
+                console.print(f"[dim]Then: {enable_command}[/dim]")
+                return ActivationStep("Starts at boot", False, "root is required")
+
+            try:
+                target.replace(saved)
+                try:
+                    target.symlink_to(path.resolve())
+                except OSError:
+                    saved.replace(target)
+                    raise
+            except OSError as error:
+                console.print(f"[yellow]Could not replace {target}: {error}[/yellow]")
+                return ActivationStep("Starts at boot", False, "the config link was not replaced")
+
+            console.print(f"[green]Previous boot config:[/green] {saved}")
+            console.print(f"[green]Boot config link:[/green] {target} -> {path.resolve()}")
     elif not host.is_root():
         console.print("[yellow]Root is needed to install the boot config link.[/yellow]")
         console.print(f"[dim]Run: {mkdir_command}[/dim]")
