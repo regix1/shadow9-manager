@@ -18,7 +18,11 @@ from . import probe
 from ..config import Config, listener_port_errors
 from ..core.api_config import generate_api_key, get_api_key, load_api_config, set_api_key
 from ..paths import get_config_dir
-from ..wizards.api_setup import run_api_setup_wizard, DEFAULT_CONFIG_PATH
+from ..wizards.api_setup import (
+    DEFAULT_CONFIG_PATH,
+    ApiSetupResult,
+    run_api_setup_wizard,
+)
 
 console = Console()
 
@@ -68,7 +72,9 @@ def setup(
     - Startup options
     """
     try:
-        run_api_setup_wizard(config_path)
+        result = run_api_setup_wizard(config_path)
+        if result is ApiSetupResult.FAILED:
+            raise typer.Exit(code=1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
     except typer.Abort:
@@ -182,6 +188,90 @@ def _start_impl(config_path: str, host: Optional[str], port: Optional[int], relo
         enrollment_port=listener_config.wireguard.enrollment_port,
         socks_port=listener_config.server.port,
     )
+
+
+def stop_running_api(host: str, port: int, yes: bool) -> bool:
+    """
+    Stop the API, finding it by what it is running before falling back to the port.
+
+    `api start` runs uvicorn in the foreground, so there is no unit and no pid file. The
+    honest way to find it is the command line it was started with. The port is a last
+    resort, and a process that does not look like ours is named and confirmed first,
+    because killing whoever holds a port has taken down unrelated programs.
+
+    Args:
+        host: The address the API was configured for
+        port: The port the API was configured for
+        yes: Skip the question about an unrecognised process
+
+    Returns:
+        True if something was stopped
+    """
+    for pid in probe.pids_matching("shadow9.api.app"):
+        if probe.terminate(pid):
+            console.print(f"[green]Stopped the API (PID {pid})[/green]")
+            return True
+
+    holder = probe.listener_on_port(port)
+    if holder is None:
+        console.print(
+            f"[yellow]No API process found, and nothing is listening on "
+            f"{host}:{port}[/yellow]"
+        )
+        return False
+
+    if not holder.looks_like_shadow9:
+        console.print(
+            f"[yellow]Port {port} is held by PID {holder.pid} ({holder.name}), which does "
+            f"not look like the API.[/yellow]"
+        )
+        if not yes and not typer.confirm("Stop it anyway?", default=False):
+            console.print("[yellow]Left it running[/yellow]")
+            return False
+
+    if not probe.terminate(holder.pid):
+        console.print(f"[red]Could not stop PID {holder.pid}[/red]")
+        return False
+
+    console.print(f"[green]Stopped PID {holder.pid} ({holder.name}) on port {port}[/green]")
+    return True
+
+
+@api_app.command("stop")
+def stop(
+    config_path: Annotated[
+        str, typer.Option("--config", "-c", help="Path to API configuration file")
+    ] = DEFAULT_CONFIG_PATH,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Do not ask about an unrecognised process")
+    ] = False,
+) -> None:
+    """Stop the running API server."""
+    config = _read_api_config(config_path) or {}
+    api_host = config.get("host", "127.0.0.1")
+    api_port = config.get("port", 8080)
+
+    if not stop_running_api(api_host, api_port, yes):
+        raise typer.Exit(1)
+
+
+@api_app.command("restart")
+def restart(
+    config_path: Annotated[
+        str, typer.Option("--config", "-c", help="Path to API configuration file")
+    ] = DEFAULT_CONFIG_PATH,
+    host: Annotated[str | None, typer.Option("--host", "-h", help="Override the host")] = None,
+    port: Annotated[int | None, typer.Option("--port", "-p", help="Override the port")] = None,
+) -> None:
+    """
+    Stop the running API server, then serve in this terminal.
+
+    The API runs in the foreground, so this ends up serving here rather than handing
+    control back. It is a restart in the sense that the old one is gone first.
+    """
+    config = _read_api_config(config_path) or {}
+    stop_running_api(config.get("host", "127.0.0.1"), config.get("port", 8080), yes=True)
+    _start_impl(config_path, host, port, reload=False)
 
 
 @api_app.command("status")

@@ -4,6 +4,7 @@ Interactive API configuration wizard for Shadow9.
 Provides a step-by-step guided process for configuring the REST API settings.
 """
 
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -27,7 +28,17 @@ DEFAULT_API_PORT = 8080
 DEFAULT_CONFIG_PATH = "config/api.yaml"
 
 
-def run_api_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> dict | None:
+class ApiSetupResult(Enum):
+    """What happened when the API setup wizard finished."""
+
+    SAVED = "saved"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+def run_api_setup_wizard(
+    config_path: str = DEFAULT_CONFIG_PATH,
+) -> ApiSetupResult:
     """
     Interactive wizard to configure API settings.
 
@@ -41,8 +52,7 @@ def run_api_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> dict | None:
         config_path: Path where the API config will be saved
 
     Returns:
-        Dictionary containing the configured API settings on success,
-        None on cancel or error.
+        The outcome of the setup attempt.
     """
     try:
         console.print(
@@ -81,20 +91,20 @@ def run_api_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> dict | None:
 
         if not typer.confirm("\nSave this configuration?", default=True):
             console.print("[yellow]Cancelled[/yellow]")
-            return None
+            return ApiSetupResult.CANCELLED
 
         # Save configuration
         if not _save_config(config, config_path):
-            return None
+            return ApiSetupResult.FAILED
 
-        return config
+        return ApiSetupResult.SAVED
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
-        return None
+        return ApiSetupResult.CANCELLED
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        return None
+        return ApiSetupResult.FAILED
 
 
 def _load_existing_config(config_path: str) -> Optional[dict]:

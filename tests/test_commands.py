@@ -1,8 +1,11 @@
 """Tests for command replacements for the removed interactive menu."""
 
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 from typer.testing import CliRunner
 
@@ -11,8 +14,8 @@ from shadow9.config import Config
 from shadow9.commands import api as api_commands
 from shadow9.commands import probe
 from shadow9.commands import user as user_commands
-from shadow9.commands import server as server_commands
 from shadow9.commands import utils
+from shadow9.wizards import api_setup
 
 
 runner = CliRunner()
@@ -164,7 +167,7 @@ class TestStop:
         def no_port_lookup(port: int) -> None:
             raise AssertionError("the port must not be consulted once the server was found")
 
-        monkeypatch.setattr(server_commands, "_listener_on_port", no_port_lookup)
+        monkeypatch.setattr(probe, "listener_on_port", no_port_lookup)
 
         result = runner.invoke(app, ["stop"])
 
@@ -177,13 +180,13 @@ class TestStop:
         """Declining the prompt has to leave the other program running."""
         monkeypatch.setattr(utils, "stop_running_server", lambda: utils.RunningServer(False, False))
         monkeypatch.setattr(
-            server_commands,
-            "_listener_on_port",
-            lambda port: server_commands.PortHolder(4242, "postgres", False),
+            probe,
+            "listener_on_port",
+            lambda port: probe.PortHolder(4242, "postgres", False),
         )
 
         killed: list[int] = []
-        monkeypatch.setattr(server_commands, "_terminate", lambda pid: killed.append(pid) or True)
+        monkeypatch.setattr(probe, "terminate", lambda pid: killed.append(pid) or True)
 
         result = runner.invoke(app, ["stop"], input="n\n")
 
@@ -197,17 +200,64 @@ class TestStop:
     ) -> None:
         monkeypatch.setattr(utils, "stop_running_server", lambda: utils.RunningServer(False, False))
         monkeypatch.setattr(
-            server_commands,
-            "_listener_on_port",
-            lambda port: server_commands.PortHolder(4242, "postgres", False),
+            probe,
+            "listener_on_port",
+            lambda port: probe.PortHolder(4242, "postgres", False),
         )
         killed: list[int] = []
-        monkeypatch.setattr(server_commands, "_terminate", lambda pid: killed.append(pid) or True)
+        monkeypatch.setattr(probe, "terminate", lambda pid: killed.append(pid) or True)
 
         result = runner.invoke(app, ["stop", "--yes"])
 
         assert result.exit_code == 0, result.stdout
         assert killed == [4242]
+
+
+class TestApiStop:
+    """The API runs in the foreground, so stopping it means finding it first."""
+
+    def test_it_finds_the_api_by_what_it_runs_not_by_the_port(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Identity first, because killing whoever holds a port has hit other programs."""
+        monkeypatch.setattr(probe, "pids_matching", lambda pattern: [4321])
+        killed: list[int] = []
+        monkeypatch.setattr(probe, "terminate", lambda pid: killed.append(pid) or True)
+
+        def no_port_lookup(port: int) -> None:
+            raise AssertionError("the port must not be consulted once the API was found")
+
+        monkeypatch.setattr(probe, "listener_on_port", no_port_lookup)
+
+        result = runner.invoke(app, ["api", "stop"])
+
+        assert result.exit_code == 0, result.stdout
+        assert killed == [4321]
+
+    def test_an_unrecognised_process_on_the_port_is_named_and_spared(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(probe, "pids_matching", lambda pattern: [])
+        monkeypatch.setattr(
+            probe, "listener_on_port", lambda port: probe.PortHolder(99, "nginx", False)
+        )
+        killed: list[int] = []
+        monkeypatch.setattr(probe, "terminate", lambda pid: killed.append(pid) or True)
+
+        result = runner.invoke(app, ["api", "stop"], input="n\n")
+
+        assert result.exit_code == 1
+        assert "nginx" in plain(result.stdout)
+        assert killed == []
+
+    def test_nothing_running_exits_non_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "pids_matching", lambda pattern: [])
+        monkeypatch.setattr(probe, "listener_on_port", lambda port: None)
+
+        result = runner.invoke(app, ["api", "stop"])
+
+        assert result.exit_code == 1
+        assert "No API process found" in plain(result.stdout)
 
 
 class TestCheckTor:
@@ -364,3 +414,101 @@ def test_user_generate_dry_run_prints_credentials_without_creating_a_user(
     assert "No user was created" in result.stdout
     assert TestAuthManager.created is False
     assert not Path("missing-dry-run-config.yaml").exists()
+
+
+def test_user_generate_hides_typed_password_and_displays_generated_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = Mock(return_value="Typed-password-582!")
+    auth_manager = SimpleNamespace(
+        generate_credentials=Mock(
+            side_effect=[
+                ("unused-user", "unused-password"),
+                ("unused-user", "Generated-password-937!"),
+            ]
+        ),
+        add_user=Mock(),
+    )
+    monkeypatch.setattr(user_commands.typer, "prompt", prompt)
+    monkeypatch.setattr(user_commands.typer, "confirm", Mock(return_value=False))
+    monkeypatch.setattr(user_commands, "open_store", Mock(return_value=auth_manager))
+    monkeypatch.setattr(user_commands, "_offer_service_restart", Mock())
+
+    arguments = [
+        "user",
+        "generate",
+        "--username",
+        "test-user",
+        "--no-tor",
+        "--security",
+        "basic",
+        "--logging",
+        "--config",
+        str(Path(os.environ["SHADOW9_HOME"]) / "config.yaml"),
+    ]
+    typed_result = runner.invoke(app, arguments)
+    typed_call = prompt.call_args
+
+    prompt.reset_mock()
+    prompt.return_value = ""
+    generated_result = runner.invoke(app, arguments)
+
+    assert typed_result.exit_code == 0, typed_result.stdout
+    assert typed_call is not None
+    assert typed_call.kwargs["hide_input"] is True
+    assert typed_call.kwargs["confirmation_prompt"] is True
+    assert generated_result.exit_code == 0, generated_result.stdout
+    assert "Generated-password-937!" in generated_result.stdout
+    assert auth_manager.add_user.call_count == 2
+
+
+def test_api_setup_exits_non_zero_when_save_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_setup, "_load_existing_config", Mock(return_value={}))
+    monkeypatch.setattr(api_setup, "_prompt_api_key", Mock(return_value="test-key"))
+    monkeypatch.setattr(api_setup, "_prompt_api_host", Mock(return_value="127.0.0.1"))
+    monkeypatch.setattr(api_setup, "_prompt_api_port", Mock(return_value=9999))
+    monkeypatch.setattr(api_setup, "_prompt_enable_on_startup", Mock(return_value=False))
+    monkeypatch.setattr(api_setup, "_show_summary", Mock())
+    monkeypatch.setattr(api_setup.typer, "confirm", Mock(return_value=True))
+    monkeypatch.setattr(api_setup, "_save_config", Mock(return_value=False))
+
+    result = runner.invoke(
+        app,
+        [
+            "api",
+            "setup",
+            "--config",
+            str(Path(os.environ["SHADOW9_HOME"]) / "api-save-failure.json"),
+        ],
+    )
+
+    assert result.exit_code == 1, result.stdout
+
+
+def test_api_setup_user_cancellation_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_config = Mock()
+    monkeypatch.setattr(api_setup, "_load_existing_config", Mock(return_value={}))
+    monkeypatch.setattr(api_setup, "_prompt_api_key", Mock(return_value="test-key"))
+    monkeypatch.setattr(api_setup, "_prompt_api_host", Mock(return_value="127.0.0.1"))
+    monkeypatch.setattr(api_setup, "_prompt_api_port", Mock(return_value=9999))
+    monkeypatch.setattr(api_setup, "_prompt_enable_on_startup", Mock(return_value=False))
+    monkeypatch.setattr(api_setup, "_show_summary", Mock())
+    monkeypatch.setattr(api_setup.typer, "confirm", Mock(return_value=False))
+    monkeypatch.setattr(api_setup, "_save_config", save_config)
+
+    result = runner.invoke(
+        app,
+        [
+            "api",
+            "setup",
+            "--config",
+            str(Path(os.environ["SHADOW9_HOME"]) / "api-cancelled.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    save_config.assert_not_called()
