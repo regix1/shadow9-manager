@@ -7,6 +7,7 @@ Manages Shadow9 as a systemd service on Linux.
 import os
 import sys
 import subprocess
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -220,23 +221,75 @@ WantedBy=multi-user.target
     def service_uninstall(
         yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
     ):
-        """Uninstall Shadow9 systemd service."""
+        """Uninstall Shadow9 services and their Linux host integration."""
         _check_linux()
         _check_root()
 
-        if not Path(SERVICE_FILE).exists():
-            console.print("[yellow]Service is not installed[/yellow]")
+        from ..config import Config
+        from . import wireguard as wireguard_commands
+
+        service_file = Path(SERVICE_FILE)
+        enrollment_file = wireguard_commands.ENROLLMENT_SERVICE_FILE
+        if not service_file.exists() and not enrollment_file.exists():
+            console.print("[yellow]Shadow9 services are not installed[/yellow]")
             raise typer.Exit(0)
 
-        if not yes and not typer.confirm("Uninstall Shadow9 service?"):
+        if not yes and not typer.confirm("Uninstall Shadow9 services and host integration?"):
             raise typer.Abort()
 
-        # Stop and disable service
-        subprocess.run(["systemctl", "stop", SERVICE_NAME], capture_output=True)
-        subprocess.run(["systemctl", "disable", SERVICE_NAME], capture_output=True)
+        paths = get_paths()
+        cfg = Config.load(paths.config_file) if paths.config_file.exists() else Config()
+        units = [SERVICE_NAME, wireguard_commands.ENROLLMENT_SERVICE_NAME]
+        if cfg.wireguard.enabled:
+            units.append(f"wg-quick@{cfg.wireguard.interface}")
+        for unit in units:
+            subprocess.run(["systemctl", "stop", unit], capture_output=True)
+            subprocess.run(["systemctl", "disable", unit], capture_output=True)
 
-        # Remove service file
-        Path(SERVICE_FILE).unlink()
+        for path in (service_file, enrollment_file):
+            if path.exists() or path.is_symlink():
+                path.unlink()
+
+        if cfg.wireguard.enabled:
+            interface = cfg.wireguard.interface
+            target = wireguard_commands.WIREGUARD_SYSTEM_DIR / f"{interface}.conf"
+            generated = paths.config_dir / "wireguard" / f"{interface}.conf"
+            try:
+                managed = (
+                    target.is_symlink()
+                    and target.resolve(strict=False) == generated.resolve(strict=False)
+                )
+            except (OSError, RuntimeError):
+                managed = False
+
+            if managed:
+                try:
+                    saved = wireguard_commands._saved_config(interface)
+                except ValueError:
+                    target.unlink()
+                    console.print(f"[green]Removed Shadow9 WireGuard boot link: {target}[/green]")
+                else:
+                    displaced = target.with_name(f"{target.name}.shadow9-uninstall")
+                    suffix = 1
+                    while displaced.exists() or displaced.is_symlink():
+                        displaced = target.with_name(
+                            f"{target.name}.shadow9-uninstall.{suffix}"
+                        )
+                        suffix += 1
+                    target.replace(displaced)
+                    try:
+                        saved.replace(target)
+                    except OSError:
+                        displaced.replace(target)
+                        raise
+                    displaced.unlink()
+                    console.print(f"[green]Restored WireGuard boot config: {target}[/green]")
+
+        forwarding = wireguard_commands.FORWARDING_CONFIG
+        if forwarding.is_file() and not forwarding.is_symlink():
+            forwarding.unlink()
+            console.print(f"[green]Removed forwarding persistence: {forwarding}[/green]")
+
         subprocess.run(["systemctl", "daemon-reload"], check=True)
 
         # Remove global symlink if it exists
@@ -245,7 +298,7 @@ WantedBy=multi-user.target
             symlink_path.unlink()
             console.print("[green]Removed global command symlink[/green]")
 
-        console.print("[green]Service uninstalled[/green]")
+        console.print("[green]Shadow9 services uninstalled[/green]")
 
     @service_app.command("start")
     def service_start():
@@ -257,12 +310,41 @@ WantedBy=multi-user.target
         result = subprocess.run(
             ["systemctl", "start", SERVICE_NAME], capture_output=True, text=True
         )
-        if result.returncode == 0:
-            console.print("[green]Service started[/green]")
-        else:
+        if result.returncode != 0:
             console.print("[red]Failed to start service[/red]")
             console.print(f"[dim]{result.stderr}[/dim]")
             raise typer.Exit(1)
+
+        # Type=simple reports a successful start as soon as systemd launches the process.
+        # Give an immediate startup failure time to reach auto-restart before claiming the
+        # service is usable.
+        time.sleep(1.0)
+        active = subprocess.run(
+            ["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True
+        )
+        if active.returncode == 0 and active.stdout.strip() == "active":
+            console.print("[green]Service started and is running[/green]")
+            return
+
+        status = subprocess.run(
+            ["systemctl", "status", SERVICE_NAME, "--no-pager"],
+            capture_output=True,
+            text=True,
+        )
+        state = active.stdout.strip() or "not active"
+        console.print(f"[red]Service did not stay running ({state})[/red]")
+        if status.stdout.strip():
+            console.print(f"[dim]{status.stdout.strip()}[/dim]")
+        journal = subprocess.run(
+            ["journalctl", "-u", SERVICE_NAME, "-n", "20", "--no-pager"],
+            capture_output=True,
+            text=True,
+        )
+        if journal.stdout.strip():
+            console.print("[bold]Recent service logs:[/bold]")
+            console.print(f"[dim]{journal.stdout.strip()}[/dim]")
+        console.print("[dim]More logs: shadow9 service logs[/dim]")
+        raise typer.Exit(1)
 
     @service_app.command("stop")
     def service_stop():
@@ -336,8 +418,11 @@ WantedBy=multi-user.target
             ["systemctl", "status", SERVICE_NAME, "--no-pager"], capture_output=True, text=True
         )
 
-        # Parse status
-        is_active = "active (running)" in result.stdout
+        active = subprocess.run(
+            ["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True
+        ).stdout.strip()
+        is_active = active == "active"
+        is_restarting = active == "activating"
         is_enabled = (
             subprocess.run(
                 ["systemctl", "is-enabled", SERVICE_NAME], capture_output=True, text=True
@@ -345,8 +430,8 @@ WantedBy=multi-user.target
             == "enabled"
         )
 
-        status_color = "green" if is_active else "red"
-        status_text = "Running" if is_active else "Stopped"
+        status_color = "green" if is_active else "yellow" if is_restarting else "red"
+        status_text = "Running" if is_active else "Restarting" if is_restarting else "Stopped"
         boot_text = "Enabled" if is_enabled else "Disabled"
 
         console.print(

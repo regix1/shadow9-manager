@@ -249,3 +249,136 @@ def test_install_leaves_the_env_file_readable_only_by_root(
 
     env_file = paths.get_paths().env_file
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+def test_start_reports_a_service_that_stayed_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        parts = tuple(command)
+        calls.append(parts)
+        output = "active\n" if parts[:2] == ("systemctl", "is-active") else ""
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(service, "_check_linux", _skip_check)
+    monkeypatch.setattr(service, "_check_root", _skip_check)
+    monkeypatch.setattr(service, "_check_installed", _skip_check)
+    monkeypatch.setattr(service.subprocess, "run", run)
+    monkeypatch.setattr(service.time, "sleep", lambda _seconds: None)
+    app = Typer()
+    service.register_service_commands(app)
+
+    result = CliRunner().invoke(app, ["service", "start"])
+
+    assert result.exit_code == 0, result.output
+    assert "Service started and is running" in _flat(result.output)
+    assert ("systemctl", "is-active", service.SERVICE_NAME) in calls
+
+
+def test_start_rejects_a_service_that_entered_auto_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        parts = tuple(command)
+        if parts[:2] == ("systemctl", "is-active"):
+            return subprocess.CompletedProcess(command, 3, stdout="activating\n", stderr="")
+        if parts[:2] == ("systemctl", "status"):
+            return subprocess.CompletedProcess(
+                command,
+                3,
+                stdout="Active: activating (auto-restart) (Result: exit-code)\n",
+                stderr="",
+            )
+        if parts[0] == "journalctl":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="Tor service not detected\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(service, "_check_linux", _skip_check)
+    monkeypatch.setattr(service, "_check_root", _skip_check)
+    monkeypatch.setattr(service, "_check_installed", _skip_check)
+    monkeypatch.setattr(service.subprocess, "run", run)
+    monkeypatch.setattr(service.time, "sleep", lambda _seconds: None)
+    app = Typer()
+    service.register_service_commands(app)
+
+    result = CliRunner().invoke(app, ["service", "start"])
+
+    assert result.exit_code == 1
+    output = _flat(result.output)
+    assert "Service did not stay running (activating)" in output
+    assert "Service started" not in output
+    assert "Recent service logs" in output
+    assert "Tor service not detected" in output
+    assert "More logs: shadow9 service logs" in output
+
+
+def test_uninstall_removes_wireguard_services_and_restores_the_saved_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shadow9.commands import wireguard
+
+    monkeypatch.setenv("SHADOW9_HOME", str(tmp_path))
+    monkeypatch.setattr(paths.Shadow9Paths, "_instance", None)
+    monkeypatch.setattr(service, "_check_linux", _skip_check)
+    monkeypatch.setattr(service, "_check_root", _skip_check)
+
+    systemd_dir = tmp_path / "etc" / "systemd" / "system"
+    systemd_dir.mkdir(parents=True)
+    service_file = systemd_dir / "shadow9.service"
+    enrollment_file = systemd_dir / wireguard.ENROLLMENT_SERVICE_NAME
+    service_file.write_text("main\n", encoding="utf-8")
+    enrollment_file.write_text("enrollment\n", encoding="utf-8")
+    monkeypatch.setattr(service, "SERVICE_FILE", str(service_file))
+    monkeypatch.setattr(wireguard, "ENROLLMENT_SERVICE_FILE", enrollment_file)
+
+    shadow9_paths = paths.get_paths()
+    shadow9_paths.config_file.write_text(
+        "wireguard:\n  enabled: true\n  interface: wg0\n",
+        encoding="utf-8",
+    )
+    generated = shadow9_paths.config_dir / "wireguard" / "wg0.conf"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("shadow9\n", encoding="utf-8")
+    system_dir = tmp_path / "etc" / "wireguard"
+    system_dir.mkdir(parents=True)
+    target = system_dir / "wg0.conf"
+    target.symlink_to(generated)
+    saved = system_dir / "wg0.conf.before-shadow9"
+    saved.write_text("operator\n", encoding="utf-8")
+    monkeypatch.setattr(wireguard, "WIREGUARD_SYSTEM_DIR", system_dir)
+    forwarding = tmp_path / "etc" / "sysctl.d" / "99-shadow9.conf"
+    forwarding.parent.mkdir(parents=True)
+    forwarding.write_text("net.ipv4.ip_forward=1\n", encoding="utf-8")
+    monkeypatch.setattr(wireguard, "FORWARDING_CONFIG", forwarding)
+
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(tuple(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    app = Typer()
+    service.register_service_commands(app)
+
+    result = CliRunner().invoke(app, ["service", "uninstall", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not service_file.exists()
+    assert not enrollment_file.exists()
+    assert not forwarding.exists()
+    assert target.read_text(encoding="utf-8") == "operator\n"
+    assert not target.is_symlink()
+    assert not saved.exists()
+    for unit in (
+        service.SERVICE_NAME,
+        wireguard.ENROLLMENT_SERVICE_NAME,
+        "wg-quick@wg0",
+    ):
+        assert ("systemctl", "stop", unit) in calls
+        assert ("systemctl", "disable", unit) in calls

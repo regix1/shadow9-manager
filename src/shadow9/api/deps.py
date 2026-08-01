@@ -7,6 +7,7 @@ Provides dependencies for services, authentication, etc.
 import os
 import secrets
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Security, status
@@ -72,7 +73,12 @@ def get_config() -> Config:
     Returns:
         The configuration, with environment overrides applied
     """
-    config_file = get_project_root() / "config" / "config.yaml"
+    selected = os.getenv("SHADOW9_CONFIG")
+    config_file = (
+        Path(selected).expanduser()
+        if selected
+        else get_project_root() / "config" / "config.yaml"
+    )
     return Config.load(config_file if config_file.exists() else None)
 
 

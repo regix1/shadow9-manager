@@ -24,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, UTC
@@ -38,7 +39,7 @@ from rich.table import Table
 
 from ..auth import AuthManager
 from ..config import Config
-from ..paths import lock_file, write_file_safely
+from ..paths import get_paths, lock_file, write_file_safely
 from .user import open_store
 from ..services.wireguard_service import (
     BINARY_DOWNLOAD_NOTICE,
@@ -111,6 +112,8 @@ DEFAULT_API_PORT = 8080
 
 WIREGUARD_SYSTEM_DIR = Path("/etc/wireguard")
 FORWARDING_CONFIG = Path("/etc/sysctl.d/99-shadow9.conf")
+ENROLLMENT_SERVICE_NAME = "shadow9-wireguard.service"
+ENROLLMENT_SERVICE_FILE = Path("/etc/systemd/system") / ENROLLMENT_SERVICE_NAME
 COMMAND_TIMEOUT = 60
 
 
@@ -125,12 +128,13 @@ class ActivationStep:
 
 @dataclass(frozen=True)
 class ActivationResult:
-    """The four host facts an operator needs after hub setup."""
+    """The host facts an operator needs after hub setup."""
 
     interface: ActivationStep
     boot: ActivationStep
     forwarding: ActivationStep
     forward_rule: ActivationStep
+    enrollment: ActivationStep
 
 
 @dataclass(frozen=True)
@@ -176,6 +180,18 @@ class Host:
         if result.returncode != 0:
             return None
         return set(result.stdout.split())
+
+    def listener_ready(self, host: str, port: int) -> bool:
+        """Wait briefly for a local TCP listener to accept connections."""
+        address = "::1" if host == "::" else "127.0.0.1" if host == "0.0.0.0" else host
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection((address, port), timeout=0.25):
+                    return True
+            except OSError:
+                time.sleep(0.1)
+        return False
 
     def run(
         self, command: list[str], timeout: int = COMMAND_TIMEOUT
@@ -431,10 +447,15 @@ def _init_impl(
     console.print(f"[dim]{key_file} holds the same key and the same protection.[/dim]")
 
     if no_apply:
-        activation = _manual_activation(rendered.written[0], topology.tunnel_network.version)
+        activation = _manual_activation(
+            rendered.written[0], topology.tunnel_network.version, config=config_file.resolve()
+        )
     else:
         activation = _activate_hub(
-            rendered.written[0], topology.tunnel_network.version, replace=replace
+            rendered.written[0],
+            topology.tunnel_network.version,
+            replace=replace,
+            config=config_file.resolve(),
         )
 
     if not topology.hub.endpoint:
@@ -456,6 +477,11 @@ def _init_impl(
         )
 
     _print_activation_summary(activation)
+    if not activation.enrollment.ready:
+        console.print(
+            "[yellow]The printed join commands cannot connect until the enrollment "
+            "listener is running.[/yellow]"
+        )
     _print_cleartext_notice()
     _print_join_command(cfg, keypair.public_key, api_url, token_hours)
 
@@ -517,6 +543,11 @@ def token(
     """
     cfg = _load_config(config)
     public_key = _require_hub_public_key()
+    enrollment = _enable_enrollment(_host, Path(config).resolve())
+    if not enrollment.ready:
+        console.print(
+            "[yellow]This token cannot be used until the enrollment listener is running.[/yellow]"
+        )
 
     try:
         _print_join_command(cfg, public_key, api_url, hours)
@@ -528,6 +559,43 @@ def token(
         raise typer.Exit(1) from error
 
     _print_cleartext_notice()
+
+
+@wg_app.command("serve")
+def serve(
+    config: Annotated[
+        str, typer.Option("--config", "-c", help="Path to configuration file")
+    ] = DEFAULT_CONFIG_FILE,
+) -> None:
+    """Run the public WireGuard enrollment and refresh listener."""
+    config_file = (
+        get_paths().config_file
+        if config == DEFAULT_CONFIG_FILE
+        else Path(config).expanduser().resolve()
+    )
+    os.environ["SHADOW9_CONFIG"] = str(config_file)
+    cfg = _load_config(str(config_file))
+    if not cfg.wireguard.enabled:
+        console.print("[red]WireGuard is not configured. Run 'shadow9 wg init' first.[/red]")
+        raise typer.Exit(1)
+    _require_hub_public_key()
+
+    try:
+        import uvicorn
+    except ImportError as error:
+        console.print("[red]The enrollment server needs uvicorn. Reinstall shadow9 first.[/red]")
+        raise typer.Exit(1) from error
+
+    console.print(
+        f"[green]WireGuard enrollment listening on "
+        f"{cfg.wireguard.enrollment_host}:{cfg.wireguard.enrollment_port}[/green]"
+    )
+    uvicorn.run(
+        "shadow9.api.app:enrollment_app",
+        host=cfg.wireguard.enrollment_host,
+        port=cfg.wireguard.enrollment_port,
+        log_level="info",
+    )
 
 
 @wg_app.command("join")
@@ -1811,7 +1879,11 @@ def _root_command(command: str, host: Host) -> str:
 
 
 def _manual_activation(
-    path: Path, network_version: int, host: Host | None = None
+    path: Path,
+    network_version: int,
+    host: Host | None = None,
+    *,
+    config: Path | None = None,
 ) -> ActivationResult:
     """Print every host command skipped by ``--no-apply``."""
     machine = host or _host
@@ -1835,6 +1907,10 @@ def _manual_activation(
     add_command = _root_command(
         f"{firewall} -A FORWARD -i {interface} -o {interface} -j ACCEPT", machine
     )
+    config_file = (config or get_paths().config_file).resolve()
+    enrollment_command = _root_command(
+        shlex.join(["shadow9", "wg", "serve", "--config", str(config_file)]), machine
+    )
 
     console.print("\n[yellow]Host activation was skipped by --no-apply.[/yellow]")
     console.print(f"[dim]Bring it up with: {up_command}[/dim]")
@@ -1844,6 +1920,7 @@ def _manual_activation(
     console.print(f"[dim]Turn forwarding on: {forward_command}[/dim]")
     console.print(f"[dim]Persist it: {persist_command}[/dim]")
     console.print(f"[dim]Allow spoke traffic: {check_command} || {add_command}[/dim]")
+    console.print(f"[dim]Run the enrollment listener: {enrollment_command}[/dim]")
 
     skipped = "not changed (--no-apply)"
     return ActivationResult(
@@ -1851,6 +1928,7 @@ def _manual_activation(
         boot=ActivationStep("Starts at boot", False, skipped),
         forwarding=ActivationStep("Forwarding on", False, skipped),
         forward_rule=ActivationStep("FORWARD rule present", False, skipped),
+        enrollment=ActivationStep("Enrollment listener", False, skipped),
     )
 
 
@@ -1860,8 +1938,9 @@ def _activate_hub(
     host: Host | None = None,
     *,
     replace: bool = False,
+    config: Path | None = None,
 ) -> ActivationResult:
-    """Apply the four independent host changes needed by a hub."""
+    """Apply the independent host changes needed by a hub."""
     machine = host or _host
     interface = path.stem
     return ActivationResult(
@@ -1869,7 +1948,124 @@ def _activate_hub(
         boot=_enable_at_boot(path, machine, replace=replace),
         forwarding=_enable_forwarding(network_version, machine),
         forward_rule=_allow_forwarding(interface, network_version, machine),
+        enrollment=_enable_enrollment(machine, config),
     )
+
+
+def _enable_enrollment(host: Host, config: Path | None = None) -> ActivationStep:
+    """Install, enable, and start the public WireGuard enrollment listener."""
+    config_file = (config or get_paths().config_file).resolve()
+    command = _root_command(
+        shlex.join(["shadow9", "wg", "serve", "--config", str(config_file)]), host
+    )
+    label = "Enrollment listener"
+
+    if host.is_windows():
+        console.print("[yellow]Windows cannot install the Linux enrollment service.[/yellow]")
+        console.print(f"[dim]Keep this running on the hub: {command}[/dim]")
+        return ActivationStep(label, False, "Linux systemd is not available")
+
+    if not host.is_root():
+        console.print("[yellow]Root is needed to install the enrollment service.[/yellow]")
+        console.print(f"[dim]Run this in another terminal: {command}[/dim]")
+        return ActivationStep(label, False, "root is required")
+
+    systemctl = host.which("systemctl")
+    if systemctl is None:
+        console.print("[yellow]systemctl was not found, so enrollment was not started.[/yellow]")
+        console.print(f"[dim]Keep this running on the hub: {command}[/dim]")
+        return ActivationStep(label, False, "systemctl was not found")
+
+    paths = get_paths()
+    install_path = paths.root.resolve()
+    python_path = f"{install_path}/venv/bin:/usr/local/bin:/usr/bin:/bin"
+    unit = f"""[Unit]
+Description=Shadow9 WireGuard Enrollment Server
+Documentation=https://github.com/regix1/shadow9-manager
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory={install_path}
+Environment="PATH={python_path}"
+Environment="PYTHONPATH={install_path}/src"
+Environment="SHADOW9_HOME={install_path}"
+Environment="SHADOW9_CONFIG={config_file}"
+EnvironmentFile=-{paths.env_file}
+ExecStart={install_path}/shadow9 wg serve --config {config_file}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={install_path}/config
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    try:
+        ENROLLMENT_SERVICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        write_file_safely(ENROLLMENT_SERVICE_FILE, unit.encode("utf-8"), mode=0o644)
+    except OSError as error:
+        console.print(f"[yellow]Could not install {ENROLLMENT_SERVICE_FILE}: {error}[/yellow]")
+        console.print(f"[dim]Keep this running on the hub: {command}[/dim]")
+        return ActivationStep(label, False, "the systemd unit was not written")
+
+    actions = (
+        ([systemctl, "daemon-reload"], "reload systemd"),
+        ([systemctl, "enable", ENROLLMENT_SERVICE_NAME], "enable the enrollment service"),
+        ([systemctl, "restart", ENROLLMENT_SERVICE_NAME], "start the enrollment service"),
+    )
+    for action, description in actions:
+        try:
+            result = host.run(action)
+        except (OSError, subprocess.SubprocessError) as error:
+            console.print(f"[yellow]Could not {description}: {error}[/yellow]")
+            console.print(f"[dim]Keep this running on the hub: {command}[/dim]")
+            return ActivationStep(label, False, f"could not {description}")
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "no error text"
+            console.print(f"[yellow]Could not {description}: {detail}[/yellow]")
+            console.print(f"[dim]Keep this running on the hub: {command}[/dim]")
+            return ActivationStep(label, False, f"could not {description}")
+
+    try:
+        active = host.run([systemctl, "is-active", "--quiet", ENROLLMENT_SERVICE_NAME])
+    except (OSError, subprocess.SubprocessError) as error:
+        console.print(f"[yellow]Could not verify the enrollment service: {error}[/yellow]")
+        return ActivationStep(label, False, "its state could not be verified")
+
+    if active.returncode != 0:
+        console.print(f"[yellow]{ENROLLMENT_SERVICE_NAME} did not stay active.[/yellow]")
+        console.print(
+            f"[dim]Inspect it with: systemctl status {ENROLLMENT_SERVICE_NAME} --no-pager[/dim]"
+        )
+        return ActivationStep(label, False, "the systemd unit is not active")
+
+    cfg = _load_config(str(config_file))
+    if not host.listener_ready(
+        cfg.wireguard.enrollment_host, cfg.wireguard.enrollment_port
+    ):
+        console.print(
+            f"[yellow]{ENROLLMENT_SERVICE_NAME} is active, but nothing accepted a "
+            f"connection on TCP {cfg.wireguard.enrollment_port}.[/yellow]"
+        )
+        console.print(
+            f"[dim]Inspect it with: systemctl status {ENROLLMENT_SERVICE_NAME} --no-pager[/dim]"
+        )
+        return ActivationStep(label, False, "the TCP listener did not become ready")
+
+    console.print(
+        f"[green]{ENROLLMENT_SERVICE_NAME} is running and will start at boot.[/green]"
+    )
+    return ActivationStep(label, True, "running and enabled at boot")
 
 
 def _apply_config(path: Path, host: Host | None = None, *, replace: bool = False) -> ActivationStep:
@@ -2202,9 +2398,15 @@ def _allow_forwarding(interface: str, network_version: int, host: Host) -> Activ
 
 
 def _print_activation_summary(result: ActivationResult) -> None:
-    """Print the four activation facts without hiding partial work."""
+    """Print the activation facts without hiding partial work."""
     lines = []
-    for step in (result.interface, result.boot, result.forwarding, result.forward_rule):
+    for step in (
+        result.interface,
+        result.boot,
+        result.forwarding,
+        result.forward_rule,
+        result.enrollment,
+    ):
         mark = "[green]yes[/green]" if step.ready else "[yellow]no[/yellow]"
         lines.append(f"{step.label}: {mark} — {step.detail}")
     console.print(Panel("\n".join(lines), title="Hub activation", border_style="cyan"))

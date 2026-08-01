@@ -66,7 +66,7 @@ Other options worth knowing:
 
 `shadow9 wg setup` walks the same thing with prompts, including the endpoint suggestion.
 
-`wg init` and `wg setup` write the hub key, render the config, and then try four independent
+`wg init` and `wg setup` write the hub key, render the config, and then try five independent
 host changes:
 
 1. Bring the selected interface up with `wg-quick`.
@@ -74,12 +74,19 @@ host changes:
 3. Turn on IP forwarding and record it in `/etc/sysctl.d/99-shadow9.conf`.
 4. Check for the selected interface's tunnel-to-tunnel FORWARD rule and add it only when
    it is absent.
+5. Install and start `shadow9-wireguard.service`, the public enrollment, refresh, and node
+   download listener.
 
 The forwarding key and firewall command follow the tunnel network: IPv4 uses
 `net.ipv4.ip_forward` and `iptables`; IPv6 uses `net.ipv6.conf.all.forwarding` and
-`ip6tables`. The command finishes with a four-line summary. One failed step does not stop
-the other three. The summary keeps the text printed by a failed command, so an error such
+`ip6tables`. The command finishes with a five-line summary. One failed step does not stop
+the other steps. The summary keeps the text printed by a failed command, so an error such
 as `wg0 already exists` is not flattened into a permission hint.
+
+The enrollment listener is separate from the SOCKS5/Tor service. `shadow9 service start`
+does not provide TCP 8081. Running `shadow9 wg token` on an existing hub installs or repairs
+`shadow9-wireguard.service` before issuing the new one-use token. For a foreground run on a
+host without systemd, use `shadow9 wg serve` and keep that process running.
 
 Before writing a hub key or config, init checks for a live WireGuard interface with the
 selected name and for `/etc/wireguard/<name>.conf`. If this host already runs `wg0`, either

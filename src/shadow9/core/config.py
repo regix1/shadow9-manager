@@ -604,7 +604,12 @@ def get_settings() -> Settings:
     having to work one out. The decision is logged once, because a permit count nobody
     can trace is the failure that costs the most time to diagnose.
     """
-    config_file = get_project_root() / "config" / "config.yaml"
+    selected = os.getenv("SHADOW9_CONFIG")
+    config_file = (
+        Path(selected).expanduser()
+        if selected
+        else get_project_root() / "config" / "config.yaml"
+    )
 
     settings = Settings.load_from_yaml(config_file) if config_file.exists() else Settings()
 

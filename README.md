@@ -322,10 +322,11 @@ shadow9 wg init --endpoint 203.0.113.10:51820
 shadow9 wg device add phone
 ```
 
-`wg init` writes the configuration but does not start the tunnel. See
-[docs/SETUP.md](docs/SETUP.md) for the whole process, including bringing the interface
-up, the forwarding rules two spokes need to reach each other, and joining an OpenWrt
-router as a site gateway.
+`wg init` writes and applies the configuration, enables the tunnel for reboot, and installs
+`shadow9-wireguard.service` for enrollment on TCP 8081. `--no-apply` is the explicit path
+that only writes files. See [docs/SETUP.md](docs/SETUP.md) for the whole process, including
+the forwarding rules two spokes need to reach each other and joining an OpenWrt router as
+a site gateway.
 
 Open these two ports in the host firewall and in the cloud firewall or security group:
 
@@ -365,6 +366,11 @@ sudo shadow9 service disable
 # Uninstall
 sudo shadow9 service uninstall
 ```
+
+Uninstall stops and removes both Shadow9 systemd units, disables the Shadow9-managed
+`wg-quick@` unit, removes Shadow9's forwarding persistence file, and restores the newest
+WireGuard config preserved by `wg init --force`. Configuration, keys, and credentials under
+the install directory remain available unless that directory is removed separately.
 
 ### Diagnostics
 

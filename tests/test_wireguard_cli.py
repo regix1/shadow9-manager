@@ -52,6 +52,7 @@ class _Host(wg_commands.Host):
         outputs: dict[tuple[str, ...], str] | None = None,
         detected_address: wg_commands.OutwardAddress | None = None,
         detection_error: Exception | None = None,
+        listener_ready: bool = True,
     ) -> None:
         self.windows = windows
         self.root = root
@@ -60,6 +61,7 @@ class _Host(wg_commands.Host):
         self.outputs = outputs if outputs is not None else {}
         self.detected_address = detected_address
         self.detection_error = detection_error
+        self.listener_is_ready = listener_ready
         self.commands: list[tuple[str, ...]] = []
         self.timeouts: list[int] = []
 
@@ -76,6 +78,9 @@ class _Host(wg_commands.Host):
         if self.detection_error is not None:
             raise self.detection_error
         return self.detected_address
+
+    def listener_ready(self, host: str, port: int) -> bool:
+        return self.listener_is_ready
 
     def run(
         self, command: list[str], timeout: int = wg_commands.COMMAND_TIMEOUT
@@ -109,6 +114,11 @@ def hub_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setattr(AuthManager, "ARGON2_MEMORY_COST", 64)
     monkeypatch.setattr(AuthManager, "ARGON2_PARALLELISM", 1)
     monkeypatch.setattr(wg_commands, "_host", _Host(windows=True))
+    monkeypatch.setattr(
+        wg_commands,
+        "ENROLLMENT_SERVICE_FILE",
+        tmp_path / "etc" / "systemd" / "system" / wg_commands.ENROLLMENT_SERVICE_NAME,
+    )
 
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     yield tmp_path
@@ -195,6 +205,47 @@ class TestInit:
         assert "UDP 51820" in flat
         assert "Keep TCP 8080, the admin API port, closed to the internet" in flat
         assert "requires iptables" in flat
+
+    def test_init_installs_and_starts_the_enrollment_listener(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        system_dir = hub_root / "etc" / "wireguard"
+        host = _Host(
+            root=True,
+            binaries={"wg-quick", "systemctl", "sysctl", "iptables"},
+        )
+        monkeypatch.setattr(wg_commands, "_host", host)
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", system_dir)
+        monkeypatch.setattr(
+            wg_commands, "FORWARDING_CONFIG", hub_root / "etc" / "sysctl.d" / "99-shadow9.conf"
+        )
+
+        output = _flat(_init_hub(runner, cli_app, hub_root))
+
+        unit = wg_commands.ENROLLMENT_SERVICE_FILE.read_text(encoding="utf-8")
+        assert f"ExecStart={hub_root.resolve()}/shadow9 wg serve" in unit
+        assert ("systemctl", "daemon-reload") in host.commands
+        assert (
+            "systemctl",
+            "enable",
+            wg_commands.ENROLLMENT_SERVICE_NAME,
+        ) in host.commands
+        assert (
+            "systemctl",
+            "restart",
+            wg_commands.ENROLLMENT_SERVICE_NAME,
+        ) in host.commands
+        assert (
+            "systemctl",
+            "is-active",
+            "--quiet",
+            wg_commands.ENROLLMENT_SERVICE_NAME,
+        ) in host.commands
+        assert "Enrollment listener: yes" in output
 
     def test_a_bare_endpoint_uses_the_selected_listen_port(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path
@@ -632,6 +683,7 @@ class TestInit:
         assert "sudo systemctl enable wg-quick@wg0" in output
         assert "sudo sysctl -w net.ipv4.ip_forward=1" in output
         assert "sudo iptables -C FORWARD -i wg0 -o wg0 -j ACCEPT" in output
+        assert "sudo shadow9 wg serve" in output
         assert "FORWARD rule present: no" in output
         assert len(host.commands) == 1
         assert host.timeouts == [wg_commands.COMMAND_TIMEOUT]
@@ -675,7 +727,7 @@ class TestInit:
 
         assert not result.boot.ready
         assert target.read_text(encoding="utf-8") == "hand written\n"
-        assert not any(command[0] == "systemctl" for command in host.commands)
+        assert ("systemctl", "enable", "wg-quick@wg0") not in host.commands
 
     def test_an_existing_forward_rule_is_not_added_again(
         self,
@@ -724,7 +776,13 @@ class TestInit:
 
         assert not any(
             step.ready
-            for step in (result.interface, result.boot, result.forwarding, result.forward_rule)
+            for step in (
+                result.interface,
+                result.boot,
+                result.forwarding,
+                result.forward_rule,
+                result.enrollment,
+            )
         )
         assert host.commands == []
 
@@ -1004,6 +1062,76 @@ class TestRestore:
         assert not any(command[0] == "wg-quick" for command in host.commands)
 
 
+class TestEnrollmentServer:
+    def test_serve_binds_the_public_listener(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import uvicorn
+
+        _init_hub(runner, cli_app, hub_root)
+        called: dict[str, object] = {}
+
+        def run(app: str, **options: object) -> None:
+            called["app"] = app
+            called.update(options)
+
+        monkeypatch.setattr(uvicorn, "run", run)
+
+        result = runner.invoke(cli_app, ["wg", "serve"])
+
+        assert result.exit_code == 0, result.output
+        assert called == {
+            "app": "shadow9.api.app:enrollment_app",
+            "host": "0.0.0.0",
+            "port": 8081,
+            "log_level": "info",
+        }
+
+    def test_serve_and_the_api_dependencies_use_the_selected_config(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import uvicorn
+
+        from shadow9.api.deps import get_config
+        from shadow9.core.config import get_settings
+
+        _init_hub(runner, cli_app, hub_root)
+        selected = hub_root / "selected.yaml"
+        selected.write_text(
+            "wireguard:\n  enabled: true\n  enrollment_port: 8181\n",
+            encoding="utf-8",
+        )
+        called: dict[str, object] = {}
+
+        def run(app: str, **options: object) -> None:
+            called["app"] = app
+            called.update(options)
+
+        monkeypatch.setattr(uvicorn, "run", run)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "serve", "--config", str(selected)],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert called["port"] == 8181
+        assert get_config().wireguard.enrollment_port == 8181
+        get_settings.cache_clear()
+        try:
+            assert get_settings().wireguard.enrollment_port == 8181
+        finally:
+            get_settings.cache_clear()
+
+
 class TestJoinToken:
     """The token shape and what is kept about it (criteria 26, 28)."""
 
@@ -1019,6 +1147,51 @@ class TestJoinToken:
         assert token_id
         assert secret
         assert named_key == derive_public_key(private_key)
+
+    def test_token_repairs_the_enrollment_service_for_an_existing_hub(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _init_hub(runner, cli_app, hub_root)
+        host = _Host(root=True, binaries={"systemctl"})
+        monkeypatch.setattr(wg_commands, "_host", host)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "token", "--config", _config_file(hub_root)],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "systemctl",
+            "restart",
+            wg_commands.ENROLLMENT_SERVICE_NAME,
+        ) in host.commands
+        assert "This token cannot be used until" not in _flat(result.output)
+
+    def test_token_does_not_call_an_active_unit_a_ready_listener(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _init_hub(runner, cli_app, hub_root)
+        host = _Host(root=True, binaries={"systemctl"}, listener_ready=False)
+        monkeypatch.setattr(wg_commands, "_host", host)
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "token", "--config", _config_file(hub_root)],
+        )
+
+        assert result.exit_code == 0, result.output
+        output = _flat(result.output)
+        assert "nothing accepted a connection on TCP 8081" in output
+        assert "This token cannot be used until the enrollment listener is running" in output
 
     def test_only_the_hash_of_the_secret_is_kept(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path
@@ -2116,6 +2289,7 @@ class TestRegistration:
             ["wg", "device", "add", "--help"],
             ["wg", "list", "--help"],
             ["wg", "remove", "--help"],
+            ["wg", "serve", "--help"],
             ["wg", "hub", "set-endpoint", "--help"],
             ["wg", "token", "--help"],
             ["wg", "setup", "--help"],
