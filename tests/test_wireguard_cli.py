@@ -135,8 +135,15 @@ def _config_file(root: Path) -> str:
 
 
 def _flat(output: str) -> str:
-    """Collapse the wrapping rich does, so a sentence can be searched for as one."""
-    return re.sub(r"\s+", " ", output)
+    """
+    Drop the terminal escapes and collapse the wrapping rich does, so a sentence can be
+    searched for as one string.
+
+    Rich colours its output whenever the run looks like a terminal, which a CI job does.
+    It puts the escapes inside a word rather than around it, so a plain substring match
+    misses text that is really on the screen.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", output))
 
 
 def _init_hub(runner: CliRunner, cli_app: Typer, root: Path, *extra: str) -> str:

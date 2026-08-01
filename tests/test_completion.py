@@ -1,5 +1,6 @@
 """Removing shell completion takes out this program's files and nothing else."""
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -9,6 +10,16 @@ from shadow9.completion import remove_completion
 
 
 runner = CliRunner()
+
+
+def plain(text: str) -> str:
+    """
+    Drop the terminal escapes so a flag can be matched as one string.
+
+    Rich colours its output whenever the run looks like a terminal, which a CI job does,
+    and it puts the escapes inside the flag name rather than around it.
+    """
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _installed_bash(home: Path) -> Path:
@@ -123,7 +134,7 @@ class TestTheOption:
         result = runner.invoke(app, ["--help"])
 
         assert result.exit_code == 0
-        assert "--remove-completion" in result.stdout
+        assert "--remove-completion" in plain(result.stdout)
 
     def test_it_reports_when_there_was_nothing_to_remove(
         self, tmp_path: Path, monkeypatch
