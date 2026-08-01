@@ -43,8 +43,10 @@ jobs:
 
       - name: Work out the tag
         id: version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          raw='${{ inputs.version }}'
+          raw="$VERSION_INPUT"
           # Accept 0.1.0 or v0.1.0 and settle on one spelling.
           bare="${raw#v}"
           if ! printf '%s' "$bare" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
@@ -116,6 +118,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.record.outputs.tag }}
+          BUILD_SHA: ${{ needs.record.outputs.sha }}
         run: |
           notes=$(cat <<'EOF'
           OpenWrt node client for the shadow9 WireGuard hub.
@@ -163,6 +166,12 @@ jobs:
           notes="${notes//__TAG__/$TAG}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/tags/$TAG"
+            tag_sha=$(git rev-parse "FETCH_HEAD^{commit}")
+            if [ "$tag_sha" != "$BUILD_SHA" ]; then
+              echo "$TAG points to $tag_sha, but this run built $BUILD_SHA" >&2
+              exit 1
+            fi
             echo "$TAG exists, replacing its files"
             gh release upload "$TAG" release/* --clobber
           else
