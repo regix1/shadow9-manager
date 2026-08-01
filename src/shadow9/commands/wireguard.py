@@ -64,6 +64,7 @@ from ..services.wireguard_service import (
     load_hub_private_key,
     load_topology,
     masquerade_interface_from_config,
+    peer_from_credential,
     node_binary_checksums,
     node_package_checksums,
     regenerate_configs,
@@ -351,11 +352,26 @@ def _init_impl(
         outward = masquerade or _stored_masquerade_interface(cfg.wireguard.interface)
         existing = load_hub_private_key()
         if existing is not None and not force:
-            console.print("[yellow]This host already has a WireGuard hub key.[/yellow]")
-            console.print(
-                "[dim]Use --force to replace it. Every existing peer would then have to "
-                "rejoin, because their configs name the old key.[/dim]"
+            # Naming the peers that would actually break is the difference between a
+            # warning an operator can act on and one that just sounds frightening. A
+            # half-finished setup leaves a key behind with nothing enrolled against it,
+            # which is the common case for hitting this at all.
+            enrolled = sorted(
+                credential.username
+                for credential in _auth_manager(cfg).list_credentials()
+                if peer_from_credential(credential) is not None
             )
+            console.print("[yellow]This host already has a WireGuard hub key.[/yellow]")
+            if enrolled:
+                console.print(
+                    f"[dim]{len(enrolled)} peer(s) name it and would have to rejoin: "
+                    f"{', '.join(enrolled)}. Replace it with --force.[/dim]"
+                )
+            else:
+                console.print(
+                    "[dim]No peers are enrolled against it, so replacing it costs "
+                    "nothing. Re-run with --force.[/dim]"
+                )
             raise typer.Exit(1)
 
         keypair = generate_keypair()

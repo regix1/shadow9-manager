@@ -629,7 +629,23 @@ class TestInit:
 
         assert result.exit_code == 1
         assert "already has a WireGuard hub key" in _flat(result.output)
+        assert "No peers are enrolled against it" in _flat(result.output)
         assert (_wireguard_dir(hub_root) / "hub.key").read_text() == first
+
+    def test_the_refusal_names_the_peers_that_would_have_to_rejoin(
+        self, runner: CliRunner, cli_app: Typer, hub_root: Path
+    ) -> None:
+        _init_hub(runner, cli_app, hub_root)
+        runner.invoke(cli_app, ["wg", "device", "add", "phone", "--config", _config_file(hub_root)])
+
+        result = runner.invoke(
+            cli_app, ["wg", "init", "--endpoint", HUB_ENDPOINT, "--config", _config_file(hub_root)]
+        )
+
+        assert result.exit_code == 1
+        flat = _flat(result.output)
+        assert "1 peer(s) name it and would have to rejoin: phone" in flat
+        assert "No peers are enrolled" not in flat
 
     def test_force_replaces_the_key_and_says_peers_must_rejoin(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path
