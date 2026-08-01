@@ -40,9 +40,9 @@ jobs:
     name: Build binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: node/go.mod
           cache: false
@@ -66,7 +66,7 @@ jobs:
         run: sha256sum -c SHA256SUMS
         working-directory: node/dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: node-binaries
           path: node/dist/
@@ -88,9 +88,9 @@ jobs:
           - { release: '25.12.5', target: 'ramips/mt7621', goarch: mipsle }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: node-binaries
           path: node/dist
@@ -121,7 +121,7 @@ jobs:
 
       - name: Cache the SDK
         id: sdkcache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: sdk.tar.zst
           key: sdk-${{ steps.sdk.outputs.name }}
@@ -201,7 +201,7 @@ jobs:
           fi
           ls -l out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: package-${{ steps.tag.outputs.tag }}
           path: out/
@@ -212,7 +212,7 @@ jobs:
     needs: packages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: package-*
           path: node/packages
@@ -222,7 +222,7 @@ jobs:
         run: sha256sum shadow9-node*.ipk shadow9-node*.apk > SHA256SUMS
         working-directory: node/packages
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: node-packages
           path: node/packages/
