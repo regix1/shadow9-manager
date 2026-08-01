@@ -35,10 +35,16 @@ shadow9 wg init --endpoint 203.0.113.10:51820
 `--endpoint` is `host:port` that peers dial. **The port is the UDP WireGuard port, not
 the API port.** A DNS name works as well as an address.
 
-Running `shadow9 wg init` without flags now asks for the endpoint when it has an
-interactive terminal. A script, redirected command, or test has no terminal to answer
-that question, so it must pass `--endpoint`; shadow9 stops before writing a key or config
-when the flag is missing.
+Running `shadow9 wg init` without flags asks for the endpoint when it has an interactive
+terminal. Before the question, shadow9 checks which local address the host would use to
+reach the internet. When that address is publicly routable, the prompt offers it with the
+configured WireGuard listen port, says it came from the host's route, and Enter accepts it.
+When the detected address is private, shadow9 says peers on the internet cannot dial it and
+leaves the prompt empty. A failed check also leaves the prompt unchanged. It never contacts
+an outside address service during setup.
+
+A script, redirected command, or test has no terminal to answer that question, so it must
+pass `--endpoint`; shadow9 stops before writing a key or config when the flag is missing.
 
 That one value drives two separate things, which is worth knowing before you get it
 wrong: it becomes the `Endpoint` line in every peer's config, and its host half becomes
@@ -57,7 +63,7 @@ Other options worth knowing:
 | `--token-hours` | How long the printed join token lasts. Default 24. |
 | `--no-apply` | Write the key and config without changing the host or starting the tunnel. |
 
-`shadow9 wg setup` walks the same thing with prompts.
+`shadow9 wg setup` walks the same thing with prompts, including the endpoint suggestion.
 
 `wg init` and `wg setup` write the hub key, render the config, and then try four independent
 host changes:

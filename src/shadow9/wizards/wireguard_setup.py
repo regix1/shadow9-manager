@@ -8,7 +8,7 @@ here can guess the address peers will dial.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import typer
 from rich.console import Console
@@ -24,6 +24,9 @@ from ..services.wireguard_service import (
     load_hub_private_key,
 )
 from ..wireguard import DEFAULT_MTU, parse_network
+
+if TYPE_CHECKING:
+    from ..commands.wireguard import Host
 
 console = Console()
 
@@ -55,6 +58,15 @@ def run_wireguard_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> Option
         )
     )
 
+    cfg = _load_config(config_path)
+
+    from ..commands.wireguard import _interface_clash
+
+    clash = _interface_clash(cfg.wireguard.interface)
+    if clash is not None:
+        console.print(f"[red]{clash}[/red]")
+        raise typer.Exit(1)
+
     if load_hub_private_key() is not None:
         console.print("[yellow]This host already has a WireGuard hub key.[/yellow]")
         console.print(
@@ -64,8 +76,6 @@ def run_wireguard_setup_wizard(config_path: str = DEFAULT_CONFIG_PATH) -> Option
         if not typer.confirm("Replace the existing hub key?", default=False):
             console.print("[yellow]Left as it was.[/yellow]")
             return None
-
-    cfg = _load_config(config_path)
 
     endpoint = _prompt_endpoint(cfg)
     if endpoint is None:
@@ -149,12 +159,13 @@ def _load_config(config_path: str) -> Config:
     return Config.load(path) if path.exists() else Config()
 
 
-def _prompt_endpoint(cfg: Config) -> Optional[str]:
+def _prompt_endpoint(cfg: Config, host: "Host | None" = None) -> Optional[str]:
     """
     Ask for the address peers dial.
 
     Args:
         cfg: The loaded configuration, whose current value becomes the default
+        host: The host used to find an address when no endpoint is configured
 
     Returns:
         The endpoint, or None if the operator gave up on it
@@ -166,8 +177,31 @@ def _prompt_endpoint(cfg: Config) -> Optional[str]:
         "every peer config.[/dim]"
     )
 
+    suggestion = cfg.wireguard.hub_endpoint or ""
+    if suggestion:
+        console.print(f"[dim]Remembered {suggestion} from the saved configuration.[/dim]")
+    else:
+        if host is None:
+            from ..commands.wireguard import _host
+
+            host = _host
+        try:
+            detected = host.outward_address()
+        except Exception:
+            detected = None
+        if detected is not None:
+            candidate = f"{detected.address}:{cfg.wireguard.listen_port}"
+            if is_public_endpoint_host(candidate):
+                suggestion = candidate
+                console.print(f"[dim]Detected {candidate} from {detected.source}.[/dim]")
+            else:
+                console.print(
+                    f"[yellow]Detected {detected.address} from {detected.source}, but it is "
+                    "private. Peers on the internet cannot dial it.[/yellow]"
+                )
+
     while True:
-        answer = typer.prompt("Endpoint", default=cfg.wireguard.hub_endpoint or "").strip()
+        answer = typer.prompt("Endpoint", default=suggestion).strip()
         if not answer:
             console.print("[yellow]An endpoint is needed before any peer can be built.[/yellow]")
             continue

@@ -48,12 +48,16 @@ class _Host(wg_commands.Host):
         binaries: set[str] | None = None,
         returncodes: dict[tuple[str, ...], int] | None = None,
         outputs: dict[tuple[str, ...], str] | None = None,
+        detected_address: wg_commands.OutwardAddress | None = None,
+        detection_error: Exception | None = None,
     ) -> None:
         self.windows = windows
         self.root = root
         self.binaries = binaries if binaries is not None else set()
         self.returncodes = returncodes if returncodes is not None else {}
         self.outputs = outputs if outputs is not None else {}
+        self.detected_address = detected_address
+        self.detection_error = detection_error
         self.commands: list[tuple[str, ...]] = []
         self.timeouts: list[int] = []
 
@@ -65,6 +69,11 @@ class _Host(wg_commands.Host):
 
     def which(self, name: str) -> str | None:
         return name if name in self.binaries else None
+
+    def outward_address(self) -> wg_commands.OutwardAddress | None:
+        if self.detection_error is not None:
+            raise self.detection_error
+        return self.detected_address
 
     def run(
         self, command: list[str], timeout: int = wg_commands.COMMAND_TIMEOUT
@@ -214,6 +223,93 @@ class TestInit:
         assert "does not end in a port number" in _flat(result.output)
         assert Config.load(Path(_config_file(hub_root))).wireguard.hub_endpoint == ROUTABLE_ENDPOINT
 
+    def test_interactive_init_offers_the_detected_public_address(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def terminal_is_interactive() -> bool:
+            return True
+
+        address = wg_commands.OutwardAddress("93.184.216.34", "this host's route to the internet")
+        monkeypatch.setattr(wg_commands, "_terminal_is_interactive", terminal_is_interactive)
+        monkeypatch.setattr(wg_commands, "_host", _Host(windows=True, detected_address=address))
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "init", "--port", "51999", "--config", _config_file(hub_root)],
+            input="\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Detected 93.184.216.34:51999 from this host's route to the internet." in _flat(
+            result.output
+        )
+        assert "Endpoint [93.184.216.34:51999]" in _flat(result.output)
+        assert (
+            Config.load(Path(_config_file(hub_root))).wireguard.hub_endpoint
+            == "93.184.216.34:51999"
+        )
+
+    def test_interactive_init_does_not_offer_a_detected_private_address(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def terminal_is_interactive() -> bool:
+            return True
+
+        address = wg_commands.OutwardAddress("192.168.1.10", "this host's route to the internet")
+        monkeypatch.setattr(wg_commands, "_terminal_is_interactive", terminal_is_interactive)
+        monkeypatch.setattr(wg_commands, "_host", _Host(windows=True, detected_address=address))
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "init", "--config", _config_file(hub_root)],
+            input=f"{ROUTABLE_ENDPOINT}\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        output = _flat(result.output)
+        assert (
+            "Detected 192.168.1.10 from this host's route to the internet, but it is private."
+            in output
+        )
+        assert "Peers on the internet cannot dial it." in output
+        assert "Endpoint []" in output
+        assert "Endpoint [192.168.1.10:51820]" not in output
+
+    def test_interactive_init_carries_on_when_address_detection_raises(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def terminal_is_interactive() -> bool:
+            return True
+
+        monkeypatch.setattr(wg_commands, "_terminal_is_interactive", terminal_is_interactive)
+        monkeypatch.setattr(
+            wg_commands,
+            "_host",
+            _Host(windows=True, detection_error=OSError("no route")),
+        )
+
+        result = runner.invoke(
+            cli_app,
+            ["wg", "init", "--config", _config_file(hub_root)],
+            input=f"{ROUTABLE_ENDPOINT}\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Endpoint []" in _flat(result.output)
+        assert Config.load(Path(_config_file(hub_root))).wireguard.hub_endpoint == ROUTABLE_ENDPOINT
+
     def test_flags_skip_the_interactive_check(
         self,
         runner: CliRunner,
@@ -299,14 +395,21 @@ class TestInit:
         )
         monkeypatch.setattr(wg_commands, "_host", host)
 
+        def terminal_is_interactive() -> bool:
+            return True
+
+        monkeypatch.setattr(wg_commands, "_terminal_is_interactive", terminal_is_interactive)
+
         result = runner.invoke(
             cli_app,
-            ["wg", "init", "--endpoint", HUB_ENDPOINT, "--config", _config_file(hub_root)],
+            ["wg", "init", "--config", _config_file(hub_root)],
         )
 
         assert result.exit_code == 1
         assert "interface 'wg0' already exists" in _flat(result.output)
         assert "--interface" in _flat(result.output)
+        assert "Step 1: the address peers dial" not in _flat(result.output)
+        assert "Endpoint" not in _flat(result.output)
         assert not (_wireguard_dir(hub_root) / "hub.key").exists()
         assert not (_wireguard_dir(hub_root) / "wg0.conf").exists()
 
@@ -493,9 +596,7 @@ class TestInit:
 
         assert ("sysctl", "-w", "net.ipv6.conf.all.forwarding=1") in host.commands
         assert any(command[:2] == ("ip6tables", "-C") for command in host.commands)
-        assert forwarding_config.read_text(encoding="utf-8") == (
-            "net.ipv6.conf.all.forwarding=1\n"
-        )
+        assert forwarding_config.read_text(encoding="utf-8") == ("net.ipv6.conf.all.forwarding=1\n")
 
     def test_windows_runs_no_linux_commands(self, hub_root: Path) -> None:
         host = _Host(windows=True, root=False)
@@ -1471,6 +1572,45 @@ class TestTheWizard:
         assert ROUTABLE_ENDPOINT in Path(_config_file(hub_root)).read_text()
         assert ("wg-quick", "up", str(config)) in host.commands
         assert "Hub activation" in _flat(result.output)
+
+    def test_the_wizard_offers_the_detected_public_address(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        address = wg_commands.OutwardAddress("93.184.216.34", "this host's route to the internet")
+        monkeypatch.setattr(wg_commands, "_host", _Host(windows=True, detected_address=address))
+        answers = "\n".join(["", "10.9.0.0/24", "51820", "n", "y"]) + "\n"
+
+        result = runner.invoke(
+            cli_app, ["wg", "setup", "--config", _config_file(hub_root)], input=answers
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Endpoint [93.184.216.34:51820]" in _flat(result.output)
+        assert (
+            Config.load(Path(_config_file(hub_root))).wireguard.hub_endpoint
+            == "93.184.216.34:51820"
+        )
+
+    def test_the_wizard_checks_the_interface_before_asking_questions(
+        self,
+        runner: CliRunner,
+        cli_app: Typer,
+        hub_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host = _Host(binaries={"wg"}, outputs={("wg", "show", "interfaces"): "wg0\n"})
+        monkeypatch.setattr(wg_commands, "_host", host)
+
+        result = runner.invoke(cli_app, ["wg", "setup", "--config", _config_file(hub_root)])
+
+        assert result.exit_code == 1
+        assert "interface 'wg0' already exists" in _flat(result.output)
+        assert "Step 1: the address peers dial" not in _flat(result.output)
+        assert "Endpoint" not in _flat(result.output)
 
     def test_the_wizard_refuses_an_endpoint_it_cannot_use(
         self, runner: CliRunner, cli_app: Typer, hub_root: Path

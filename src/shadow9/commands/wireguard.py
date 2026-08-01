@@ -131,6 +131,14 @@ class ActivationResult:
     forward_rule: ActivationStep
 
 
+@dataclass(frozen=True)
+class OutwardAddress:
+    """An address selected from the host's route table and where it came from."""
+
+    address: str
+    source: str
+
+
 class Host:
     """The checked host operations used while activating WireGuard."""
 
@@ -143,6 +151,16 @@ class Host:
 
     def which(self, name: str) -> str | None:
         return shutil.which(name)
+
+    def outward_address(self) -> OutwardAddress | None:
+        """Return the local address used for an internet route, without sending traffic."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("1.1.1.1", 53))
+                address = str(probe.getsockname()[0])
+        except Exception:
+            return None
+        return OutwardAddress(address, "this host's route to the internet")
 
     def interfaces(self) -> set[str] | None:
         """Return live WireGuard interfaces, or None when this host cannot answer."""
@@ -309,6 +327,11 @@ def _init_impl(
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
 
+    clash = _interface_clash(cfg.wireguard.interface)
+    if clash is not None:
+        console.print(f"[red]{clash}[/red]")
+        raise typer.Exit(1)
+
     if endpoint is None and not cfg.wireguard.hub_endpoint:
         if not _terminal_is_interactive():
             console.print(
@@ -323,11 +346,6 @@ def _init_impl(
             console.print("[yellow]Cancelled. Nothing was written.[/yellow]")
             raise typer.Exit(1)
         cfg.wireguard.hub_endpoint = prompted
-
-    clash = _interface_clash(cfg.wireguard.interface)
-    if clash is not None:
-        console.print(f"[red]{clash}[/red]")
-        raise typer.Exit(1)
 
     with lock_file(hub_key_path()):
         outward = masquerade or _stored_masquerade_interface(cfg.wireguard.interface)
