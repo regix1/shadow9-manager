@@ -76,10 +76,10 @@ echo.
 echo   Next steps:
 echo.
 echo   1. Create a user:
-echo      shadow9.bat user generate
+echo      shadow9.bat socks5 user generate
 echo.
 echo   2. Start the server:
-echo      shadow9.bat serve
+echo      shadow9.bat socks5 serve
 echo.
 echo   3. Connect your app (SOCKS5 proxy):
 echo      Host: 0.0.0.0    Port: 1080

@@ -551,7 +551,7 @@ def _check_linux():
     """Check if running on Linux."""
     if sys.platform != "linux":
         console.print("[red]Service management is only available on Linux[/red]")
-        console.print("[dim]On Windows/macOS, use: shadow9 socks5 serve --background[/dim]")
+        console.print("[dim]On Windows/macOS, run: shadow9 socks5 serve[/dim]")
         raise typer.Exit(1)
 
 

@@ -85,7 +85,7 @@ if "%1"=="test" (
         echo   Connection test FAILED
         echo.
         echo   Make sure:
-        echo   1. The server is running: shadow9.bat serve
+        echo   1. The server is running: shadow9.bat socks5 serve
         echo   2. Username and password are correct
     ) else (
         echo.

@@ -49,7 +49,7 @@ def run_user_modify_wizard(
 
         if not users:
             console.print(
-                "[yellow]No users configured. Use 'shadow9 socks5 user new' to create one.[/yellow]"
+                "[yellow]No users configured. Use 'shadow9 socks5 user generate' to create one.[/yellow]"
             )
             return True
 

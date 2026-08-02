@@ -228,7 +228,7 @@ def run_test(args):
         except ConnectionRefusedError:
             safe_print(f'  {SYM_CROSS} Connection refused - is the server running?')
             print()
-            safe_print('  Start the server with: ./shadow9 serve')
+            safe_print('  Start the server with: ./shadow9 socks5 serve')
             return False
         except Exception as e:
             safe_print(f'  {SYM_CROSS} Error: {e}')
