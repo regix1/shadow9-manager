@@ -41,7 +41,11 @@ define Package/shadow9-node
   SECTION:=net
   CATEGORY:=Network
   TITLE:=shadow9 WireGuard node client
-  DEPENDS:=+wireguard-tools +luci-proto-wireguard +ca-bundle +pbr
+  # luci-app-pbr is the web UI for the pbr service, and it is a separate
+  # package that depends on pbr rather than the other way round. Without it a
+  # policy-ready join leaves the operator no way to write the policy that
+  # selects tunnel traffic except uci over SSH.
+  DEPENDS:=+wireguard-tools +luci-proto-wireguard +ca-bundle +pbr +luci-app-pbr
 endef
 
 define Package/shadow9-node/description
@@ -70,13 +74,33 @@ endef
 
 # A package upgrade keeps the enrolled tunnel. A real removal runs the same
 # ownership-checked cleanup available to the operator from the command line.
+#
+# default_prerm sources this first and only then walks the package's own
+# /etc/init.d entries to disable and stop them, so nothing here may delete a
+# packaged file: removing /etc/init.d/shadow9-node early makes that walk fail
+# and strands /etc/rc.d/S95shadow9-node. The package manager deletes its own
+# files after this runs.
+#
+# A refused cleanup warns and lets removal continue. Keeping unproven router
+# configuration is right, but default_prerm returns this script's status and
+# opkg aborts on a nonzero one, which would leave the package unremovable.
+# Direct "shadow9-node uninstall" still exits nonzero.
 define Package/shadow9-node/prerm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 [ "$${PKG_UPGRADE}" = "1" ] && exit 0
-[ ! -x /usr/sbin/shadow9-node ] || /usr/sbin/shadow9-node uninstall -quiet
+if [ -x /usr/sbin/shadow9-node ]; then
+	/usr/sbin/shadow9-node uninstall -quiet || \
+		echo "shadow9-node: the router configuration could not be proven to belong to Shadow9 and was left in place; run 'shadow9-node uninstall' once it is resolved" >&2
+fi
+exit 0
 endef
 
+# No /etc/uci-defaults script is shipped on purpose. default_postinst runs a
+# bare "uci commit" after sourcing any uci-defaults file a package owns, and
+# that commits every package's staged changes, including ones an operator left
+# pending in LuCI. The boot service does the same first-boot enrollment, and
+# default_postinst enables and starts it here anyway.
 define Package/shadow9-node/install
 	$(if $(NODE_GOARCH),,$(error no prebuilt shadow9-node binary for ARCH=$(ARCH)))
 	$(INSTALL_DIR) $(1)/usr/sbin
@@ -86,8 +110,6 @@ define Package/shadow9-node/install
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/shadow9.config $(1)/etc/config/shadow9
 	$(INSTALL_CONF) ./files/shadow9.token $(1)/etc/shadow9.token
-	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN) ./files/99-shadow9-node $(1)/etc/uci-defaults/99-shadow9-node
 endef
 
 $(eval $(call BuildPackage,shadow9-node))

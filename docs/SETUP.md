@@ -276,26 +276,72 @@ Use `-token-file /etc/shadow9.token` instead of `-token` to keep it out of shell
 history; the package ships that file as a conffile so it survives `sysupgrade`.
 
 The OpenWrt client is policy-ready by default. Its hub peer accepts `0.0.0.0/0`, but
-netifd installs that default in a separate routing table, not the main table. Ordinary
-traffic therefore keeps using WAN until a PBR policy selects `wg0`. The interface uses
-the tunnel network's prefix so netifd also creates the source and destination rules that
-let the router itself reach the hub. Selected LAN traffic is masqueraded to the node's
-tunnel address; the hub can then apply its tunnel-range masquerade on the way out.
+`route_allowed_ips` is off, so netifd does not replace the main WAN default. PBR creates
+the `pbr_wg0` table and fwmark rules, then sends only matching policy traffic through it.
+Shadow9 also writes named routes for the tunnel subnet and every remote site in the main
+table so those networks stay reachable without a PBR policy. Selected LAN traffic bound for
+the internet is masqueraded to the node's tunnel address, so the hub can apply its
+tunnel-range masquerade on the way out. Traffic to the tunnel subnet and to the other
+sites is excluded from that masquerade, so a remote LAN sees the host that opened the
+connection rather than this node's tunnel address.
 
-Use `--site-only` to keep the earlier behavior: a `/32` node address, no separate routing
-table, and only the tunnel plus LANs advertised by other sites in `AllowedIPs`. Otherwise,
-the client checks UCI and the active IPv4 and IPv6 rules and routes, then uses the first
-unused numeric table at or above `51820`. Use `--table <id>` to pin a specific table. The
-Go flag parser accepts both one and two dashes. A refresh keeps the table chosen at join
-time, and a repeated join reuses the table still owned by that Shadow9 interface. An
-existing node that predates this setting stays site-only rather than changing routes
-during an upgrade. To opt that node into policy routing, issue a new token and join again
-with `--keep-key`.
+Use `--site-only` to keep the earlier behavior: a `/32` node address, no PBR target, and
+only the tunnel plus LANs advertised by other sites in `AllowedIPs`. Otherwise PBR chooses
+the numeric table ID behind `pbr_wg0`; `--table` is retained only to produce a
+clear migration error and is no longer accepted. A refresh keeps the routing mode chosen
+at join time. It also replaces the older numeric `ip4table` or `ip6table` layout with the
+PBR-managed table. An existing node that predates policy-ready joins stays site-only rather
+than changing routes during an upgrade. To opt that node into policy routing, issue a new
+token and join again with `--keep-key`.
 
-The package declares `pbr` as a dependency. `opkg` or `apk` detects whether it is already
-installed and only fetches it when missing. Before a policy-ready join writes UCI, the
+The package declares `pbr` and its web UI `luci-app-pbr` as dependencies. `opkg` or `apk`
+detects whether they are already installed and only fetches what is missing. The web UI is
+a separate package that depends on the service rather than the other way round, so without
+that second dependency there would be no way to write a policy except `uci` over SSH.
+After a join, the policy editor is under Services then Policy Based Routing in LuCI, and
+`wg0` appears there as a selectable interface. Before a policy-ready join writes UCI, the
 client also verifies that `pbr` is installed, which gives a clear error for a raw binary
-copied onto a router without its dependencies. A `--site-only` join does not require PBR.
+copied onto a router without its dependencies. It adds its interface to PBR's
+`supported_interface` list, enables PBR when its stock configuration is disabled, and
+reloads it after netifd brings the tunnel up. PBR recognizes a WireGuard interface as a
+tunnel on its own, so that list can be empty on a working router; adding to it only ever
+widens the set, and it is what uninstall reads back to know what it may remove. The client records which changes it owns.
+Uninstall restores PBR's disabled state only when no other supported interfaces, enabled
+policies, DNS policies, or includes need it. Refresh checks the package and repairs this
+local registration even when the hub revision has not changed, and it still does that
+repair when the hub cannot be reached at all, so a router that boots before its uplink is
+up keeps working routes and reports the hub failure separately. A PBR service diagnostic
+is reported without tearing down the working tunnel only when the live `pbr_wg0` default
+route and fwmark rule still exist; otherwise the write is rolled back and returns an error.
+If disabled PBR contains enabled user policies, the join stops and asks you to enable PBR
+deliberately instead of activating those policies unexpectedly. Policy mode currently
+supports IPv4 tunnels; use `--site-only` for an IPv6 tunnel.
+A `--site-only` join does not require PBR. Join, refresh, and uninstall stop before
+committing if one of the UCI packages they need already has pending changes.
+
+A policy join also writes one named rule, `wg0_rule`, matching this router's LAN subnet
+and pointing at PBR's `pbr_wg0` table. It is written with `option disabled '1'`, so netifd
+installs nothing and no traffic moves; it appears under Network then Routing then IPv4
+Rules with Disable ticked, ready to turn on with one checkbox when you want the whole LAN
+to use the tunnel. Narrower selections are still better made as PBR policies, which is why
+the rule sits at priority 30001, just past PBR's own rules. Turning it on is your decision
+and neither a refresh nor a later topology change switches it back off. A refresh adds the
+rule to a node that enrolled before this existed, and `--site-only`, or a router whose LAN
+subnet cannot be read, gets no rule at all.
+
+A join refuses to run against a different `--iface` than the one this node is already
+enrolled on, because moving the saved ownership would leave the previous interface, peer,
+routes and zone with nothing to prove they belong to Shadow9. Uninstall first. If the hub
+rejects the enrollment, the saved identity is rolled back to exactly what it was, so an
+already enrolled node can still prove it owns its own interface.
+
+The boot service does both jobs: it enrolls the first time it finds a hub URL and a token
+with no key written yet, and refreshes on every boot after that. It runs as a procd
+instance rather than inline, so it does not hold up boot, and it retries a hub that is not
+reachable yet a fixed number of times before leaving the next boot to try again. The
+package ships no `/etc/uci-defaults` script, because OpenWrt's default post-install runs a
+bare `uci commit` for any package that owns one, which would commit changes an operator
+left pending in LuCI.
 
 Remove only the configuration owned by this client with:
 
@@ -304,12 +350,20 @@ shadow9-node uninstall
 ```
 
 The command verifies the saved private key against the exact interface before deleting
-anything. It removes that interface, Shadow9's named hub peer, firewall zone and
-forwardings, enrollment settings, token file, and boot refresh hook. Other WireGuard
-interfaces, routing tables, PBR policies, firewall zones, and packages are left alone.
+anything. It removes that interface, Shadow9's named hub peer and owned tunnel/site routes,
+firewall zone and forwardings, enrollment settings, token file, boot refresh hook, and the
+exact PBR supported-interface entry when Shadow9 added it. Other WireGuard interfaces,
+routing tables, PBR entries and policies, firewall zones, and packages are left alone.
 It works the same for policy-routing and `--site-only` joins and refuses to guess if the
-ownership check fails. `opkg remove shadow9-node` and `apk del shadow9-node` run the same
-cleanup for a real package removal; a package upgrade keeps the tunnel enrolled.
+ownership check fails. It removes the tunnel first and only then disables the boot hook, so
+a refused cleanup leaves the hook in place to keep repairing the tunnel it would not touch.
+`opkg remove shadow9-node` and `apk del shadow9-node` run the same cleanup for a real
+package removal; a package upgrade keeps the tunnel enrolled. A cleanup that refuses during
+package removal prints a warning and lets the removal finish, so the package never becomes
+unremovable; run `shadow9-node uninstall` once the ownership problem is resolved. The
+direct `shadow9-node uninstall` command disables the `/etc/init.d/shadow9-node` boot hook
+but keeps the installed command available for a later join. The package manager deletes the
+init script and the binary itself once the cleanup has run.
 
 The router generates its own keypair and the hub never sees the private half. The
 tunnel then appears in LuCI under Network then Interfaces as a real WireGuard interface
@@ -340,7 +394,7 @@ Unlike the hub, this one applies its own configuration and runs `wg-quick` for y
 | `shadow9 wg token` | Another single-use join token |
 | `shadow9 wg remove <name>` | Removes the peer and reissues every config it appeared in |
 | `shadow9 wg hub set-endpoint <addr>` | Changes the address peers dial and bumps the topology revision |
-| `shadow9-node refresh` | On a router: pulls current settings while keeping its routing mode and table |
+| `shadow9-node refresh` | On a router: pulls current settings while keeping its routing mode and repairing PBR |
 | `shadow9-node uninstall` | Removes only the OpenWrt configuration proven to belong to Shadow9 |
 
 When a peer is added, removed, enabled, disabled, or re-enrolled, Shadow9 also synchronizes

@@ -205,20 +205,63 @@ as a fallback because it does not install dependencies, the boot service, or the
 that survives `sysupgrade`. See [the router setup steps](docs/SETUP.md#5-add-a-router-as-a-site-gateway)
 for the package filenames and join command.
 
-New OpenWrt joins put `0.0.0.0/0` in the first unused routing table at or above `51820`,
-leaving the WAN default untouched until PBR selects traffic for `wg0`. The client checks
-UCI and the active IPv4 and IPv6 rules and routes before choosing. Use
-`shadow9-node join --site-only ...` for the earlier tunnel-and-sites-only behavior, or
-`--table <id>` to pin a specific table.
+New OpenWrt joins put `0.0.0.0/0` in the WireGuard peer but leave
+`route_allowed_ips` off, so the WAN default is untouched. PBR chooses the numeric ID,
+builds the `pbr_wg0` table and fwmark rules, and exposes `wg0` as a policy target; it
+recognizes a WireGuard interface as a tunnel on its own, so `supported_interface` can be
+empty and still work. The client adds `wg0` to that list anyway, because the list only ever
+adds an interface rather than restricting the set, and it is what uninstall reads back to
+know what to undo. Shadow9 writes ordinary
+routes for the tunnel subnet and every remote site so those networks remain reachable
+without a PBR policy. Use `shadow9-node join --site-only ...` for the earlier
+tunnel-and-sites-only behavior. The old `--table` pin is rejected because it bypassed
+PBR's matching rule setup. A policy-ready join succeeds only after the live table has a
+default route through `wg0` and a matching fwmark rule. Policy mode currently supports
+IPv4 tunnels; use `--site-only` for an IPv6 tunnel. LAN traffic bound for the internet is
+masqueraded to the node's tunnel address; traffic to the tunnel subnet and the other sites
+is excluded, so a remote LAN sees the host that opened the connection.
 
-The OpenWrt package declares `pbr` as a dependency, so `opkg` or `apk` keeps an installed
-copy and fetches it only when it is missing. A policy-ready join also checks for `pbr`
-before changing UCI; `--site-only` does not require it.
+A policy join leaves a ready-made way to send the LAN through the tunnel: a named rule
+matching the router's LAN subnet and pointing at `pbr_wg0`, written disabled so nothing
+moves until you tick it on under Network then Routing. A refresh adds it to a node that
+enrolled earlier, and once you enable it, nothing Shadow9 does turns it back off.
+
+A join refuses to move an existing enrollment to a different `--iface`, because that would
+strand the previous interface, peer, routes and zone with nothing left to prove Shadow9
+owns them. A hub that rejects the enrollment leaves the saved identity exactly as it was.
+
+PBR ownership is recorded in `/etc/config/shadow9`. Shadow9 enables a stock-disabled PBR
+service and restores that disabled state only when no other enabled interface, policy,
+DNS policy, or include needs it. It preserves operator-owned PBR entries and refuses to
+commit over pending UCI changes from LuCI or another command.
+
+The OpenWrt package declares `pbr` and its web UI `luci-app-pbr` as dependencies, so `opkg`
+or `apk` keeps installed copies and fetches only what is missing. The web UI is a separate
+package that depends on the service, not the reverse, so it has to be named too or there is
+nowhere to write a policy but the command line. After a join, `wg0` is a selectable
+interface under Services then Policy Based Routing. A policy-ready join also checks for `pbr`
+before changing UCI; refresh performs the same check, repairs the local PBR registration,
+and migrates the older numeric-table layout even when the hub revision has not changed. It
+does that repair even when the hub cannot be reached, so a router that boots ahead of its
+uplink keeps working routes. A PBR service diagnostic is reported without tearing down an
+otherwise working tunnel. If disabled PBR already has enabled user policies, Shadow9 stops
+and asks the operator to enable it deliberately instead of activating those policies as a
+side effect. `--site-only` does not require PBR.
+
+The boot service enrolls the first time it finds a hub and a token with no key written yet,
+and refreshes on every boot after that. It runs as a procd instance, so it does not hold up
+boot, and it retries an unreachable hub a fixed number of times. The package ships no
+`/etc/uci-defaults` script, because OpenWrt's default post-install runs a bare `uci commit`
+for any package that owns one.
 
 `shadow9-node uninstall` removes only the interface and UCI sections whose ownership is
-proven by Shadow9's saved identity. It leaves other WireGuard interfaces, routing tables,
-PBR policies, firewall zones, and packages untouched. Removing the OpenWrt package runs
-the same cleanup, while upgrading it keeps the enrolled tunnel.
+proven by Shadow9's saved identity, including its tunnel and remote-site routes and the
+exact PBR supported-interface entry when Shadow9 added it. It leaves other WireGuard interfaces,
+routing tables, PBR entries and policies, firewall zones, and packages untouched. The tunnel
+goes first and the boot hook is only disabled once that succeeds, so a refused cleanup
+leaves the hook in place. Removing the OpenWrt package runs the same cleanup and finishes
+even if it refuses, so the package never becomes unremovable; upgrading it keeps the
+enrolled tunnel.
 
 ---
 

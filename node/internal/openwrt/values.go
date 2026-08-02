@@ -9,8 +9,8 @@ import (
 )
 
 // AddressWithPrefix turns the plain address the hub hands out into the form
-// the addresses list takes. When a tunnel network is supplied, its prefix lets
-// netifd add destination rules for the isolated routing table.
+// the addresses list takes. Policy-ready nodes use the tunnel prefix so their
+// explicit tunnel-subnet route has the same address family and scope.
 func AddressWithPrefix(address string, network ...string) (string, error) {
 	if len(network) > 1 {
 		return "", fmt.Errorf("only one tunnel network may supply the prefix")

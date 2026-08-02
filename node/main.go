@@ -31,7 +31,19 @@ import (
 // version is set at build time by the Makefile.
 var version = "dev"
 
-const defaultTable = 51820
+// A nonzero saved table marks PBR mode. PBR assigns the actual pbr_<iface>
+// routing-table ID so its fwmark rules and LuCI status stay in agreement.
+const defaultTable = 1
+
+func systemRouter() openwrt.Router {
+	return openwrt.Router{
+		Shell:     openwrt.SystemShell{},
+		PBRSettle: time.Second,
+		Report: func(message string) {
+			fmt.Fprintln(os.Stderr, message)
+		},
+	}
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -88,26 +100,31 @@ func uninstall(args []string) error {
 		return fmt.Errorf("uninstall takes no arguments")
 	}
 
-	router := openwrt.Router{Shell: openwrt.SystemShell{}}
+	router := systemRouter()
 	if err := router.Require("uci", "the OpenWrt base system"); err != nil {
 		return fmt.Errorf("%w. This does not look like an OpenWrt router", err)
 	}
+	return removeInstallation(router, *quiet)
+}
+
+func removeInstallation(router openwrt.Router, quiet bool) error {
+	// Ownership-checked cleanup runs first. Disabling the boot service before
+	// it would leave a refused cleanup with a live tunnel and nothing to
+	// repair it at the next boot.
 	removed, err := router.RemoveTunnel()
 	if err != nil {
 		return err
 	}
-	if err := router.DisableRefresh(); err != nil {
+	if err := errors.Join(router.DisableRefresh(), router.RemoveEnrollmentFiles()); err != nil {
 		return err
 	}
-	if err := router.RemoveEnrollmentFiles(); err != nil {
-		return err
-	}
-	if !*quiet {
+	if !quiet {
 		if removed {
 			fmt.Println("Removed the Shadow9-managed tunnel and firewall configuration.")
 		} else {
 			fmt.Println("No Shadow9-managed tunnel was installed.")
 		}
+		fmt.Println("Disabled the Shadow9 boot refresh and removed its enrollment files.")
 		fmt.Println("Other WireGuard interfaces, routing tables, PBR policies and packages were left unchanged.")
 	}
 	return nil
@@ -166,7 +183,7 @@ func joinFlags() (*flag.FlagSet, *joinOptions) {
 	flags.IntVar(&options.keepalive, "keepalive", -1,
 		"override the hub's keepalive seconds; 0 turns keepalives off")
 	flags.IntVar(&options.table, "table", 0,
-		"routing table to use; 0 automatically selects one from 51820 upward")
+		"legacy option; omit it because PBR selects its routing table automatically")
 	flags.BoolVar(&options.siteOnly, "site-only", false,
 		"route only the tunnel and other sites, without a policy-routing default")
 	flags.DurationVar(&options.timeout, "timeout", 20*time.Second,
@@ -182,11 +199,8 @@ func join(args []string) error {
 	if options.hub == "" {
 		return fmt.Errorf("-hub is required")
 	}
-	if !options.siteOnly && options.table < 0 {
-		return fmt.Errorf("-table cannot be negative")
-	}
-	if !options.siteOnly && options.table >= 253 && options.table <= 255 {
-		return fmt.Errorf("-table %d is reserved by Linux", options.table)
+	if options.table != 0 {
+		return fmt.Errorf("-table is no longer needed; omit it because PBR selects its own table")
 	}
 
 	tokenText, err := readToken(options.token, options.tokenFile)
@@ -198,7 +212,7 @@ func join(args []string) error {
 		return err
 	}
 
-	router := openwrt.Router{Shell: openwrt.SystemShell{}}
+	router := systemRouter()
 	if err := router.Require("uci", "the OpenWrt base system"); err != nil {
 		return fmt.Errorf("%w. This does not look like an OpenWrt router", err)
 	}
@@ -210,7 +224,10 @@ func join(args []string) error {
 			return err
 		}
 	}
-	table, err := chooseTable(options.table, options.siteOnly, options.iface, router)
+	if err := requireSameInterface(router, options.iface); err != nil {
+		return err
+	}
+	table, err := chooseTable(options.table, options.siteOnly)
 	if err != nil {
 		return err
 	}
@@ -232,6 +249,13 @@ func join(args []string) error {
 	if err != nil {
 		return err
 	}
+	settings, err := router.SaveSettings()
+	if err != nil {
+		return err
+	}
+	// The identity is still written before the request, so a router that loses
+	// power mid-enrollment keeps the private half of a key the hub may already
+	// have recorded.
 	if err := router.WriteIdentity(peerName, privateKey.String()); err != nil {
 		return fmt.Errorf("saving the WireGuard identity before enrollment: %w", err)
 	}
@@ -244,7 +268,10 @@ func join(args []string) error {
 	client := enroll.Client{BaseURL: options.hub}
 	answer, err := client.Enroll(ctx, joinToken, peerName, publicKey.String(), routes)
 	if err != nil {
-		return err
+		// An enrollment that returned an error left the hub without this key,
+		// and the half-written identity would otherwise stop an already
+		// enrolled node from proving it owns its own interface.
+		return router.RestoreSettings(err, settings)
 	}
 	if err := router.WriteRefreshKey(joinToken.RefreshKey().String()); err != nil {
 		return fmt.Errorf("saving the refresh key after enrollment: %w", err)
@@ -268,6 +295,11 @@ func join(args []string) error {
 		return err
 	}
 	tunnel.LanZone = lanZone
+	// A router whose LAN cannot be read simply gets no steering rule, which is
+	// why this failure is not fatal.
+	if lanSubnet, lanErr := openwrt.LanNetwork(router); lanErr == nil {
+		tunnel.LanSubnet = lanSubnet
+	}
 	if tunnel.TakesOverTheDefaultRoute() {
 		fmt.Fprintf(os.Stderr,
 			"Note: the hub's allowed IPs contain a default route, so all of this router's\n"+
@@ -282,8 +314,8 @@ func join(args []string) error {
 	fmt.Printf("    %s is %s, hub at %s:%d.\n",
 		tunnel.Interface, tunnel.Address, tunnel.EndpointHost, tunnel.EndpointPort)
 	if tunnel.Table != 0 {
-		fmt.Printf("    Internet routes are ready in table %d; PBR selects what uses them.\n",
-			tunnel.Table)
+		fmt.Printf("    PBR manages the pbr_%s internet-route table and selects what uses it.\n",
+			tunnel.Interface)
 	}
 	if len(routes) > 0 {
 		fmt.Printf("    Announcing %s to the rest of the tunnel.\n", strings.Join(routes, ", "))
@@ -299,11 +331,14 @@ func refresh(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	router := openwrt.Router{Shell: openwrt.SystemShell{}}
+	router := systemRouter()
 	if err := router.Require("uci", "the OpenWrt base system"); err != nil {
 		return fmt.Errorf("%w. This does not look like an OpenWrt router", err)
 	}
+	return refreshNode(router, *timeout)
+}
 
+func refreshNode(router openwrt.Router, timeout time.Duration) error {
 	name, err := savedValue(router, "shadow9.node.name")
 	if err != nil {
 		return err
@@ -365,16 +400,36 @@ func refresh(args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	answer, err := (enroll.Client{BaseURL: hub}).Refresh(ctx, key, name)
+	tableText, err := savedValue(router, "shadow9.node.table")
 	if err != nil {
 		return err
 	}
-	if answer.Revision != nil && *answer.Revision == currentRevision {
-		fmt.Printf("Tunnel settings are already at revision %d; nothing changed.\n", currentRevision)
-		return nil
+	table, err := savedNumber(tableText, "routing table")
+	if err != nil {
+		return err
 	}
+	if table != 0 {
+		table = defaultTable
+		if err := router.RequirePolicyPackage(); err != nil {
+			return err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	answer, err := (enroll.Client{BaseURL: hub}).Refresh(ctx, key, name)
+	if err != nil {
+		// At boot the uplink can still be negotiating, and this is the only
+		// thing that repairs local routes and PBR. Doing that from the saved
+		// settings first means an unreachable hub costs the node its topology
+		// update, not the routes it already has. The hub failure is still
+		// returned, so the boot service tries again.
+		if repairErr := router.EnsurePBR(iface, table); repairErr != nil {
+			return errors.Join(err, repairErr)
+		}
+		return err
+	}
+	unchanged := answer.Revision != nil && *answer.Revision == currentRevision
 	if err := router.Require("wg", "wireguard-tools"); err != nil {
 		return err
 	}
@@ -402,13 +457,17 @@ func refresh(args []string) error {
 	if err != nil {
 		return err
 	}
-	tableText, err := savedValue(router, "shadow9.node.table")
-	if err != nil {
-		return err
-	}
-	table, err := savedNumber(tableText, "routing table")
-	if err != nil {
-		return err
+	if unchanged {
+		if err := router.EnsurePBR(iface, table); err != nil {
+			return err
+		}
+		if table == 0 {
+			fmt.Printf("Tunnel settings are still at revision %d.\n", currentRevision)
+		} else {
+			fmt.Printf("Tunnel settings are still at revision %d; local routes and PBR checked.\n",
+				currentRevision)
+		}
+		return nil
 	}
 	tunnel, err := buildRefreshTunnel(
 		answer, privateKey, iface, zone, listenPort, mtuOverride, keepaliveOverride, table)
@@ -416,6 +475,9 @@ func refresh(args []string) error {
 		return err
 	}
 	tunnel.LanZone = lanZone
+	if lanSubnet, lanErr := openwrt.LanNetwork(router); lanErr == nil {
+		tunnel.LanSubnet = lanSubnet
+	}
 	if err := router.WriteTunnel(tunnel, strings.TrimSuffix(hub, "/")); err != nil {
 		return err
 	}
@@ -423,42 +485,32 @@ func refresh(args []string) error {
 	return nil
 }
 
-func chooseTable(requested int, siteOnly bool, iface string, router openwrt.Router) (int, error) {
+// requireSameInterface stops a join that would move an existing enrollment to
+// a different interface name. Doing that repoints the saved ownership at an
+// interface with none of the old sections, and the previous interface, peer,
+// routes and zone are then left with nothing that can prove they belong to
+// Shadow9, so even uninstall cannot remove them.
+func requireSameInterface(router openwrt.Router, iface string) error {
+	enrolled, err := savedValue(router, "shadow9.node.interface")
+	if err != nil {
+		return fmt.Errorf("reading the enrolled interface before joining: %w", err)
+	}
+	if enrolled == "" || enrolled == iface {
+		return nil
+	}
+	return fmt.Errorf(
+		"this node is already enrolled on %s; run 'shadow9-node uninstall' before joining as %s",
+		enrolled, iface)
+}
+
+func chooseTable(requested int, siteOnly bool) (int, error) {
+	if requested != 0 {
+		return 0, fmt.Errorf("-table is no longer needed; omit it because PBR selects its own table")
+	}
 	if siteOnly {
 		return 0, nil
 	}
-	if requested != 0 {
-		return requested, nil
-	}
-	savedInterface, err := savedValue(router, "shadow9.node.interface")
-	if err != nil {
-		return 0, fmt.Errorf("reading the saved interface before selecting a routing table: %w", err)
-	}
-	if savedInterface == iface {
-		text, err := savedValue(router, "shadow9.node.table")
-		if err != nil {
-			return 0, fmt.Errorf("reading the saved routing table: %w", err)
-		}
-		table, err := savedNumber(text, "routing table")
-		if err != nil {
-			return 0, err
-		}
-		if table != 0 {
-			if table >= 253 && table <= 255 {
-				return 0, fmt.Errorf("the saved routing table %d is reserved by Linux", table)
-			}
-			for _, family := range []string{"ip4table", "ip6table"} {
-				current, err := savedValue(router, "network."+iface+"."+family)
-				if err != nil {
-					return 0, fmt.Errorf("reading network.%s.%s: %w", iface, family, err)
-				}
-				if strings.TrimSpace(current) == strconv.Itoa(table) {
-					return table, nil
-				}
-			}
-		}
-	}
-	return router.NextTable(defaultTable)
+	return defaultTable, nil
 }
 
 func savedNumber(text, name string) (int, error) {
@@ -689,7 +741,7 @@ func tunnelFor(settings tunnelSettings, privateKey wgkey.Key,
 		if strings.Contains(address, ":") {
 			defaultRoute = openwrt.DefaultIPv6Route
 		}
-		allowedIPs = []string{defaultRoute}
+		allowedIPs = append([]string{defaultRoute}, allowedIPs...)
 	}
 	return openwrt.Tunnel{
 		Interface:         iface,
@@ -697,6 +749,7 @@ func tunnelFor(settings tunnelSettings, privateKey wgkey.Key,
 		LanZone:           openwrt.DefaultLanZone,
 		PrivateKey:        privateKey.String(),
 		Address:           address,
+		Network:           settings.tunnelNetwork,
 		ListenPort:        listenPort,
 		MTU:               settings.mtu,
 		Revision:          settings.revision,

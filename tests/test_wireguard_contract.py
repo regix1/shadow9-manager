@@ -329,9 +329,30 @@ class TestTheGoModulesCopyIsHonest:
 
 
 def test_the_boot_service_refreshes_without_a_join_token() -> None:
+    """An enrolled node boots straight into refresh.
+
+    The service also carries the first-boot enrollment, because a packaged
+    uci-defaults script makes OpenWrt's post-install run a bare ``uci commit``.
+    A join only happens when there is no private key yet and a token is on
+    disk, so a node that is already enrolled never needs one.
+    """
     service = (REPO_ROOT / "packaging" / "openwrt" / "files" / "shadow9-node.init").read_text(
         encoding="utf-8"
     )
-    assert "/usr/sbin/shadow9-node refresh" in service
-    assert "shadow9-node join" not in service
-    assert "shadow9.token" not in service
+    assert '"$BINARY" refresh' in service
+    assert "BINARY=/usr/sbin/shadow9-node" in service
+    assert "if needs_enrollment; then" in service
+    assert "network.$(saved_interface).private_key" in service
+    assert '[ -s "$TOKEN" ]' in service
+
+
+def test_the_package_ships_no_uci_defaults_script() -> None:
+    """OpenWrt's default post-install runs a bare ``uci commit`` for any package
+    that owns a uci-defaults script, which would commit an operator's pending
+    changes. The boot service does the same first-boot enrollment instead."""
+    packaging = REPO_ROOT / "packaging" / "openwrt"
+    assert not list(
+        (packaging / "files").glob("*shadow9-node")
+    ), "a uci-defaults script is back in packaging/openwrt/files"
+    makefile = (packaging / "Makefile").read_text(encoding="utf-8")
+    assert "$(1)/etc/uci-defaults" not in makefile

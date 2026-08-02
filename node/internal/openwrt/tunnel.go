@@ -3,6 +3,7 @@ package openwrt
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -17,15 +18,50 @@ func PeerSectionName(iface string) string {
 	return iface + "_hub"
 }
 
+// RouteSectionName is the named route that keeps the tunnel network reachable
+// outside PBR. Policy-selected traffic uses PBR's own pbr_<interface> table.
+func RouteSectionName(iface string) string {
+	return iface + "_route"
+}
+
+// RuleSectionName is the named rule that sends this router's LAN through the
+// tunnel. It is written disabled, because a join must never move traffic on
+// its own; enabling it is one checkbox on LuCI's Routing page.
+func RuleSectionName(iface string) string {
+	return iface + "_rule"
+}
+
+// PolicyTable is the routing table PBR builds for an interface. The rule
+// points at it by name, which PBR registers in /etc/iproute2/rt_tables.
+func PolicyTable(iface string) string {
+	return "pbr_" + iface
+}
+
+func routeSectionName(iface string, index int) string {
+	if index == 0 {
+		return RouteSectionName(iface)
+	}
+	return RouteSectionName(iface) + "_" + strconv.Itoa(index)
+}
+
 // Tunnel is the state the router should end up in after a join. Every field
 // comes either from a flag or from the hub's enrollment response, so this
 // struct is the whole of what a join changes.
 type Tunnel struct {
-	Interface         string
-	Zone              string
-	LanZone           string
-	PrivateKey        string
-	Address           string
+	Interface  string
+	Zone       string
+	LanZone    string
+	PrivateKey string
+	Address    string
+	Network    string
+	// LanSubnet is this router's LAN in CIDR form. Policy mode writes one
+	// disabled rule matching it, so an operator has a ready-made way to send
+	// the LAN through the tunnel without hand-building one.
+	LanSubnet string
+	// RuleDisabled carries the rule's current disabled value forward, so a
+	// later join or refresh does not switch a rule the operator turned on back
+	// off. Empty means the rule is new and starts disabled.
+	RuleDisabled      string
 	ListenPort        int
 	MTU               int
 	Revision          int
@@ -73,6 +109,8 @@ func (t Tunnel) Validate() error {
 		return fmt.Errorf("the private key is empty")
 	case t.Address == "":
 		return fmt.Errorf("the hub gave no address for this interface")
+	case t.Table != 0 && t.Network == "":
+		return fmt.Errorf("the hub gave no tunnel network for policy routing")
 	case t.Table < 0:
 		return fmt.Errorf("the routing table cannot be negative")
 	case t.Table >= 253 && t.Table <= 255:
@@ -83,6 +121,21 @@ func (t Tunnel) Validate() error {
 		return fmt.Errorf("the hub gave no endpoint host")
 	case len(t.AllowedIPs) == 0:
 		return fmt.Errorf("the hub gave no allowed IPs, so nothing would route through the tunnel")
+	}
+	if t.Table != 0 {
+		_, network, err := net.ParseCIDR(t.Network)
+		if err != nil {
+			return fmt.Errorf("the tunnel network %q is unusable: %w", t.Network, err)
+		}
+		if network.IP.To4() == nil {
+			return fmt.Errorf(
+				"policy-routing mode currently supports IPv4 tunnels; use -site-only for %s",
+				network.String())
+		}
+		address, _, err := net.ParseCIDR(t.Address)
+		if err != nil || !network.Contains(address) {
+			return fmt.Errorf("the tunnel address %q is outside %s", t.Address, network)
+		}
 	}
 	// Keys reach uci through a batch on stdin, which is a parser: a value
 	// carrying a quote or a newline would end the line and start a command.
@@ -120,12 +173,52 @@ func (t Tunnel) TakesOverTheDefaultRoute() bool {
 	return false
 }
 
+// policyRulePriority sits just past PBR's own fwmark rules, which run from
+// 29994 to 30000, so a LAN-wide rule is considered after a narrower PBR policy
+// has had its chance to mark a packet for a different interface.
+const policyRulePriority = 30001
+
+// RuleSection names the steering rule this tunnel writes, or "" when there is
+// none: site-only mode has no policy table to point at, and a router whose LAN
+// subnet could not be read has nothing to match.
+func (t Tunnel) RuleSection() string {
+	if t.Table == 0 || t.LanSubnet == "" {
+		return ""
+	}
+	return RuleSectionName(t.Interface)
+}
+
+func (t Tunnel) RouteTargets() []string {
+	if t.Table == 0 {
+		return nil
+	}
+	targets := []string{}
+	seen := map[string]bool{}
+	add := func(value string) {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return
+		}
+		value = network.String()
+		if value == DefaultIPv4Route || value == DefaultIPv6Route || seen[value] {
+			return
+		}
+		seen[value] = true
+		targets = append(targets, value)
+	}
+	add(t.Network)
+	for _, allowed := range t.AllowedIPs {
+		add(allowed)
+	}
+	return targets
+}
+
 // NetworkCommands returns the uci invocations that write /etc/config/network.
 //
 // Each section is deleted before it is recreated, because add_list appends:
 // re-running a join would otherwise leave two copies of every allowed_ips
-// entry. Peer sections are not deleted here, because they are addressed by
-// type index rather than by name; Router.ClearPeers does that.
+// entry. Router.ClearPeers deletes the named peer before these commands
+// recreate it.
 func (t Tunnel) NetworkCommands() []Command {
 	iface := "network." + t.Interface
 	peer := "network." + PeerSectionName(t.Interface)
@@ -136,12 +229,37 @@ func (t Tunnel) NetworkCommands() []Command {
 		set(iface+".proto", "wireguard"),
 		setSecret(iface+".private_key", t.PrivateKey),
 	}
-	if t.Table != 0 {
-		table := ".ip4table"
-		if strings.Contains(t.Address, ":") {
-			table = ".ip6table"
+	for index, target := range t.RouteTargets() {
+		route := "network." + routeSectionName(t.Interface, index)
+		kind := "route"
+		if strings.Contains(target, ":") {
+			kind = "route6"
 		}
-		commands = append(commands, set(iface+table, strconv.Itoa(t.Table)))
+		commands = append(commands,
+			remove(route),
+			set(route, kind),
+			set(route+".interface", t.Interface),
+			set(route+".target", target),
+		)
+	}
+	// The rule is written disabled and sits above PBR's own fwmark rules, so
+	// enabling it sends the whole LAN through the tunnel while a PBR policy
+	// still picks out narrower traffic. netifd ignores a disabled rule
+	// entirely, so nothing is installed until an operator ticks the box.
+	if rule := t.RuleSection(); rule != "" {
+		key := "network." + rule
+		disabled := t.RuleDisabled
+		if disabled == "" {
+			disabled = "1"
+		}
+		commands = append(commands,
+			remove(key),
+			set(key, "rule"),
+			set(key+".src", t.LanSubnet),
+			set(key+".lookup", PolicyTable(t.Interface)),
+			set(key+".priority", strconv.Itoa(policyRulePriority)),
+			set(key+".disabled", disabled),
+		)
 	}
 	if t.ListenPort != 0 {
 		commands = append(commands, set(iface+".listen_port", strconv.Itoa(t.ListenPort)))
@@ -164,14 +282,19 @@ func (t Tunnel) NetworkCommands() []Command {
 	if t.PresharedKey != "" {
 		commands = append(commands, setSecret(peer+".preshared_key", t.PresharedKey))
 	}
+	routeAllowed := "1"
+	if t.Table != 0 {
+		// allowed_ips carries 0.0.0.0/0 in policy mode, and netifd would turn
+		// that into a main-table default that replaces WAN. PBR builds
+		// pbr_<interface> and its fwmark rules from the peer instead, and the
+		// named route sections keep the tunnel and the other sites reachable.
+		routeAllowed = "0"
+	}
 	commands = append(commands,
 		set(peer+".endpoint_host", t.EndpointHost),
 		set(peer+".endpoint_port", strconv.Itoa(t.EndpointPort)),
 		set(peer+".persistent_keepalive", strconv.Itoa(t.Keepalive)),
-		// allowed_ips filters inbound traffic and picks the peer for outbound
-		// traffic, but it adds no route. Without this the LAN has no way to
-		// reach the hub or the other sites.
-		set(peer+".route_allowed_ips", "1"),
+		set(peer+".route_allowed_ips", routeAllowed),
 	)
 	for _, allowed := range t.AllowedIPs {
 		commands = append(commands, addList(peer+".allowed_ips", allowed))
@@ -209,6 +332,14 @@ func (t Tunnel) FirewallCommands() []Command {
 		// where ping and SSH work but some HTTPS connections hang.
 		set(zone+".mtu_fix", "1"),
 		addList(zone+".network", t.Interface),
+	}
+	// The masquerade above is for internet access through the hub. Without
+	// these exclusions it also rewrites traffic to the tunnel and the other
+	// sites, so a remote LAN sees this node's tunnel address instead of the
+	// host that started the connection. fw4 turns a negated masq_dest list
+	// into one "daddr != {...}" match ahead of the masquerade.
+	for _, target := range t.RouteTargets() {
+		commands = append(commands, addList(zone+".masq_dest", "!"+target))
 	}
 
 	// One forwarding covers one direction only. With just LAN to tunnel, the
@@ -260,9 +391,22 @@ func (t Tunnel) SettingsCommands(hub string) []Command {
 		remove(nodeSection+".mtu_override"),
 		remove(nodeSection+".keepalive_override"),
 		remove(nodeSection+".table"),
+		remove(nodeSection+".route"),
+		remove(nodeSection+".rule"),
 	)
+	if rule := t.RuleSection(); rule != "" {
+		commands = append(commands, set(nodeSection+".rule", rule))
+	}
 	if t.Table != 0 {
 		commands = append(commands, set(nodeSection+".table", strconv.Itoa(t.Table)))
+		for index := range t.RouteTargets() {
+			name := routeSectionName(t.Interface, index)
+			if index == 0 {
+				commands = append(commands, set(nodeSection+".route", name))
+			} else {
+				commands = append(commands, addList(nodeSection+".route", name))
+			}
+		}
 	}
 	if t.MTUOverride != nil {
 		commands = append(commands, set(nodeSection+".mtu_override", strconv.Itoa(*t.MTUOverride)))

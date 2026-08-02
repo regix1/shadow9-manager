@@ -1,26 +1,95 @@
 #!/bin/sh /etc/rc.common
 
-# Refreshes the tunnel at boot. Not a daemon: it runs once and writes nothing
-# when the hub's topology revision has not changed.
+# Enrolls this router the first time it has a hub and a token, and refreshes
+# the tunnel on every boot after that. Not a daemon: each run reconciles UCI
+# once and exits, and it only reconciles local routes and PBR when the hub's
+# topology revision has not changed.
 #
-# START=95 puts it after network and firewall, so uci commit and the reloads
-# below act on services that are already up.
+# START=95 puts it after network, firewall, and PBR, so the refresh and reloads
+# below act on services that are already up. The uplink can still be
+# negotiating at that point, so the work runs as a procd instance instead of
+# inline: boot is not held up waiting for the hub, and a hub that is not
+# reachable yet is retried a bounded number of times before this run gives up
+# and leaves the next boot to try again.
 
 START=95
 USE_PROCD=1
 
-start_service() {
+EXTRA_COMMANDS="reconcile"
+EXTRA_HELP="	reconcile	Enroll or refresh this node now, retrying a hub that is not up yet"
+
+BINARY=/usr/sbin/shadow9-node
+TOKEN=/etc/shadow9.token
+INIT=/etc/init.d/shadow9-node
+
+ATTEMPTS=5
+PAUSE=15
+
+node_enabled() {
 	local enabled
 
 	config_load shadow9
 	config_get_bool enabled node enabled 1
+	[ "$enabled" = 1 ]
+}
 
-	[ "$enabled" = 1 ] || return 0
-	/usr/sbin/shadow9-node refresh
+saved_interface() {
+	local iface
+
+	iface="$(uci -q get shadow9.node.interface)"
+	[ -n "$iface" ] || iface=wg0
+	echo "$iface"
+}
+
+# True when an image or an install left the enrollment inputs behind but no
+# join has happened yet: a hub URL in /etc/config/shadow9, a token file, and no
+# private key on the interface.
+needs_enrollment() {
+	[ -z "$(uci -q get "network.$(saved_interface).private_key")" ] || return 1
+	[ -n "$(uci -q get shadow9.node.hub)" ] || return 1
+	[ -s "$TOKEN" ]
+}
+
+attempt() {
+	if needs_enrollment; then
+		"$BINARY" join \
+			-hub "$(uci -q get shadow9.node.hub)" \
+			-token-file "$TOKEN" \
+			-iface "$(saved_interface)"
+		return $?
+	fi
+	"$BINARY" refresh
+}
+
+reconcile() {
+	local try=1
+
+	[ -x "$BINARY" ] || return 0
+	node_enabled || return 0
+
+	while :; do
+		attempt && return 0
+		[ "$try" -ge "$ATTEMPTS" ] && break
+		try=$((try + 1))
+		sleep "$PAUSE"
+	done
+	echo "shadow9-node: gave up after $ATTEMPTS attempts; the next boot tries again" >&2
+	return 1
+}
+
+start_service() {
+	node_enabled || return 0
+
+	procd_open_instance reconcile
+	procd_set_param command "$INIT" reconcile
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
 }
 
 stop_service() {
 	# Deliberately empty. The tunnel is UCI configuration, not a process, and
 	# tearing it down on "service stop" would drop the operator's own way in.
+	# procd still stops a retry that is still running.
 	return 0
 }

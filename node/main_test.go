@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"shadow9-node/internal/enroll"
 	"shadow9-node/internal/openwrt"
@@ -58,7 +59,7 @@ func TestBuildTunnelTurnsTheHubsAnswerIntoUciValues(t *testing.T) {
 	if tunnel.EndpointHost != "203.0.113.10" || tunnel.EndpointPort != 51820 {
 		t.Errorf("the endpoint came out as %s:%d", tunnel.EndpointHost, tunnel.EndpointPort)
 	}
-	if len(tunnel.AllowedIPs) != 1 || tunnel.AllowedIPs[0] != openwrt.DefaultIPv4Route {
+	if got := strings.Join(tunnel.AllowedIPs, ","); got != openwrt.DefaultIPv4Route+","+answer.TunnelNetwork {
 		t.Errorf("the allowed IPs came out as %v", tunnel.AllowedIPs)
 	}
 	if tunnel.Table != defaultTable {
@@ -126,10 +127,13 @@ func TestBuildTunnelUsesTheIPv6PolicyRouteForAnIPv6Hub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTunnel: %v", err)
 	}
-	if tunnel.Address != "fd09::7/64" || len(tunnel.AllowedIPs) != 1 ||
-		tunnel.AllowedIPs[0] != openwrt.DefaultIPv6Route {
+	if tunnel.Address != "fd09::7/64" || strings.Join(tunnel.AllowedIPs, ",") !=
+		openwrt.DefaultIPv6Route+","+answer.TunnelNetwork {
 		t.Errorf("the IPv6 policy route came out as address %s, AllowedIPs %v",
 			tunnel.Address, tunnel.AllowedIPs)
+	}
+	if err := tunnel.Validate(); err == nil || !strings.Contains(err.Error(), "supports IPv4") {
+		t.Errorf("the IPv6 policy route validated with %v", err)
 	}
 }
 
@@ -199,7 +203,7 @@ func TestBuildRefreshTunnelKeepsThePolicyTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildRefreshTunnel: %v", err)
 	}
-	if got := strings.Join(tunnel.AllowedIPs, ","); got != openwrt.DefaultIPv4Route {
+	if got := strings.Join(tunnel.AllowedIPs, ","); got != openwrt.DefaultIPv4Route+",10.9.0.0/24,192.168.2.0/24" {
 		t.Errorf("the allowed IPs are %s", got)
 	}
 	if tunnel.Address != "10.9.0.7/24" || tunnel.Table != defaultTable {
@@ -459,36 +463,127 @@ func TestANodeListensOnNoPortByDefault(t *testing.T) {
 	}
 }
 
-func TestChooseTableReusesTheTableSavedForThisInterface(t *testing.T) {
-	router := routerAnswering(map[string]string{
-		"shadow9.node.interface": "wg0",
-		"shadow9.node.table":     "51827",
-		"network.wg0.ip4table":   "51827",
-	})
-	table, err := chooseTable(0, false, "wg0", router)
+func TestChooseTableUsesPBRManagedMode(t *testing.T) {
+	table, err := chooseTable(0, false)
 	if err != nil {
 		t.Fatalf("chooseTable: %v", err)
 	}
-	if table != 51827 {
-		t.Errorf("chooseTable returned %d, want the saved table", table)
+	if table != defaultTable {
+		t.Errorf("chooseTable returned %d, want PBR mode", table)
 	}
 }
 
-func TestChooseTableHonorsExplicitAndSiteOnlyModes(t *testing.T) {
-	router := routerAnswering(nil)
-	table, err := chooseTable(60000, false, "wg0", router)
-	if err != nil || table != 60000 {
-		t.Fatalf("the explicit table came out as %d, err=%v", table, err)
+func TestChooseTableRejectsLegacyPinningAndHonorsSiteOnly(t *testing.T) {
+	if _, err := chooseTable(60000, false); err == nil {
+		t.Fatal("an explicit table was accepted")
 	}
-	table, err = chooseTable(60000, true, "wg0", router)
+	table, err := chooseTable(0, true)
 	if err != nil || table != 0 {
 		t.Fatalf("site-only came out as table %d, err=%v", table, err)
 	}
 }
 
-func TestJoinRejectsAReservedRoutingTableBeforeEnrollment(t *testing.T) {
+func TestJoinRejectsLegacyRoutingTablePinningBeforeEnrollment(t *testing.T) {
 	err := join([]string{"-hub", "http://203.0.113.10:8081", "-table", "254"})
-	if err == nil || !strings.Contains(err.Error(), "reserved by Linux") {
+	if err == nil || !strings.Contains(err.Error(), "PBR selects its own table") {
 		t.Fatalf("join returned %v", err)
+	}
+}
+
+func TestJoiningUnderADifferentInterfaceIsRefused(t *testing.T) {
+	router := routerAnswering(map[string]string{"shadow9.node.interface": "wg0"})
+
+	err := requireSameInterface(router, "wg1")
+	if err == nil || !strings.Contains(err.Error(), "already enrolled on wg0") {
+		t.Fatalf("a join that moves the enrollment returned %v", err)
+	}
+	if err := requireSameInterface(router, "wg0"); err != nil {
+		t.Errorf("rejoining the same interface was refused: %v", err)
+	}
+	if err := requireSameInterface(routerAnswering(nil), "wg0"); err != nil {
+		t.Errorf("a first join was refused: %v", err)
+	}
+}
+
+// recording answers uci reads and remembers every command, so a test can see
+// what ran and in which order.
+type recording struct {
+	values map[string]string
+	calls  *[]string
+}
+
+func (r recording) Run(_ context.Context, _ openwrt.Stdin, name string, args ...string) ([]byte, error) {
+	*r.calls = append(*r.calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
+	if name == "uci" && len(args) == 2 && args[0] == "get" {
+		if value, known := r.values[args[1]]; known {
+			return []byte(value + "\n"), nil
+		}
+		return nil, fmt.Errorf("uci: Entry not found")
+	}
+	if name == "test" || name == "rm" {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("%s: not found", name)
+}
+
+func (recording) Look(string) error { return nil }
+
+// A cleanup that cannot prove ownership leaves the tunnel up, so the boot
+// service is the only thing left that can repair it. Disabling it first would
+// take that away and still fail.
+func TestARefusedUninstallLeavesTheBootServiceEnabled(t *testing.T) {
+	var calls []string
+	router := openwrt.Router{Shell: recording{
+		values: map[string]string{
+			"shadow9.node.interface":   "wg0",
+			"shadow9.node.zone":        "wgvpn",
+			"shadow9.node.lan_zone":    "lan",
+			"shadow9.node.private_key": "AJXKLmQ2vN8pR4tY6uI0oP1aSdF3gH5jKlZxCvB7nE0=",
+			"network.wg0":              "interface",
+			"network.wg0.private_key":  "Zm9yZ2VkS2V5MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+		},
+		calls: &calls,
+	}}
+
+	err := removeInstallation(router, true)
+	if err == nil || !strings.Contains(err.Error(), "ownership of network.wg0 cannot be proven") {
+		t.Fatalf("removeInstallation returned %v", err)
+	}
+	for _, call := range calls {
+		if strings.Contains(call, "disable") || strings.HasPrefix(call, "rm ") {
+			t.Errorf("a refused cleanup still ran %q", call)
+		}
+	}
+}
+
+// At boot the uplink can still be negotiating. Local repair has to run from
+// the saved settings anyway, or a hub that is late costs the node its routes
+// as well as its topology update.
+func TestRefreshRepairsLocalStateWhenTheHubIsUnreachable(t *testing.T) {
+	var calls []string
+	router := openwrt.Router{Shell: recording{
+		values: map[string]string{
+			"shadow9.node.name": "branch-gateway",
+			"shadow9.node.refresh_key": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a6978" +
+				"8796a5b4c3d2e1f0",
+			// Port 1 refuses immediately, so this is the transport failure a
+			// boot-time refresh sees, not a timeout the test has to wait out.
+			"shadow9.node.hub":         "http://127.0.0.1:1",
+			"shadow9.node.interface":   "wg0",
+			"shadow9.node.zone":        "wgvpn",
+			"shadow9.node.lan_zone":    "lan",
+			"shadow9.node.private_key": "AJXKLmQ2vN8pR4tY6uI0oP1aSdF3gH5jKlZxCvB7nE0=",
+			"shadow9.node.revision":    "4",
+			"shadow9.node.table":       "0",
+		},
+		calls: &calls,
+	}}
+
+	err := refreshNode(router, 2*time.Second)
+	if err == nil {
+		t.Fatal("refresh succeeded although the hub was unreachable")
+	}
+	if !strings.Contains(strings.Join(calls, "\n"), "uci get shadow9.node.pbr_interface") {
+		t.Errorf("local repair never ran after the hub failed:\n%s", strings.Join(calls, "\n"))
 	}
 }

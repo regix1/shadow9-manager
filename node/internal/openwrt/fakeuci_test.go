@@ -3,6 +3,7 @@ package openwrt
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -84,10 +85,21 @@ type fakeShell struct {
 	stdin     []Stdin
 	deadlines []time.Duration
 	reloaded  []string
+	stopped   []string
+	missing   map[string]bool
 	installed map[string]bool
-	noManager bool
-	snapshots map[string]*fakePackage
-	nextSave  int
+	// pbrStale is set by every commit the pbr service would have to read, and
+	// cleared by a reload. pbrSettleQueries is how many route queries still
+	// answer "no such table" after that reload, because the live service
+	// builds its table asynchronously; pbrSettle counts those down. Together
+	// they mean a client that never reloads, or that checks once straight
+	// afterwards, sees nothing.
+	pbrStale         bool
+	pbrSettleQueries int
+	pbrSettle        int
+	noManager        bool
+	snapshots        map[string]*fakePackage
+	nextSave         int
 }
 
 func newFakeShell(existing ...string) *fakeShell {
@@ -98,6 +110,7 @@ func newFakeShell(existing ...string) *fakeShell {
 		failing:   map[string]string{},
 		failures:  map[string]int{},
 		output:    map[string]string{},
+		missing:   map[string]bool{},
 		installed: map[string]bool{ProtocolPackage: true, PolicyPackage: true},
 		snapshots: map[string]*fakePackage{},
 	}
@@ -175,6 +188,11 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 	if f.absent[name] {
 		return nil, fmt.Errorf("%s: not found", name)
 	}
+	// A service that exits nonzero has still read the new configuration; pbr
+	// reports a diagnostic status for things like a missing ipset while its
+	// routes are in place. Recording the effect before the injected failure is
+	// what lets a test tell those two apart.
+	f.serviceAction(name, args)
 	for prefix, remaining := range f.failures {
 		if remaining > 0 && strings.HasPrefix(call, prefix) {
 			f.failures[prefix] = remaining - 1
@@ -210,6 +228,7 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 				return nil, fmt.Errorf("uci: Invalid argument")
 			}
 			f.working[args[1]] = pkg.clone()
+			f.committed[args[1]] = pkg.clone()
 			return nil, nil
 		}
 		return f.uci(args)
@@ -229,6 +248,15 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 		return nil, nil
 	case "rm":
 		return nil, nil
+	case "test":
+		if len(args) == 2 && args[0] == "-f" && f.missing[args[1]] {
+			return nil, fmt.Errorf("exit status 1")
+		}
+		return nil, nil
+	case "/bin/sh":
+		if len(args) == 3 && args[0] == "/etc/rc.common" {
+			return nil, nil
+		}
 	case "apk", "opkg":
 		if f.noManager {
 			return nil, fmt.Errorf("exit status 127")
@@ -238,19 +266,83 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 			return []byte(wanted + "\n"), nil
 		}
 		return nil, fmt.Errorf("exit status 1")
+	case "ip":
+		if len(args) == 5 && (args[0] == "-4" || args[0] == "-6") &&
+			args[1] == "route" && args[2] == "show" && args[3] == "table" &&
+			strings.HasPrefix(args[4], "pbr_") {
+			iface := strings.TrimPrefix(args[4], "pbr_")
+			if f.hasPBRTable(iface) {
+				return []byte("default dev " + iface + " scope link\n"), nil
+			}
+			return nil, fmt.Errorf("FIB table does not exist")
+		}
+		if len(args) == 3 && (args[0] == "-4" || args[0] == "-6") &&
+			args[1] == "rule" && args[2] == "show" {
+			if network := f.committed["network"]; network != nil {
+				for _, section := range network.sections {
+					if section.name != "" && f.hasPBRTable(section.name) {
+						return []byte("29998: from all fwmark 0x20000/0xff0000 lookup pbr_" +
+							section.name + "\n"), nil
+					}
+				}
+			}
+			return nil, nil
+		}
 	case "ifstatus":
 		return []byte(`{"up":true,"pending":false}`), nil
 	}
 	if strings.HasPrefix(name, "/etc/init.d/") && len(args) == 1 {
-		if args[0] == "reload" {
-			f.reloaded = append(f.reloaded, strings.TrimPrefix(name, "/etc/init.d/"))
-			return nil, nil
-		}
-		if args[0] == "disable" {
+		switch args[0] {
+		case "reload", "stop", "disable":
 			return nil, nil
 		}
 	}
 	return nil, fmt.Errorf("%s: not found", name)
+}
+
+// serviceAction records what an init script call did to the live state the
+// router later reads back through ip and ifstatus.
+func (f *fakeShell) serviceAction(name string, args []string) {
+	service, isService := strings.CutPrefix(name, "/etc/init.d/")
+	if !isService || len(args) != 1 {
+		return
+	}
+	switch args[0] {
+	case "reload":
+		f.reloaded = append(f.reloaded, service)
+		if service == "pbr" {
+			f.pbrStale = false
+			f.pbrSettle = f.pbrSettleQueries
+		}
+	case "stop":
+		f.stopped = append(f.stopped, service)
+		if service == "pbr" {
+			f.pbrStale = true
+		}
+	}
+}
+
+func (f *fakeShell) hasPBRTable(iface string) bool {
+	if f.pbrStale {
+		return false
+	}
+	if f.pbrSettle > 0 {
+		f.pbrSettle--
+		return false
+	}
+	network := f.committed["network"]
+	if network == nil || network.named(iface) == nil {
+		return false
+	}
+	pbr := f.committed["pbr"]
+	if pbr == nil {
+		return false
+	}
+	config := pbr.named("config")
+	if config == nil || !uciEnabled(strings.Join(config.options["enabled"], " ")) {
+		return false
+	}
+	return hasListValue(strings.Join(config.options["supported_interface"], " "), iface)
 }
 
 func (f *fakeShell) batch(stdin Stdin) ([]byte, error) {
@@ -322,6 +414,13 @@ func (f *fakeShell) uci(args []string) ([]byte, error) {
 				return nil, fmt.Errorf("uci: Entry not found")
 			}
 			delete(section.options, option)
+			delete(section.isList, option)
+			for index, name := range section.order {
+				if name == option {
+					section.order = append(section.order[:index], section.order[index+1:]...)
+					break
+				}
+			}
 			return nil, nil
 		}
 		pkg.remove(section)
@@ -339,6 +438,19 @@ func (f *fakeShell) uci(args []string) ([]byte, error) {
 			return nil, fmt.Errorf("uci: Entry not found")
 		}
 		return []byte(strings.Join(values, " ") + "\n"), nil
+	case "changes":
+		if len(rest) != 1 {
+			return nil, fmt.Errorf("uci: Invalid argument")
+		}
+		working, workingOK := f.working[rest[0]]
+		committed, committedOK := f.committed[rest[0]]
+		if !workingOK || !committedOK {
+			return nil, fmt.Errorf("uci: Entry not found")
+		}
+		if !reflect.DeepEqual(working, committed) {
+			return []byte(rest[0] + ".changed='1'\n"), nil
+		}
+		return nil, nil
 	case "commit":
 		if len(rest) != 1 {
 			return nil, fmt.Errorf("uci: Invalid argument")
@@ -348,6 +460,12 @@ func (f *fakeShell) uci(args []string) ([]byte, error) {
 			return nil, fmt.Errorf("uci: Entry not found")
 		}
 		f.committed[rest[0]] = pkg.clone()
+		// The pbr service reads both of these and cannot see a change until
+		// it is reloaded, and a network reload takes the interface down and
+		// up under it.
+		if rest[0] == "pbr" || rest[0] == "network" {
+			f.pbrStale = true
+		}
 		return nil, nil
 	case "revert":
 		pkg, ok := f.committed[rest[0]]

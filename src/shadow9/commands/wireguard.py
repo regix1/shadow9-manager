@@ -1580,10 +1580,10 @@ def _print_join_command(cfg: Config, public_key: str, api_url: Optional[str], ho
         "this router should not be a site gateway.[/dim]"
     )
     console.print(
-        "[dim]Its 0.0.0.0/0 route stays in the first unused table at or above "
-        "51820, so WAN remains the main default and PBR selects tunnel traffic. "
-        "The client verifies pbr is installed. Add -site-only for only the tunnel "
-        "and advertised sites, or -table <id> to pin a table.[/dim]"
+        "[dim]PBR creates and manages the pbr_wg0 internet-routing table, so WAN "
+        "remains the main default and policies select tunnel traffic. The client "
+        "verifies pbr and its live routes. Add -site-only for only the tunnel and "
+        "advertised sites.[/dim]"
     )
 
     console.print("\n[bold]On another host with Shadow9 Manager installed:[/bold]")

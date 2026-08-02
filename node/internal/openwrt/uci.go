@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -79,13 +78,31 @@ func addList(key, value string) Command {
 	return Command{Args: []string{"add_list", key + "=" + value}}
 }
 
+func removeList(key, values, wanted string) []Command {
+	commands := []Command{remove(key)}
+	for _, value := range strings.Fields(values) {
+		if value != wanted {
+			commands = append(commands, addList(key, value))
+		}
+	}
+	return commands
+}
+
+// remove deletes a section or option that may not be there. It runs without -q
+// on purpose. Checked on OpenWrt 24.10.2: a delete that finds nothing prints
+// "uci: Entry not found" and exits 1, whether the missing part is the section,
+// the option or the whole package, while -q prints nothing and still exits 1.
+// Apply only tolerates that message, so -q would make a missing entry
+// indistinguishable from a real failure.
 func remove(key string) Command {
-	return Command{Args: []string{"-q", "delete", key}, Optional: true}
+	return Command{Args: []string{"delete", key}, Optional: true}
 }
 
 // Router applies UCI configuration through a Shell.
 type Router struct {
 	Shell        Shell
+	Report       func(string)
+	PBRSettle    time.Duration
 	checkTimeout time.Duration
 }
 
@@ -116,17 +133,20 @@ func uciNotFound(out []byte, err error) bool {
 	return bytes.Contains(out, []byte("Entry not found")) || strings.Contains(err.Error(), "Entry not found")
 }
 
-// Apply runs commands in order and stops at the first one that fails, unless
-// the command was marked Optional.
+// Apply runs commands in order and stops at the first one that fails. An
+// Optional command may only fail by not being there: a delete that fails for
+// any other reason leaves a section behind, and swallowing that would commit a
+// half-finished cleanup whose ownership marker is already gone.
 func (r Router) Apply(commands []Command) error {
 	for _, c := range commands {
 		out, err := r.run(uciTimeout, c.Stdin, "uci", c.Args...)
-		if err != nil && !c.Optional {
-			if c.Stdin != "" {
-				return fmt.Errorf("%s: %w", c, err)
-			}
-			return fmt.Errorf("%s: %w: %s", c, err, bytes.TrimSpace(out))
+		if err == nil || (c.Optional && uciNotFound(out, err)) {
+			continue
 		}
+		if c.Stdin != "" {
+			return fmt.Errorf("%s: %w", c, err)
+		}
+		return fmt.Errorf("%s: %w: %s", c, err, bytes.TrimSpace(out))
 	}
 	return nil
 }
@@ -156,76 +176,9 @@ func (r Router) Require(name, packageName string) error {
 	return nil
 }
 
-// NextTable returns the first unused numeric routing table at or above start.
-// It checks persistent UCI interface settings plus the IPv4 and IPv6 tables
-// currently referenced by kernel rules and routes.
-func (r Router) NextTable(start int) (int, error) {
-	if start <= 0 {
-		return 0, fmt.Errorf("the first routing table must be positive")
-	}
-	used := map[int]bool{253: true, 254: true, 255: true}
-	record := func(text string) {
-		value, err := strconv.Atoi(strings.Trim(strings.TrimSpace(text), "'\""))
-		if err == nil && value > 0 {
-			used[value] = true
-		}
-	}
-
-	out, err := r.run(uciTimeout, "", "uci", "-q", "show", "network")
-	if err != nil {
-		return 0, fmt.Errorf("reading routing tables from UCI: %w: %s", err, bytes.TrimSpace(out))
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, ".ip4table=") || strings.Contains(line, ".ip6table=") {
-			if _, value, found := strings.Cut(line, "="); found {
-				record(value)
-			}
-		}
-	}
-
-	for _, check := range []struct {
-		family string
-		kind   string
-		marker string
-		args   []string
-	}{
-		{"IPv4", "rules", "lookup", []string{"-4", "rule", "show"}},
-		{"IPv6", "rules", "lookup", []string{"-6", "rule", "show"}},
-		{"IPv4", "routes", "table", []string{"-4", "route", "show", "table", "all"}},
-		{"IPv6", "routes", "table", []string{"-6", "route", "show", "table", "all"}},
-	} {
-		out, err := r.run(uciTimeout, "", "ip", check.args...)
-		if err != nil {
-			return 0, fmt.Errorf("reading %s routing %s: %w: %s",
-				check.family, check.kind, err, bytes.TrimSpace(out))
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			fields := strings.Fields(line)
-			for i, field := range fields {
-				if field == check.marker && i+1 < len(fields) {
-					record(fields[i+1])
-				}
-			}
-		}
-	}
-
-	for table := start; table < start+4096; table++ {
-		if !used[table] {
-			return table, nil
-		}
-	}
-	return 0, fmt.Errorf("no free routing table was found from %d through %d", start, start+4095)
-}
-
-// ClearPeers deletes every peer section on an interface, whether this client
-// wrote it or a previous version did. add_list appends, so a second join
-// would otherwise leave the old peer in place next to the new one and
-// accumulate duplicate allowed_ips.
-//
-// uci addresses sections of a type by index, and the index shifts down as
-// each one goes, so this always deletes index zero until uci reports there is
-// nothing left. The bound stops a uci that never reports failure from
-// spinning forever.
+// ClearPeers deletes the named hub peer. Current and previous packaged clients
+// use this stable name, so a second join cannot leave stale allowed IPs beside
+// the replacement.
 func (r Router) ClearPeers(iface string) error {
 	key := "network." + PeerSectionName(iface)
 	out, err := r.run(uciTimeout, "", "uci", "delete", key)
