@@ -1305,8 +1305,8 @@ def _server_launcher(repo_root: Path) -> list[str]:
     """Build the command that starts the proxy from a checkout on this platform."""
     script = repo_root / ("shadow9.bat" if sys.platform == "win32" else "shadow9")
     if script.exists():
-        return [str(script), "serve"]
-    return [sys.executable, "-m", "shadow9", "serve"]
+        return [str(script), "socks5", "serve"]
+    return [sys.executable, "-m", "shadow9", "socks5", "serve"]
 
 
 def _start_server(repo_root: Path, as_service: bool) -> bool:

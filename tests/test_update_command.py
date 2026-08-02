@@ -610,7 +610,7 @@ class TestRestartMode:
         assert calls_with(stub, "kill 4242")
         assert calls_with(stub, "systemctl") == []
         assert len(stub.launched) == 1
-        assert stub.launched[0][-1] == "serve"
+        assert stub.launched[0][-2:] == ["socks5", "serve"]
 
     def test_standalone_restart_uses_the_checkout_script(
         self,
@@ -627,7 +627,7 @@ class TestRestartMode:
 
         update_command()
 
-        assert stub.launched == [[str(script), "serve"]]
+        assert stub.launched == [[str(script), "socks5", "serve"]]
 
     def test_nothing_running_means_nothing_to_restart(
         self,
