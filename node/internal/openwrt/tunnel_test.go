@@ -150,6 +150,56 @@ func TestSiteOnlyAndUnknownLanWriteNoRule(t *testing.T) {
 	}
 }
 
+// An enrollment that lost its private key still records which route and rule
+// sections it created. Wiping the settings without removing those leaves
+// sections nothing can ever prove ownership of, and every later join refuses.
+func TestIncompleteCleanupTakesItsRoutesWithIt(t *testing.T) {
+	shell := newFakeShell("shadow9")
+	shell.addSection("network", "wg0", "interface", map[string][]string{
+		"proto": {"wireguard"}, "addresses": {"10.9.0.7/24"},
+	})
+	shell.addSection("network", "wg0_route", "route", map[string][]string{
+		"interface": {"wg0"}, "target": {"10.9.0.0/24"},
+	})
+	shell.addSection("network", "wg0_rule", "rule", map[string][]string{
+		"src": {"192.168.1.0/24"}, "lookup": {"pbr_wg0"}, "disabled": {"1"},
+	})
+	// No private_key, which is what sends RemoveTunnel down the settings-only path.
+	shell.addSection("shadow9", "node", "node", map[string][]string{
+		"interface": {"wg0"}, "zone": {"wgvpn"}, "lan_zone": {"lan"},
+		"route": {"wg0_route"}, "rule": {"wg0_rule"},
+	})
+
+	removed, err := (Router{Shell: shell}).RemoveTunnel()
+	if err != nil {
+		t.Fatalf("RemoveTunnel: %v", err)
+	}
+	if removed {
+		t.Error("RemoveTunnel claimed a tunnel it could not prove it owned")
+	}
+	network := shell.render("network")
+	for _, orphan := range []string{"config route 'wg0_route'", "config rule 'wg0_rule'"} {
+		if strings.Contains(network, orphan) {
+			t.Errorf("%s was orphaned, so no later join can ever remove it:\n%s", orphan, network)
+		}
+	}
+}
+
+// Refusing to write over a section is right, but the operator needs to be able
+// to tell a leftover from one of their own, and how to get out of it.
+func TestTheOrphanRefusalSaysHowToRecover(t *testing.T) {
+	message := orphanMessage("network.wg0_route", "shadow9.node.route")
+	for _, want := range []string{
+		"uci delete network.wg0_route",
+		"uci commit network",
+		"join with a different -iface",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("the refusal does not mention %q: %s", want, message)
+		}
+	}
+}
+
 // A node enrolled before the rule existed gets one from a refresh, without
 // needing a new token.
 func TestRefreshAddsTheRuleToAnAlreadyEnrolledNode(t *testing.T) {

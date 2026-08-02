@@ -180,8 +180,7 @@ func (r Router) checkOwnership(tunnel Tunnel) error {
 			continue
 		}
 		if _, err := r.Get("network." + name); err == nil {
-			return fmt.Errorf("network.%s already exists, and %s does not show that shadow9 owns it",
-				name, nodeSection+".route")
+			return fmt.Errorf("%s", orphanMessage("network."+name, nodeSection+".route"))
 		} else if !errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("checking network.%s before writing it: %w", name, err)
 		}
@@ -210,8 +209,7 @@ func (r Router) checkRuleOwnership(rule string) error {
 		return fmt.Errorf("checking network.%s before writing it: %w", rule, kindErr)
 	}
 	if owner != rule || kind != "rule" {
-		return fmt.Errorf("network.%s already exists, and %s does not show that shadow9 owns it",
-			rule, nodeSection+".rule")
+		return fmt.Errorf("%s", orphanMessage("network."+rule, nodeSection+".rule"))
 	}
 	return nil
 }
@@ -226,6 +224,18 @@ func (r Router) savedRule() (string, error) {
 		return "", fmt.Errorf("reading the Shadow9-owned rule: %w", err)
 	}
 	return rule, nil
+}
+
+// orphanMessage explains a section this node will not write over. Refusing is
+// right, but an operator whose earlier install left the section behind has no
+// way to tell that from a section of their own, so the way out is spelled out.
+func orphanMessage(section, marker string) string {
+	return fmt.Sprintf(
+		"%s already exists, and %s does not show that shadow9 owns it. "+
+			"If an earlier install left it behind, remove it with "+
+			"\"uci delete %s; uci commit network\" and join again. "+
+			"If it is yours, join with a different -iface.",
+		section, marker, section)
 }
 
 func (r Router) savedRoutes(iface string) ([]string, error) {
@@ -1236,8 +1246,20 @@ func (r Router) removeSettings(iface string) error {
 	if err != nil {
 		return err
 	}
+	// The settings are about to go, and they are the only record of which
+	// route and rule sections belong to this node. Anything still provable has
+	// to be removed now or it is orphaned for good: a later join cannot prove
+	// ownership of it either, and refuses.
+	network, err := r.orphanedSections(iface)
+	if err != nil {
+		return err
+	}
 	pkgs := []string{}
 	services := []string{}
+	if len(network) != 0 {
+		pkgs = append(pkgs, "network")
+		services = append(services, "network")
+	}
 	if pbr.touched {
 		pkgs = append(pkgs, "pbr")
 		services = append(services, "pbr")
@@ -1247,7 +1269,8 @@ func (r Router) removeSettings(iface string) error {
 	if err != nil {
 		return err
 	}
-	if err := r.Apply(append(pbr.commands, remove(nodeSection))); err != nil {
+	staged := append(network, pbr.commands...)
+	if err := r.Apply(append(staged, remove(nodeSection))); err != nil {
 		return r.revertAll(err, pkgs)
 	}
 	for _, pkg := range pkgs {
@@ -1259,6 +1282,54 @@ func (r Router) removeSettings(iface string) error {
 		r.applyPBR(pbr, "removed")
 	}
 	return nil
+}
+
+// orphanedSections returns the deletes for route and rule sections this node
+// still records, so cleaning up an incomplete enrollment does not leave behind
+// sections that nothing can prove ownership of afterwards. A section whose
+// ownership cannot be proven right now is left alone and reported.
+func (r Router) orphanedSections(iface string) ([]Command, error) {
+	if iface == "" {
+		return nil, nil
+	}
+	commands := []Command{}
+	routes, err := r.savedRoutes(iface)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range routes {
+		route := "network." + name
+		kind, kindErr := r.Get(route)
+		if errors.Is(kindErr, ErrNotFound) {
+			continue
+		}
+		if kindErr != nil {
+			return nil, fmt.Errorf("checking %s before removing it: %w", route, kindErr)
+		}
+		routeIface, ifaceErr := r.Get(route + ".interface")
+		if (kind != "route" && kind != "route6") || ifaceErr != nil || routeIface != iface {
+			return nil, fmt.Errorf("ownership of %s cannot be proven; no changes were made", route)
+		}
+		commands = append(commands, remove(route))
+	}
+	rule, err := r.savedRule()
+	if err != nil {
+		return nil, err
+	}
+	if rule != "" {
+		key := "network." + rule
+		kind, kindErr := r.Get(key)
+		if kindErr != nil && !errors.Is(kindErr, ErrNotFound) {
+			return nil, fmt.Errorf("checking %s before removing it: %w", key, kindErr)
+		}
+		if kindErr == nil {
+			if kind != "rule" {
+				return nil, fmt.Errorf("ownership of %s cannot be proven; no changes were made", key)
+			}
+			commands = append(commands, remove(key))
+		}
+	}
+	return commands, nil
 }
 
 // DisableRefresh keeps an uninstalled node from being recreated at boot.
