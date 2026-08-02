@@ -279,6 +279,29 @@ def _read_key_backup(backup_dir: Path, files: tuple[KeyFile, ...]) -> tuple[Back
     return tuple(by_name[key_file.name] for key_file in files)
 
 
+def _offer_first_user() -> None:
+    """
+    Offer to create a user when the store is empty, before the service is started.
+
+    The proxy exits at startup when nobody can authenticate, and the unit restarts it
+    forever, so a service started against an empty store is a permanent crash loop that
+    looks installed and healthy from the setup screen.
+    """
+    from .user import open_store
+
+    try:
+        if open_store(Config.load()).list_users():
+            return
+    except Exception:
+        pass
+
+    console.print(
+        "\n[yellow]No proxy users exist yet, and the service exits until one can log in.[/yellow]"
+    )
+    if typer.confirm("Create the first user now?", default=True):
+        subprocess.run(["shadow9", "socks5", "user", "generate"])
+
+
 def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
     """Register utility commands: proxy ones on the socks5 group, the rest on the main app."""
 
@@ -464,10 +487,13 @@ def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
 
                         console.print("[cyan]Reinstalling service...[/cyan]")
                         result = subprocess.run(
-                            ["shadow9", "socks5", "service", "install"], capture_output=True, text=True
+                            ["shadow9", "socks5", "service", "install"],
+                            capture_output=True,
+                            text=True,
                         )
                         if result.returncode == 0:
                             console.print("[green]Service reinstalled successfully![/green]")
+                            _offer_first_user()
                             # Start the service
                             if typer.confirm("Start the service now?", default=True):
                                 subprocess.run(["shadow9", "socks5", "service", "start"])
@@ -485,10 +511,13 @@ def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
 
                         console.print("[cyan]Installing service...[/cyan]")
                         result = subprocess.run(
-                            ["shadow9", "socks5", "service", "install"], capture_output=True, text=True
+                            ["shadow9", "socks5", "service", "install"],
+                            capture_output=True,
+                            text=True,
                         )
                         if result.returncode == 0:
                             console.print("[green]Service installed successfully![/green]")
+                            _offer_first_user()
                             if typer.confirm("Enable service to start on boot?", default=True):
                                 subprocess.run(["shadow9", "socks5", "service", "enable"])
                             if typer.confirm("Start the service now?", default=True):

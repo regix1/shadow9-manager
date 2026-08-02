@@ -14,6 +14,7 @@ from shadow9.config import Config
 from shadow9.commands import api as api_commands
 from shadow9.commands import probe
 from shadow9.commands import user as user_commands
+from shadow9.commands import utils as utils_commands
 from shadow9.commands import utils
 from shadow9.wizards import api_setup
 
@@ -510,3 +511,34 @@ def test_api_setup_user_cancellation_exits_zero(
 
     assert result.exit_code == 0, result.stdout
     save_config.assert_not_called()
+
+
+def test_setup_offers_the_first_user_when_the_store_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service started against an empty store crash-loops, so setup fills it first."""
+    store = SimpleNamespace(list_users=Mock(return_value=[]))
+    monkeypatch.setattr(user_commands, "open_store", Mock(return_value=store))
+    monkeypatch.setattr(utils_commands.typer, "confirm", Mock(return_value=True))
+    run = Mock()
+    monkeypatch.setattr(utils_commands.subprocess, "run", run)
+
+    utils_commands._offer_first_user()
+
+    run.assert_called_once_with(["shadow9", "socks5", "user", "generate"])
+
+
+def test_setup_does_not_offer_a_user_when_one_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SimpleNamespace(list_users=Mock(return_value=["alice"]))
+    monkeypatch.setattr(user_commands, "open_store", Mock(return_value=store))
+    confirm = Mock(return_value=True)
+    monkeypatch.setattr(utils_commands.typer, "confirm", confirm)
+    run = Mock()
+    monkeypatch.setattr(utils_commands.subprocess, "run", run)
+
+    utils_commands._offer_first_user()
+
+    confirm.assert_not_called()
+    run.assert_not_called()
