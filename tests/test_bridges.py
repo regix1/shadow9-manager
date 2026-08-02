@@ -34,9 +34,7 @@ class _SlowProcess:
         self.wait_calls += 1
         if not self.killed:
             time.sleep(0.12)
-            raise subprocess.TimeoutExpired(
-                "tor", timeout if timeout is not None else 0.0
-            )
+            raise subprocess.TimeoutExpired("tor", timeout if timeout is not None else 0.0)
         self.reaped = True
         return -9
 
@@ -116,9 +114,7 @@ async def test_quick_test_cleanup_keeps_the_loop_running_and_reaps_after_kill(
         assert name == "tor"
         return "tor"
 
-    def start_tor(
-        command: list[str], *, stdout: int, stderr: int
-    ) -> _SlowProcess:
+    def start_tor(command: list[str], *, stdout: int, stderr: int) -> _SlowProcess:
         del stdout, stderr
         root = command[2].rsplit("/", 1)[0]
         files[f"{root}/tor.log"] = "Bootstrapped 15%\n"
@@ -187,12 +183,8 @@ async def test_quick_test_cleanup_keeps_the_loop_running_and_reaps_after_kill(
 async def test_bridge_selection_has_a_deadline_and_releases_the_shared_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        bridge_module, "BRIDGE_SELECTION_TIMEOUT_SECONDS", 0.05, raising=False
-    )
-    slow_connector = TorBridgeConnector(
-        BridgeConfig(bridge_type=BridgeType.SNOWFLAKE)
-    )
+    monkeypatch.setattr(bridge_module, "BRIDGE_SELECTION_TIMEOUT_SECONDS", 0.05, raising=False)
+    slow_connector = TorBridgeConnector(BridgeConfig(bridge_type=BridgeType.SNOWFLAKE))
     fast_connector = TorBridgeConnector(BridgeConfig(bridge_type=BridgeType.OBFS4))
     slow_bridges = [
         Bridge(

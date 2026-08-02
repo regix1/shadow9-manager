@@ -282,14 +282,8 @@ class TestInit:
     def test_a_bracketed_ipv6_endpoint_without_a_port_keeps_one_pair_of_brackets(
         self,
     ) -> None:
-        assert (
-            wireguard_service.checked_endpoint("[2001:db8::1]")
-            == "[2001:db8::1]:51820"
-        )
-        assert (
-            wireguard_service.checked_endpoint("vpn.example:53000", 53001)
-            == "vpn.example:53000"
-        )
+        assert wireguard_service.checked_endpoint("[2001:db8::1]") == "[2001:db8::1]:51820"
+        assert wireguard_service.checked_endpoint("vpn.example:53000", 53001) == "vpn.example:53000"
         assert (
             wireguard_service.checked_endpoint("[2001:db8::1]:53000", 53001)
             == "[2001:db8::1]:53000"
@@ -602,9 +596,7 @@ class TestInit:
             outputs={("wg", "show", "interfaces"): ["wg0\n", "wg0\n", ""]},
         )
         monkeypatch.setattr(wg_commands, "_host", host)
-        monkeypatch.setattr(
-            wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard"
-        )
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard")
         monkeypatch.setattr(
             wg_commands,
             "FORWARDING_CONFIG",
@@ -634,9 +626,7 @@ class TestInit:
             outputs={("wg", "show", "interfaces"): "wg0\n"},
         )
         monkeypatch.setattr(wg_commands, "_host", host)
-        monkeypatch.setattr(
-            wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard"
-        )
+        monkeypatch.setattr(wg_commands, "WIREGUARD_SYSTEM_DIR", hub_root / "etc" / "wireguard")
         monkeypatch.setattr(
             wg_commands,
             "FORWARDING_CONFIG",

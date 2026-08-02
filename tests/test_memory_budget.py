@@ -73,12 +73,14 @@ def build_fake_proc(
     (proc_dir / "self" / "mountinfo").write_text(filled + "\n", encoding="utf-8")
     (proc_dir / "self" / "cgroup").write_text(cgroup_line + "\n", encoding="utf-8")
     (proc_dir / "meminfo").write_text(
-        meminfo
-        if meminfo is not None
-        else (
-            f"MemTotal:       {mem_total_kb} kB\n"
-            f"MemFree:        {mem_available_kb // 2} kB\n"
-            f"MemAvailable:   {mem_available_kb} kB\n"
+        (
+            meminfo
+            if meminfo is not None
+            else (
+                f"MemTotal:       {mem_total_kb} kB\n"
+                f"MemFree:        {mem_available_kb // 2} kB\n"
+                f"MemAvailable:   {mem_available_kb} kB\n"
+            )
         ),
         encoding="utf-8",
     )
@@ -273,9 +275,7 @@ class TestNothingFoundIsNotTheSameAsNothingSet:
     a process that could not read its own limit.
     """
 
-    def test_an_unreadable_mountinfo_is_not_a_machine_without_cgroups(
-        self, tmp_path, monkeypatch
-    ):
+    def test_an_unreadable_mountinfo_is_not_a_machine_without_cgroups(self, tmp_path, monkeypatch):
         """EACCES on mountinfo used to report "no cgroups" and size from host RAM."""
         proc_dir = tmp_path / "proc"
         (proc_dir / "self").mkdir(parents=True)
@@ -442,9 +442,7 @@ class TestNothingFoundIsNotTheSameAsNothingSet:
         assert budget.limit_bytes == 8 * GIB
         assert budget.detail == "cgroup v2, no ceiling set"
 
-    def test_a_missing_mem_available_does_not_become_the_whole_machine(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_missing_mem_available_does_not_become_the_whole_machine(self, tmp_path, monkeypatch):
         """MemTotal is the size of the box and says nothing about what is free on it."""
         fake = build_fake_proc(
             tmp_path,
@@ -486,9 +484,7 @@ class TestNothingFoundIsNotTheSameAsNothingSet:
 class TestTheMountHasToBeMappedNotJoined:
     """mountinfo field 4 is the filesystem root and field 5 is the mount point."""
 
-    def test_a_mount_publishing_a_subtree_is_resolved_through_its_root(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_mount_publishing_a_subtree_is_resolved_through_its_root(self, tmp_path, monkeypatch):
         """The shape a container gets: only part of the hierarchy is mounted.
 
         With a mount root of /system.slice, the cgroup /system.slice/shadow9.service
@@ -580,9 +576,7 @@ class TestCgroupV1FindsThisProcessNotTheRoot:
         assert budget.limit_bytes == 256 * MIB
         assert budget.source == "cgroup v1"
 
-    def test_the_memory_controller_is_found_when_it_shares_a_hierarchy(
-        self, tmp_path, monkeypatch
-    ):
+    def test_the_memory_controller_is_found_when_it_shares_a_hierarchy(self, tmp_path, monkeypatch):
         """v1 mounts several controllers together, so the field is a list not a name."""
         fake = build_fake_proc(
             tmp_path,
@@ -848,9 +842,7 @@ class TestAPlanThatDoesNotFitSaysSo:
 
     def test_a_permit_count_below_one_is_refused(self):
         """Zero builds a pool nothing can take from, so every login waits for good."""
-        budget = MemoryBudget(
-            limit_bytes=GIB, available_bytes=GIB, source="cgroup v2", detail=""
-        )
+        budget = MemoryBudget(limit_bytes=GIB, available_bytes=GIB, source="cgroup v2", detail="")
 
         with pytest.raises(ValueError, match="at least 1"):
             choose_hash_permits(0, relay_reserve_bytes=0, budget=budget)
@@ -874,9 +866,9 @@ class TestOneBudgetSharedBySeveralWorkers:
         assert share.limit_bytes == GIB
         assert share.current_bytes == 20 * MIB
         assert "one share of 4" in share.detail
-        assert compute_hash_permits(share, 0, 32).permits < compute_hash_permits(
-            budget, 0, 32
-        ).permits
+        assert (
+            compute_hash_permits(share, 0, 32).permits < compute_hash_permits(budget, 0, 32).permits
+        )
 
     def test_a_share_too_small_for_one_hash_is_refused_like_any_other_ceiling(self):
         """A 768 MiB unit cannot run four workers each holding an argon2 hash.
@@ -923,9 +915,7 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
             mem_total_kb=64 * 1024 * 1024,
             mem_available_kb=60 * 1024 * 1024,
         )
-        (fake.proc_dir / "self" / "status").write_text(
-            "VmSize:\t131072 kB\n", encoding="utf-8"
-        )
+        (fake.proc_dir / "self" / "status").write_text("VmSize:\t131072 kB\n", encoding="utf-8")
 
         def capped_at_256_mib() -> int:
             return 256 * MIB
@@ -998,9 +988,7 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
             mem_total_kb=8 * 1024 * 1024,
             mem_available_kb=7 * 1024 * 1024,
         )
-        (fake.proc_dir / "self" / "status").write_text(
-            "VmSize:\t131072 kB\n", encoding="utf-8"
-        )
+        (fake.proc_dir / "self" / "status").write_text("VmSize:\t131072 kB\n", encoding="utf-8")
 
         def capped_at_8_gib() -> int:
             return 8 * GIB
@@ -1030,9 +1018,7 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
             mem_total_kb=64 * 1024 * 1024,
             mem_available_kb=60 * 1024 * 1024,
         )
-        (fake.proc_dir / "self" / "status").write_text(
-            "VmSize:\t327680 kB\n", encoding="utf-8"
-        )
+        (fake.proc_dir / "self" / "status").write_text("VmSize:\t327680 kB\n", encoding="utf-8")
 
         def capped_at_512_mib() -> int:
             return 512 * MIB
@@ -1069,9 +1055,7 @@ class TestAProcessLimitTheCgroupsDoNotKnowAbout:
             mem_total_kb=64 * 1024 * 1024,
             mem_available_kb=60 * 1024 * 1024,
         )
-        (fake.proc_dir / "self" / "status").write_text(
-            "VmSize:\t163840 kB\n", encoding="utf-8"
-        )
+        (fake.proc_dir / "self" / "status").write_text("VmSize:\t163840 kB\n", encoding="utf-8")
 
         def capped_at_512_mib() -> int:
             return 512 * MIB
@@ -1207,9 +1191,7 @@ class TestThePermitCount:
         chosen = compute_hash_permits(budget, relay_reserve_bytes=100 * 2 * 65536, cpu_count=32)
 
         spendable = int(768 * MIB * HEADROOM_FRACTION)
-        expected = (
-            spendable - INTERPRETER_RESERVE - 100 * 2 * 65536
-        ) // argon2_bytes_per_hash()
+        expected = (spendable - INTERPRETER_RESERVE - 100 * 2 * 65536) // argon2_bytes_per_hash()
         assert chosen.permits == expected
         assert chosen.permits > 1
         assert "bound by memory" in chosen.reason
@@ -1241,9 +1223,7 @@ class TestThePermitCount:
 
     def test_relay_buffers_are_taken_out_before_hashing_gets_a_share(self):
         """The relay holds two buffers per connection and hashing cannot spend them."""
-        budget = MemoryBudget(
-            limit_bytes=GIB, available_bytes=GIB, source="cgroup v2", detail=""
-        )
+        budget = MemoryBudget(limit_bytes=GIB, available_bytes=GIB, source="cgroup v2", detail="")
 
         without_relay = compute_hash_permits(budget, relay_reserve_bytes=0, cpu_count=32)
         with_relay = compute_hash_permits(
@@ -1326,13 +1306,13 @@ class TestThePermitPoolFollowsAChangingCeiling:
     def _answer(self, monkeypatch, permits: int) -> None:
         from shadow9 import socks5_server
 
-        def sized(
-            configured, relay_reserve_bytes: int, budget=None, cpu_count=None
-        ) -> HashPermits:
+        def sized(configured, relay_reserve_bytes: int, budget=None, cpu_count=None) -> HashPermits:
             return HashPermits(
                 permits=permits,
                 budget=MemoryBudget(
-                    limit_bytes=256 * MIB, available_bytes=256 * MIB, source="cgroup v2",
+                    limit_bytes=256 * MIB,
+                    available_bytes=256 * MIB,
+                    source="cgroup v2",
                     detail="",
                 ),
                 reason="test",

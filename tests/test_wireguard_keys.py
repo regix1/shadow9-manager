@@ -14,7 +14,6 @@ from shadow9.wireguard.keys import (
     is_valid_key,
 )
 
-
 # RFC 7748 section 6.1. Alice's private key and the public key X25519 must produce from it.
 # wireguard-tools v1.0.20210914 produces the same answer from the same input, so this vector
 # is what stops a change in `cryptography` from silently producing keys `wg` cannot use.

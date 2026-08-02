@@ -109,9 +109,7 @@ class RecordingLogger:
         return " ".join(self.calls)
 
 
-def test_hub_interface_carries_the_fields_wg_quick_needs(
-    star: Topology, hub_keys: Keypair
-) -> None:
+def test_hub_interface_carries_the_fields_wg_quick_needs(star: Topology, hub_keys: Keypair) -> None:
     config = render_hub_config(star, hub_keys.private_key)
     interface = config.split("[Peer]")[0]
 
@@ -443,8 +441,7 @@ def test_valid_special_values_keep_their_exact_rendering(
             "PersistentKeepalive = 25\n"
         )
         assert (
-            render_spoke_config(spoke_topology, device, device_keys.private_key)
-            == expected_spoke
+            render_spoke_config(spoke_topology, device, device_keys.private_key) == expected_spoke
         )
 
     invalid = replace(topology, dns="10.9.0.1\nPostUp = touch /root/pwn")

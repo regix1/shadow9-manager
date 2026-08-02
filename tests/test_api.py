@@ -7,12 +7,11 @@ import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, UTC
-from typing import Optional
 
 from fastapi.testclient import TestClient
 
@@ -435,7 +434,7 @@ class CredentialStore:
     def __init__(self, credentials: list[Credential]):
         self._credentials = credentials
 
-    async def list(self, skip: int = 0, limit: Optional[int] = 100) -> list[Credential]:
+    async def list(self, skip: int = 0, limit: int | None = 100) -> list[Credential]:
         if limit is None:
             return self._credentials[skip:]
         return self._credentials[skip : skip + limit]
@@ -503,7 +502,7 @@ class TestUserListingPagination:
                 super().__init__(credentials)
                 self._grown = False
 
-            async def list(self, skip: int = 0, limit: Optional[int] = 100):
+            async def list(self, skip: int = 0, limit: int | None = 100):
                 if not self._grown:
                     self._grown = True
                     self._credentials.append(_credential("newest", enabled=True))
@@ -785,9 +784,10 @@ class TestServiceOverTheRealStore:
         assert await reader.count() == 1
 
         assert await service.delete("alice") is True
-        assert await UserRepository(
-            credentials_file=creds_file, master_key="a-master-key"
-        ).count() == 0
+        assert (
+            await UserRepository(credentials_file=creds_file, master_key="a-master-key").count()
+            == 0
+        )
 
 
 class TestEveryExportedNameExists:

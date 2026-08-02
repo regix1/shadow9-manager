@@ -8,7 +8,6 @@ from typer.testing import CliRunner
 from shadow9.cli import app
 from shadow9.completion import remove_completion
 
-
 runner = CliRunner()
 
 
@@ -116,9 +115,7 @@ def test_it_undoes_what_typer_itself_installs(tmp_path: Path, monkeypatch) -> No
     from typer._completion_shared import install_bash
 
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-    installed = install_bash(
-        prog_name="shadow9", complete_var="_SHADOW9_COMPLETE", shell="bash"
-    )
+    installed = install_bash(prog_name="shadow9", complete_var="_SHADOW9_COMPLETE", shell="bash")
     assert installed.is_file(), "typer did not install where this test expected"
     assert str(installed) in (tmp_path / ".bashrc").read_text()
 
@@ -136,9 +133,7 @@ class TestTheOption:
         assert result.exit_code == 0
         assert "--remove-completion" in plain(result.stdout)
 
-    def test_it_reports_when_there_was_nothing_to_remove(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_it_reports_when_there_was_nothing_to_remove(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
         result = runner.invoke(app, ["--remove-completion"])

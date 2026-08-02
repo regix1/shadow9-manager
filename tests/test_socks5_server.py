@@ -4,13 +4,13 @@ import pytest
 import pytest_asyncio
 import asyncio
 import concurrent.futures
+import contextlib
 import ipaddress
 import socket
 import struct
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 from unittest.mock import AsyncMock, Mock
 
 import typer
@@ -180,10 +180,8 @@ class TestSocks5Server:
         await writer.drain()
 
         # Connection should be closed
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(reader.read(100), timeout=1.0)
-        except TimeoutError:
-            pass
 
         writer.close()
 
@@ -224,7 +222,7 @@ class TestSocks5ServerResources:
 
         async def waiting_handshake(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-        ) -> Optional[str]:
+        ) -> str | None:
             nonlocal inside, peak
             inside += 1
             peak = max(peak, inside)
@@ -350,7 +348,7 @@ class TestSocks5ServerResources:
         real_open_connection = asyncio.open_connection
 
         async def recording_open_connection(
-            host: Optional[str] = None, port: Optional[int] = None, **kwargs
+            host: str | None = None, port: int | None = None, **kwargs
         ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
             reader, writer = await real_open_connection(host, port, **kwargs)
             opened.append(writer)
@@ -462,9 +460,7 @@ class TestSocks5ServerResources:
         target_connected = asyncio.Event()
         target_closed = asyncio.Event()
 
-        async def hold_target(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-        ) -> None:
+        async def hold_target(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             target_connected.set()
             try:
                 await reader.read()
@@ -515,9 +511,7 @@ class TestSocks5ServerResources:
     ) -> None:
         """A monitoring failure cannot append a failure reply after SOCKS success."""
 
-        async def hold_target(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-        ) -> None:
+        async def hold_target(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 await reader.read()
             finally:
@@ -989,9 +983,7 @@ class TestSocks5ServerAccessPolicy:
         monkeypatch.setattr(
             asyncio.get_running_loop(),
             "getaddrinfo",
-            _FakeResolver(
-                {"blocked.example": "93.184.216.34", "alias.example": "93.184.216.34"}
-            ),
+            _FakeResolver({"blocked.example": "93.184.216.34", "alias.example": "93.184.216.34"}),
         )
         server = Socks5Server(
             host="127.0.0.1",
@@ -1055,9 +1047,7 @@ class TestSocks5ServerAccessPolicy:
         )
         await server.refresh_blocked_addresses()
 
-        monkeypatch.setattr(
-            loop, "getaddrinfo", _FakeResolver({"blocked.example": "172.67.1.1"})
-        )
+        monkeypatch.setattr(loop, "getaddrinfo", _FakeResolver({"blocked.example": "172.67.1.1"}))
         await server.refresh_blocked_addresses()
 
         assert server._blocked_addresses == frozenset({"172.67.1.1"})
@@ -1546,9 +1536,10 @@ class TestSocks5ServerAccessPolicy:
         for index in range(server.MAX_TRACKED_ENTRIES + 10):
             server._record_auth_failure(attacker, f"nobody{index}")
 
-        assert (attacker, "testuser") not in server._auth_failures, (
-            "the eviction under test did not happen"
-        )
+        assert (
+            attacker,
+            "testuser",
+        ) not in server._auth_failures, "the eviction under test did not happen"
         assert server._is_locked_out(attacker, "testuser")
         assert len(server._account_failures) == 1
 
@@ -1863,9 +1854,7 @@ class TestResolvingTheBlockListIsBounded:
         assert server._is_blocked_address("93.184.216.34") is True
 
     @pytest.mark.asyncio
-    async def test_a_later_round_still_reaches_a_name_that_went_quiet_before(
-        self, monkeypatch
-    ):
+    async def test_a_later_round_still_reaches_a_name_that_went_quiet_before(self, monkeypatch):
         """The watch has to survive the round, not just return from it."""
         server = Socks5Server(host="127.0.0.1", port=0, blocked_hosts=["moody.example"])
         monkeypatch.setattr(server, "BLOCKED_HOST_RESOLVE_TIMEOUT", 0.2)

@@ -224,9 +224,7 @@ class TestSharedEnvironmentVariables:
                 42,
                 id="connection_timeout",
             ),
-            pytest.param(
-                "SHADOW9_TOR_ENABLED", "tor", "enabled", "false", False, id="tor_enabled"
-            ),
+            pytest.param("SHADOW9_TOR_ENABLED", "tor", "enabled", "false", False, id="tor_enabled"),
             pytest.param(
                 "SHADOW9_TOR_SOCKS_PORT",
                 "tor",
@@ -299,9 +297,7 @@ class TestSharedEnvironmentVariables:
                 2,
                 id="max_concurrent_auth",
             ),
-            pytest.param(
-                "SHADOW9_LOG_LEVEL", "log", "level", "debug", "DEBUG", id="log_level"
-            ),
+            pytest.param("SHADOW9_LOG_LEVEL", "log", "level", "debug", "DEBUG", id="log_level"),
             pytest.param(
                 "SHADOW9_LOG_FORMAT",
                 "log",
@@ -1077,9 +1073,7 @@ class TestWireguardValuesThatCannotWork:
         assert WireguardConfig(tunnel_network=network).tunnel_network == network
         assert WireguardSettings(tunnel_network=network).tunnel_network == network
 
-    @pytest.mark.parametrize(
-        "network", ["127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/64"]
-    )
+    @pytest.mark.parametrize("network", ["127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/64"])
     def test_ranges_reserved_for_the_host_or_link_are_refused(self, network):
         """A tunnel must use private address space, not a host-only or link-only range."""
         with pytest.raises(ValueError, match=network):
@@ -1106,8 +1100,7 @@ class TestWireguardValuesThatCannotWork:
             WireguardSettings(listen_port=port)
 
         assert any(
-            str(port) in error
-            for error in settings_with_wireguard(listen_port=port).validate_all()
+            str(port) in error for error in settings_with_wireguard(listen_port=port).validate_all()
         )
 
     @pytest.mark.parametrize("port", [0, -1, 65536, 70000])

@@ -169,7 +169,7 @@ class TestTheBackupSet:
         _store_user(install, "alice", OLD_MASTER_KEY)
         api_config.set_api_key("api-key-before-rotation")
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
         assert result.exit_code == 0, plain(result.stdout)
 
         backup = install.latest_backup()
@@ -183,7 +183,7 @@ class TestTheBackupSet:
         """
         _store_user(install, "alice", OLD_MASTER_KEY)
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
         assert result.exit_code == 0, plain(result.stdout)
 
         manifest = json.loads((install.latest_backup() / "manifest.json").read_text())
@@ -197,7 +197,7 @@ class TestTheBackupSet:
         """Rotation is meant to make the live credentials unusable. That is not the bug."""
         _store_user(install, "alice", OLD_MASTER_KEY)
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
         assert result.exit_code == 0, plain(result.stdout)
 
         assert not install.credentials_file.exists()
@@ -212,11 +212,11 @@ class TestTheBackupSet:
         """
         _store_user(install, "alice", OLD_MASTER_KEY)
 
-        rotated = runner.invoke(app, ["master-key","generate", "--force"])
+        rotated = runner.invoke(app, ["master-key", "generate", "--force"])
         assert rotated.exit_code == 0, plain(rotated.stdout)
         assert not install.credentials_file.exists()
 
-        restored = runner.invoke(app, ["master-key","restore", "--force"])
+        restored = runner.invoke(app, ["master-key", "restore", "--force"])
         assert restored.exit_code == 0, plain(restored.stdout)
 
         assert _master_key_on_disk(install.env_file) == OLD_MASTER_KEY
@@ -235,14 +235,14 @@ class TestTheBackupSet:
         that cannot be decrypted, so it has to be refused instead.
         """
         _store_user(install, "alice", OLD_MASTER_KEY)
-        rotated = runner.invoke(app, ["master-key","generate", "--force"])
+        rotated = runner.invoke(app, ["master-key", "generate", "--force"])
         assert rotated.exit_code == 0, plain(rotated.stdout)
 
         backup = install.latest_backup()
         (backup / "manifest.json").unlink()
         key_after_rotation = _master_key_on_disk(install.env_file)
 
-        refused = runner.invoke(app, ["master-key","restore", str(backup), "--force"])
+        refused = runner.invoke(app, ["master-key", "restore", str(backup), "--force"])
 
         assert refused.exit_code != 0
         assert _master_key_on_disk(install.env_file) == key_after_rotation
@@ -251,14 +251,14 @@ class TestTheBackupSet:
     def test_restore_refuses_when_a_backed_up_file_was_altered(self, install: Install) -> None:
         """A backup whose contents no longer match the manifest is not restorable either."""
         _store_user(install, "alice", OLD_MASTER_KEY)
-        rotated = runner.invoke(app, ["master-key","generate", "--force"])
+        rotated = runner.invoke(app, ["master-key", "generate", "--force"])
         assert rotated.exit_code == 0, plain(rotated.stdout)
 
         backup = install.latest_backup()
         (backup / "credentials.enc").write_bytes(b"not what was backed up")
         key_after_rotation = _master_key_on_disk(install.env_file)
 
-        refused = runner.invoke(app, ["master-key","restore", str(backup), "--force"])
+        refused = runner.invoke(app, ["master-key", "restore", str(backup), "--force"])
 
         assert refused.exit_code != 0
         assert _master_key_on_disk(install.env_file) == key_after_rotation
@@ -278,14 +278,14 @@ class TestAKeyThatLivesInTheShell:
     ) -> None:
         _store_user(shell_key_install, "alice", OLD_MASTER_KEY)
 
-        rotated = runner.invoke(app, ["master-key","generate", "--force"])
+        rotated = runner.invoke(app, ["master-key", "generate", "--force"])
         assert rotated.exit_code == 0, plain(rotated.stdout)
 
         assert shell_key_install.backups_dir.is_dir(), "rotation took no backup"
         assert not shell_key_install.credentials_file.exists()
         assert _master_key_on_disk(shell_key_install.env_file) != OLD_MASTER_KEY
 
-        restored = runner.invoke(app, ["master-key","restore", "--force"])
+        restored = runner.invoke(app, ["master-key", "restore", "--force"])
         assert restored.exit_code == 0, plain(restored.stdout)
 
         auth = AuthManager(
@@ -309,10 +309,10 @@ class TestAKeyThatLivesInTheShell:
         try:
             _store_user(install, "alice", OLD_MASTER_KEY)
 
-            rotated = runner.invoke(app, ["master-key","generate", "--force"])
+            rotated = runner.invoke(app, ["master-key", "generate", "--force"])
             assert rotated.exit_code == 0, plain(rotated.stdout)
 
-            restored = runner.invoke(app, ["master-key","restore", "--force"])
+            restored = runner.invoke(app, ["master-key", "restore", "--force"])
             assert restored.exit_code == 0, plain(restored.stdout)
 
             assert _master_key_on_disk(install.env_file) == OLD_MASTER_KEY
@@ -346,7 +346,7 @@ class TestAKeyThatLivesInTheShell:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
 
         assert result.exit_code != 0
         assert not shell_key_install.env_file.exists()
@@ -386,7 +386,7 @@ class TestTheServiceGate:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
 
         assert result.exit_code != 0
         assert _master_key_on_disk(install.env_file) == OLD_MASTER_KEY
@@ -414,7 +414,7 @@ class TestTheServiceGate:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
 
         assert result.exit_code == 0, plain(result.stdout)
         assert order == ["stop"]
@@ -431,7 +431,7 @@ class TestTheApiKey:
         api_config.set_api_key("api-key-before-rotation")
         assert api_config.get_api_key() == "api-key-before-rotation"
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
         assert result.exit_code == 0, plain(result.stdout)
 
         assert api_config.get_api_key() == "api-key-before-rotation"
@@ -452,7 +452,7 @@ class TestTheApiKey:
             }
         )
 
-        result = runner.invoke(app, ["master-key","generate", "--force"])
+        result = runner.invoke(app, ["master-key", "generate", "--force"])
         assert result.exit_code == 0, plain(result.stdout)
 
         remaining = api_config.load_api_config()
@@ -464,10 +464,10 @@ class TestTheApiKey:
         """The API key file and its salt belong to the same matched set as the credentials."""
         api_config.set_api_key("api-key-before-rotation")
 
-        rotated = runner.invoke(app, ["master-key","generate", "--force"])
+        rotated = runner.invoke(app, ["master-key", "generate", "--force"])
         assert rotated.exit_code == 0, plain(rotated.stdout)
 
-        restored = runner.invoke(app, ["master-key","restore", "--force"])
+        restored = runner.invoke(app, ["master-key", "restore", "--force"])
         assert restored.exit_code == 0, plain(restored.stdout)
 
         assert api_config.get_api_key() == "api-key-before-rotation"
@@ -484,7 +484,7 @@ def test_generating_a_first_key_takes_no_backup(
     monkeypatch.delenv("SHADOW9_MASTER_KEY", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
-    result = runner.invoke(app, ["master-key","generate"])
+    result = runner.invoke(app, ["master-key", "generate"])
 
     assert result.exit_code == 0, plain(result.stdout)
     assert (root / ".env").exists()
@@ -493,7 +493,7 @@ def test_generating_a_first_key_takes_no_backup(
 
 def test_the_command_group_offers_a_restore(install: Install) -> None:
     """An operator who has just rotated needs to be able to find the way back."""
-    result = runner.invoke(app, ["master-key","--help"])
+    result = runner.invoke(app, ["master-key", "--help"])
 
     assert result.exit_code == 0
     assert "restore" in plain(result.stdout)
