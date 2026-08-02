@@ -643,6 +643,42 @@ class TestRestartMode:
         assert calls_with(stub, "systemctl") == []
         assert stub.launched == []
 
+    def test_a_running_wireguard_listener_restarts_after_reinstall(
+        self,
+        update_command: Callable[..., None],
+        stub: StubProcess,
+        tools: set[str],
+        repo: Path,
+    ) -> None:
+        tools.add("systemctl")
+        stub.outcome("shadow9-wireguard.service", 0, "active\n")
+
+        update_command()
+
+        restart = calls_with(stub, "systemctl restart shadow9-wireguard.service")
+        assert restart
+        assert position_of(stub, "pip install") < position_of(
+            stub, "systemctl restart shadow9-wireguard.service"
+        )
+
+    def test_a_failed_wireguard_restart_rolls_back_and_restarts_the_listener(
+        self,
+        update_command: Callable[..., None],
+        stub: StubProcess,
+        tools: set[str],
+        repo: Path,
+    ) -> None:
+        tools.add("systemctl")
+        stub.outcome("shadow9-wireguard.service", 0, "active\n")
+        stub.outcome("shadow9-wireguard.service", 1, stderr="restart failed")
+        stub.outcome("shadow9-wireguard.service", 0)
+
+        with pytest.raises(typer.Exit):
+            update_command()
+
+        assert calls_with(stub, f"reset --hard {OLD_COMMIT}")
+        assert len(calls_with(stub, "systemctl restart shadow9-wireguard.service")) == 2
+
 
 class TestServingCheck:
     """A service that was asked to start is not the same as a proxy that serves."""

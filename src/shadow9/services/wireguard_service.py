@@ -23,6 +23,8 @@ import ipaddress
 import os
 import re
 import secrets
+import shutil
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta, UTC
@@ -70,6 +72,7 @@ ENROLLMENT_PROTOCOL = 1
 JOIN_MAC_MESSAGE = b"shadow9-join-mac-v1"
 REFRESH_MAC_MESSAGE = b"shadow9-refresh-v1"
 INVALID_REFRESH_KEY = "00" * hashlib.sha256().digest_size
+WIREGUARD_SYNC_TIMEOUT = 10
 
 # The credential fields a peer record needs. Named here so a store that does not carry
 # them fails with a sentence rather than writing peers that silently vanish.
@@ -1252,6 +1255,50 @@ def regenerate_configs(
     return RenderedConfigs(written=tuple(written), unmanaged=tuple(unmanaged))
 
 
+def sync_hub_interface(interface: str) -> bool:
+    """Load the rendered hub config into an interface that is already running."""
+    if not (Path("/sys/class/net") / interface).exists():
+        return False
+
+    wg = shutil.which("wg")
+    wg_quick = shutil.which("wg-quick")
+    if wg is None or wg_quick is None:
+        missing = "wg" if wg is None else "wg-quick"
+        raise OSError(f"cannot synchronize {interface}: {missing} was not found on PATH")
+
+    try:
+        stripped = subprocess.run(
+            [wg_quick, "strip", str(config_path(interface))],
+            capture_output=True,
+            text=True,
+            timeout=WIREGUARD_SYNC_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError(f"could not prepare the live {interface} configuration") from error
+    if stripped.returncode != 0:
+        raise OSError(
+            f"could not prepare the live {interface} configuration "
+            f"(wg-quick exited {stripped.returncode})"
+        )
+
+    try:
+        synced = subprocess.run(
+            [wg, "syncconf", interface, "/dev/stdin"],
+            input=stripped.stdout,
+            capture_output=True,
+            text=True,
+            timeout=WIREGUARD_SYNC_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError(f"could not synchronize the live {interface} interface") from error
+    if synced.returncode != 0:
+        raise OSError(
+            f"could not synchronize the live {interface} interface "
+            f"(wg exited {synced.returncode})"
+        )
+    return True
+
+
 def _remember_configs(topology: Topology) -> dict[Path, Optional[bytes]]:
     """Read every config a regeneration can replace before the first write."""
     paths = {config_path(topology.interface)}
@@ -1381,8 +1428,11 @@ def enroll_peer(
                 topology = load_topology(cfg, auth_manager.list_credentials(), hub_key, outward)
                 return Enrollment(peer=existing_peer, topology=topology, token=checked_token)
             raise ValueError(
-                f"'{checked_name}' is already a peer on this hub. Remove it with "
-                f"'shadow9 wg remove {checked_name}' or join under another name."
+                f"'{checked_name}' is already a peer on this hub. On the hub, run "
+                f"'shadow9 wg remove {checked_name}', then retry this router's join. "
+                "Do not run that command on the OpenWrt router. To keep the existing "
+                "peer, retry 'shadow9-node join' on this router with "
+                "'-name <different-name>'."
             )
 
         hub_config = config_path(cfg.wireguard.interface)
@@ -1413,6 +1463,7 @@ def enroll_peer(
                 refresh_key=refresh_key(spent_token.mac_key),
             )
             regenerate_configs(topology, hub_private_key, auth_manager.list_credentials())
+            sync_hub_interface(topology.interface)
         except Exception as error:
             failures = _restore_enrollment(
                 auth_manager, checked_name, previous, checked_token, copies
@@ -1493,6 +1544,7 @@ def set_peer_enabled(cfg: Config, auth_manager: AuthManager, name: str, enabled:
         if peer is not None and private_key is not None:
             topology = _current_topology(cfg, auth_manager, derive_public_key(private_key))
             regenerate_configs(topology, private_key, auth_manager.list_credentials())
+            sync_hub_interface(topology.interface)
         return True
 
 
@@ -1511,6 +1563,7 @@ def delete_user_peer(cfg: Config, auth_manager: AuthManager, name: str) -> bool:
         if peer is not None and private_key is not None:
             topology = _current_topology(cfg, auth_manager, derive_public_key(private_key))
             regenerate_configs(topology, private_key, auth_manager.list_credentials())
+            sync_hub_interface(topology.interface)
 
         if peer is not None:
             for path in (config_path(name), config_path(name).with_suffix(".svg")):

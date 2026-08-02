@@ -708,6 +708,7 @@ def register_util_commands(app: typer.Typer) -> None:
                 raise typer.Exit(1)
 
         running = stop_running_server()
+        wireguard_running = _wireguard_service_is_running()
 
         # Written outside the working tree before anything moves, so the commit to go
         # back to is still there for a later run after this process exits.
@@ -747,6 +748,14 @@ def register_util_commands(app: typer.Typer) -> None:
         if not _use_checkout_for_service(repo_root):
             console.print("[yellow]Going back to the version that was installed before.[/yellow]")
             _roll_back(repo_root, current_commit)
+            _start_and_check(repo_root, running)
+            raise typer.Exit(1)
+
+        if not _restart_wireguard_service(wireguard_running):
+            console.print("[yellow]Going back to the version that was installed before.[/yellow]")
+            rolled_back = _roll_back(repo_root, current_commit)
+            if rolled_back:
+                _restart_wireguard_service(wireguard_running)
             _start_and_check(repo_root, running)
             raise typer.Exit(1)
 
@@ -1471,6 +1480,45 @@ def _install_package(repo_root: Path) -> bool:
 
     console.print(f"[red]Error: dependency install failed: {result.stderr.strip()}[/red]")
     console.print(f"[dim]Run in {repo_root}: {' '.join(install)}[/dim]")
+    return False
+
+
+def _wireguard_service_is_running() -> bool:
+    """Report whether the enrollment listener needs to be restarted after installation."""
+    if shutil.which("systemctl") is None:
+        return False
+
+    from .wireguard import ENROLLMENT_SERVICE_NAME
+
+    active = subprocess.run(
+        ["systemctl", "is-active", ENROLLMENT_SERVICE_NAME],
+        capture_output=True,
+        text=True,
+    )
+    return active.stdout.strip() == "active"
+
+
+def _restart_wireguard_service(was_running: bool) -> bool:
+    """Restart the active enrollment listener so it loads and applies the installed code."""
+    if not was_running:
+        return True
+
+    from .wireguard import ENROLLMENT_SERVICE_NAME
+
+    console.print(f"[>] Restarting {ENROLLMENT_SERVICE_NAME}...")
+    restarted = subprocess.run(
+        privileged(["systemctl", "restart", ENROLLMENT_SERVICE_NAME]),
+        capture_output=True,
+        text=True,
+    )
+    if restarted.returncode == 0:
+        return True
+
+    console.print(
+        f"[red]Error: {ENROLLMENT_SERVICE_NAME} did not restart: "
+        f"{restarted.stderr.strip()}[/red]"
+    )
+    console.print(f"[dim]Try: sudo systemctl restart {ENROLLMENT_SERVICE_NAME}[/dim]")
     return False
 
 

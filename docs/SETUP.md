@@ -343,6 +343,12 @@ Unlike the hub, this one applies its own configuration and runs `wg-quick` for y
 | `shadow9-node refresh` | On a router: pulls current settings while keeping its routing mode and table |
 | `shadow9-node uninstall` | Removes only the OpenWrt configuration proven to belong to Shadow9 |
 
+When a peer is added, removed, enabled, disabled, or re-enrolled, Shadow9 also synchronizes
+the regenerated hub configuration into the running WireGuard interface. Existing handshakes,
+forwarding rules, and NAT stay in place; restarting `wg-quick@<interface>` is not required.
+Starting the enrollment listener after setup or a reinstall performs the same synchronization
+before it accepts another node.
+
 Nodes are pull-based. The hub never held their private keys, so it cannot push them a
 new config. A changed hub endpoint, or a second gateway's LAN, reaches a node on its
 next `refresh` or its next boot, because the boot service runs `refresh`. Run it by hand

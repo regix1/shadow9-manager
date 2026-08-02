@@ -77,6 +77,7 @@ from ..services.wireguard_service import (
     save_hub_private_key,
     save_peer,
     split_join_token,
+    sync_hub_interface,
 )
 from ..wireguard import (
     DEFAULT_INTERFACE,
@@ -581,6 +582,12 @@ def serve(
     _require_hub_public_key()
 
     try:
+        sync_hub_interface(cfg.wireguard.interface)
+    except OSError as error:
+        console.print(f"[red]Could not refresh the running hub interface: {error}[/red]")
+        raise typer.Exit(1) from error
+
+    try:
         import uvicorn
     except ImportError as error:
         console.print("[red]The enrollment server needs uvicorn. Reinstall shadow9 first.[/red]")
@@ -919,11 +926,12 @@ def _device_add_impl(name: str, full_tunnel: bool, obfuscate: bool, config: str)
             rendered = regenerate_configs(
                 topology, hub_private_key, auth_manager.list_credentials()
             )
+            sync_hub_interface(topology.interface)
         except ValueError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
         except OSError as error:
-            console.print(f"[red]Could not write the config: {error}[/red]")
+            console.print(f"[red]Could not apply the config: {error}[/red]")
             raise typer.Exit(1) from error
 
     console.print(
@@ -1054,9 +1062,10 @@ def remove(
                 hub_private_key,
                 auth_manager.list_credentials(),
             )
+            sync_hub_interface(topology.interface)
         except OSError as error:
             console.print(
-                f"[red]The peer was removed but a config could not be written: {error}[/red]"
+                f"[red]The peer was removed but its configs could not be applied: {error}[/red]"
             )
             raise typer.Exit(1) from error
 
@@ -1102,8 +1111,9 @@ def hub_set_endpoint(
             rendered = regenerate_configs(
                 topology, hub_private_key, auth_manager.list_credentials()
             )
+            sync_hub_interface(topology.interface)
         except OSError as error:
-            console.print(f"[red]Could not write a config: {error}[/red]")
+            console.print(f"[red]Could not apply the config: {error}[/red]")
             raise typer.Exit(1) from error
 
         _save_config(cfg, Path(config))

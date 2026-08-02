@@ -348,6 +348,95 @@ class TestTheAnswer:
         assert credential.wg_role == "node"
 
 
+class TestLiveHub:
+    """The running hub must not lag behind the configuration written to disk."""
+
+    def test_enrollment_synchronizes_the_running_interface(
+        self, hub: "_Hub", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        synchronized: list[str] = []
+        monkeypatch.setattr(
+            wireguard_service,
+            "sync_hub_interface",
+            lambda interface: synchronized.append(interface) or True,
+        )
+
+        response = hub.enroll(name="office-router")
+
+        assert response.status_code == 200, response.text
+        assert synchronized == ["wg0"]
+
+    def test_sync_uses_stdin_instead_of_process_substitution(
+        self, hub: "_Hub", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[list[str], dict[str, object]]] = []
+        stripped = "[Interface]\nPrivateKey = test-private-key\n"
+        monkeypatch.setattr(Path, "exists", lambda _path: True)
+        monkeypatch.setattr(
+            wireguard_service.shutil,
+            "which",
+            lambda command: f"/usr/bin/{command}",
+        )
+
+        def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+            calls.append((command, options))
+            stdout = stripped if command[1] == "strip" else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(wireguard_service.subprocess, "run", run)
+
+        assert wireguard_service.sync_hub_interface("wg0")
+        assert calls[0][0] == [
+            "/usr/bin/wg-quick",
+            "strip",
+            str(wireguard_service.config_path("wg0")),
+        ]
+        assert calls[1][0] == ["/usr/bin/wg", "syncconf", "wg0", "/dev/stdin"]
+        assert calls[1][1]["input"] == stripped
+        assert all("shell" not in options for _, options in calls)
+
+    def test_sync_failure_does_not_expose_the_private_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        private_key = "private-key-that-must-stay-hidden"
+        stripped = f"[Interface]\nPrivateKey = {private_key}\n"
+        monkeypatch.setattr(Path, "exists", lambda _path: True)
+        monkeypatch.setattr(
+            wireguard_service.shutil,
+            "which",
+            lambda command: f"/usr/bin/{command}",
+        )
+
+        def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+            if command[1] == "strip":
+                return subprocess.CompletedProcess(command, 0, stdout=stripped, stderr="")
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"rejected {stripped}",
+            )
+
+        monkeypatch.setattr(wireguard_service.subprocess, "run", run)
+
+        with pytest.raises(OSError, match="wg exited 1") as caught:
+            wireguard_service.sync_hub_interface("wg0")
+
+        assert private_key not in str(caught.value)
+
+    def test_sync_skips_an_interface_that_is_not_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(Path, "exists", lambda _path: False)
+
+        def unexpected(*_args: object, **_options: object) -> None:
+            raise AssertionError("an inactive interface ran a command")
+
+        monkeypatch.setattr(wireguard_service.subprocess, "run", unexpected)
+
+        assert not wireguard_service.sync_hub_interface("wg0")
+
+
 class TestRoutePropagation:
     """What a gateway's LAN reaches before nodes pull their current route lists."""
 
@@ -629,7 +718,12 @@ class TestWhatIsRefused:
         response = hub.enroll(name="office-router")
 
         assert response.status_code == 409
-        assert "already a peer" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "already a peer" in detail
+        assert "On the hub, run 'shadow9 wg remove office-router'" in detail
+        assert "Do not run that command on the OpenWrt router" in detail
+        assert "'shadow9-node join' on this router" in detail
+        assert "'-name <different-name>'" in detail
 
     def test_a_body_with_an_unexpected_field_is_refused(self, hub: "_Hub") -> None:
         response = hub.enroll(private_key="please-send-me-one")

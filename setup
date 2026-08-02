@@ -154,6 +154,17 @@ else
     "$SCRIPT_DIR/shadow9" master-key generate
 fi
 
+# A running enrollment listener has the old Python modules in memory after a reinstall.
+# Its startup synchronizes the rendered hub config before it accepts another router.
+if command -v systemctl &>/dev/null && systemctl is-active --quiet shadow9-wireguard.service; then
+    if run_privileged systemctl restart shadow9-wireguard.service; then
+        print_status "$SUCCESS" "WireGuard enrollment service refreshed"
+    else
+        print_status "$ERROR" "WireGuard enrollment service could not be refreshed"
+        exit 1
+    fi
+fi
+
 # Keep the command on the checkout wrapper so it selects this virtual environment after
 # every update instead of whichever system Python happened to run setup.
 if is_root; then

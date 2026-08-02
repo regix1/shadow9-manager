@@ -1143,16 +1143,23 @@ class TestEnrollmentServer:
 
         _init_hub(runner, cli_app, hub_root)
         called: dict[str, object] = {}
+        synchronized: list[str] = []
 
         def run(app: str, **options: object) -> None:
             called["app"] = app
             called.update(options)
 
         monkeypatch.setattr(uvicorn, "run", run)
+        monkeypatch.setattr(
+            wg_commands,
+            "sync_hub_interface",
+            lambda interface: synchronized.append(interface) or True,
+        )
 
         result = runner.invoke(cli_app, ["wg", "serve"])
 
         assert result.exit_code == 0, result.output
+        assert synchronized == ["wg0"]
         assert called == {
             "app": "shadow9.api.app:enrollment_app",
             "host": "0.0.0.0",
