@@ -200,6 +200,123 @@ func TestTheOrphanRefusalSaysHowToRecover(t *testing.T) {
 	}
 }
 
+// A tunnel LAN is a whole subnet an operator would otherwise have to build and
+// wire to the tunnel by hand: a bridge, an address, DHCP, a zone and the rule.
+func TestATunnelLanIsBuiltReadyToUse(t *testing.T) {
+	tunnel := siteGateway()
+	tunnel.Address = "10.9.0.7/24"
+	tunnel.AllowedIPs = []string{DefaultIPv4Route}
+	tunnel.Table = 1
+	tunnel.LanSubnet = "192.168.1.0/24"
+	tunnel.TunnelLan = "10.9.9.0/24"
+	shell := writeGateway(t, tunnel)
+
+	network := shell.render("network")
+	for _, want := range []string{
+		"config device 'br_wg0_lan'",
+		"option name 'br-wg0-lan'",
+		"option type 'bridge'",
+		"config interface 'wg0_lan'",
+		"option device 'br-wg0-lan'",
+		"option ipaddr '10.9.9.1/24'",
+		"option mtu '1420'",
+	} {
+		if !strings.Contains(network, want) {
+			t.Errorf("the tunnel LAN is missing %q:\n%s", want, network)
+		}
+	}
+	// The bridge is deliberately portless: only the operator knows what
+	// belongs on it, and taking a port would move whatever is plugged in.
+	if strings.Contains(network, "option ports") || strings.Contains(network, "list ports") {
+		t.Error("the tunnel LAN bridge claimed a port")
+	}
+
+	dhcp := shell.render("dhcp")
+	for _, want := range []string{"config dhcp 'wg0_lan'", "option interface 'wg0_lan'"} {
+		if !strings.Contains(dhcp, want) {
+			t.Errorf("dhcp is missing %q:\n%s", want, dhcp)
+		}
+	}
+	// Naming a public resolver here would send this LAN's lookups outside the
+	// tunnel it exists to use.
+	if strings.Contains(dhcp, "dhcp_option") {
+		t.Errorf("the tunnel LAN was given a resolver of its own:\n%s", dhcp)
+	}
+
+	firewall := shell.render("firewall")
+	for _, want := range []string{
+		"config zone 'wgvpnlan'",
+		"list network 'wg0_lan'",
+		"config forwarding 'wgvpnlan_out'",
+		"config forwarding 'wgvpnlan_lan'",
+	} {
+		if !strings.Contains(firewall, want) {
+			t.Errorf("the tunnel LAN zone is missing %q:\n%s", want, firewall)
+		}
+	}
+
+	// The rule matches the new subnet rather than the router's own LAN, and
+	// starts live because nothing is on the new one yet.
+	for _, want := range []string{"option src '10.9.9.0/24'", "option disabled '0'"} {
+		if !strings.Contains(network, want) {
+			t.Errorf("the steering rule is missing %q:\n%s", want, network)
+		}
+	}
+	if !strings.Contains(shell.render("shadow9"), "option lan 'wg0_lan'") {
+		t.Error("the tunnel LAN was not recorded as owned")
+	}
+}
+
+func TestUninstallTakesTheTunnelLanWithIt(t *testing.T) {
+	tunnel := siteGateway()
+	tunnel.Address = "10.9.0.7/24"
+	tunnel.AllowedIPs = []string{DefaultIPv4Route}
+	tunnel.Table = 1
+	tunnel.TunnelLan = "10.9.9.0/24"
+	shell := writeGateway(t, tunnel)
+	router := Router{Shell: shell}
+	if err := router.WriteIdentity("branch-gateway", tunnel.PrivateKey); err != nil {
+		t.Fatalf("WriteIdentity: %v", err)
+	}
+
+	removed, err := router.RemoveTunnel()
+	if err != nil || !removed {
+		t.Fatalf("RemoveTunnel returned removed=%t err=%v", removed, err)
+	}
+	everything := shell.render("network") + shell.render("firewall") + shell.render("dhcp")
+	for _, orphan := range []string{
+		"wg0_lan", "br-wg0-lan", "br_wg0_lan", "wgvpnlan",
+	} {
+		if strings.Contains(everything, orphan) {
+			t.Errorf("%s survived uninstall:\n%s", orphan, everything)
+		}
+	}
+}
+
+func TestATunnelLanNeedsThePolicyTable(t *testing.T) {
+	siteOnly := siteGateway()
+	siteOnly.TunnelLan = "10.9.9.0/24"
+	if got := siteOnly.LanSection(); got != "" {
+		t.Errorf("site-only mode named a tunnel LAN %q with no table to send it to", got)
+	}
+}
+
+func TestLanAddressRefusesWhatCannotBeALan(t *testing.T) {
+	if got, err := LanAddress("10.9.9.0/24"); err != nil || got != "10.9.9.1/24" {
+		t.Errorf("LanAddress gave %q, %v", got, err)
+	}
+	for _, bad := range []string{
+		"10.9.9.5/24",  // a host, not a subnet
+		"10.9.9.0/31",  // no room for hosts
+		"fd00::/64",    // not IPv4
+		"not-a-subnet", // not parseable
+	} {
+		if _, err := LanAddress(bad); err == nil {
+			t.Errorf("LanAddress accepted %q", bad)
+		}
+	}
+}
+
 // A node enrolled before the rule existed gets one from a refresh, without
 // needing a new token.
 func TestRefreshAddsTheRuleToAnAlreadyEnrolledNode(t *testing.T) {

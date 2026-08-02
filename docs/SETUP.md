@@ -329,6 +329,20 @@ and neither a refresh nor a later topology change switches it back off. A refres
 rule to a node that enrolled before this existed, and `--site-only`, or a router whose LAN
 subnet cannot be read, gets no rule at all.
 
+Rather than sending an existing LAN through the tunnel, `--tunnel-lan 10.9.9.0/24` builds a
+new one for it. The join creates a bridge, puts the router at the first address of that
+subnet with the tunnel's MTU, hands out addresses on it with DHCP, gives it its own
+firewall zone forwarding into the tunnel zone and to the LAN, and points the steering rule
+at the new subnet instead of the router's own. That rule starts **enabled**, because a
+subnet built for the tunnel has nothing on it yet and switching it on moves no existing
+traffic. The bridge is created with no ports: only you know whether a port, a VLAN or a
+wifi SSID belongs on it, and claiming a port would move whatever is plugged into it. Add
+one under Network then Interfaces then Physical Settings and the subnet is live. The LAN
+keeps the router as its resolver on purpose, since naming a public one would send its
+lookups outside the tunnel it exists to use. `--tunnel-lan` needs the policy table, so it
+cannot be combined with `--site-only`, and uninstall removes the bridge, interface, DHCP
+section and zone along with everything else.
+
 A join refuses to run against a different `--iface` than the one this node is already
 enrolled on, because moving the saved ownership would leave the previous interface, peer,
 routes and zone with nothing to prove they belong to Shadow9. Uninstall first. If the hub

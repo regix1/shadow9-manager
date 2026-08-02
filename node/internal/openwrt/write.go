@@ -214,6 +214,18 @@ func (r Router) checkRuleOwnership(rule string) error {
 	return nil
 }
 
+// savedLan returns the tunnel LAN this node recorded, or "" when it built none.
+func (r Router) savedLan() (string, error) {
+	lan, err := r.Get(nodeSection + ".lan")
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the Shadow9-owned tunnel LAN: %w", err)
+	}
+	return lan, nil
+}
+
 // savedRule returns the rule section this node recorded, or "" when it has none.
 func (r Router) savedRule() (string, error) {
 	rule, err := r.Get(nodeSection + ".rule")
@@ -955,6 +967,18 @@ func (r Router) WriteTunnel(tunnel Tunnel, hub string) error {
 	}
 	pkgs = append(pkgs, "network", "firewall")
 	services := []string{"network", "firewall"}
+	dhcpCommands := tunnel.DHCPCommands()
+	if len(dhcpCommands) != 0 {
+		// dnsmasq hands out the tunnel LAN's addresses, so its config is a
+		// fourth package this write has to snapshot and restore with the rest.
+		// uci cannot address a package whose file is absent, and a router with
+		// no DHCP configured at all has none.
+		if _, err := r.run(fileTimeout, "", "touch", "/etc/config/dhcp"); err != nil {
+			return fmt.Errorf("creating /etc/config/dhcp: %w", err)
+		}
+		pkgs = append(pkgs, "dhcp")
+		services = append(services, "dnsmasq")
+	}
 	if tunnel.Table != 0 || pbr.touched {
 		services = append(services, "pbr")
 	}
@@ -978,6 +1002,7 @@ func (r Router) WriteTunnel(tunnel Tunnel, hub string) error {
 	staged := [][]Command{
 		networkCommands,
 		tunnel.FirewallCommands(),
+		dhcpCommands,
 		pbr.commands,
 		settings,
 	}
@@ -996,7 +1021,11 @@ func (r Router) WriteTunnel(tunnel Tunnel, hub string) error {
 	// Reload rather than restart, so interfaces this client did not create
 	// stay up. The saved packages remain available until netifd reports the
 	// interface up; a failed or timed-out check restores them.
-	for _, service := range []string{"network", "firewall"} {
+	reloads := []string{"network", "firewall"}
+	if len(dhcpCommands) != 0 {
+		reloads = append(reloads, "dnsmasq")
+	}
+	for _, service := range reloads {
 		if err := r.Reload(service); err != nil {
 			return r.restoreAfter(err, snapshots, services)
 		}
@@ -1179,12 +1208,22 @@ func (r Router) RemoveTunnel() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	lanName, err := r.savedLan()
+	if err != nil {
+		return false, err
+	}
 	pkgs := []string{"network", "firewall"}
+	if lanName != "" {
+		pkgs = append(pkgs, "dhcp")
+	}
 	if pbr.touched {
 		pkgs = append(pkgs, "pbr")
 	}
 	pkgs = append(pkgs, "shadow9")
 	services := []string{"network", "firewall"}
+	if lanName != "" {
+		services = append(services, "dnsmasq")
+	}
 	if pbr.touched {
 		services = append(services, "pbr")
 	}
@@ -1199,14 +1238,27 @@ func (r Router) RemoveTunnel() (bool, error) {
 	if ruleName != "" {
 		network = append(network, remove("network."+ruleName))
 	}
+	firewall := []Command{
+		remove(zonePath),
+		remove("firewall." + zone + "_to_" + lanZone),
+		remove("firewall." + lanZone + "_to_" + zone),
+		remove(inbound),
+	}
+	dhcp := []Command{}
+	if lanName != "" {
+		network = append(network,
+			remove("network."+lanName),
+			remove("network."+LanDeviceSection(iface)))
+		firewall = append(firewall,
+			remove("firewall."+LanZoneName(zone)),
+			remove("firewall."+LanZoneName(zone)+"_out"),
+			remove("firewall."+LanZoneName(zone)+"_lan"))
+		dhcp = append(dhcp, remove("dhcp."+lanName))
+	}
 	staged := [][]Command{
 		network,
-		{
-			remove(zonePath),
-			remove("firewall." + zone + "_to_" + lanZone),
-			remove("firewall." + lanZone + "_to_" + zone),
-			remove(inbound),
-		},
+		firewall,
+		dhcp,
 		pbr.commands,
 		{remove(nodeSection)},
 	}

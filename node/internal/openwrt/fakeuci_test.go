@@ -117,7 +117,9 @@ func newFakeShell(existing ...string) *fakeShell {
 		installed: map[string]bool{ProtocolPackage: true, PolicyPackage: true},
 		snapshots: map[string]*fakePackage{},
 	}
-	for _, pkg := range append([]string{"network", "firewall", "system"}, existing...) {
+	// dhcp is present on any OpenWrt router that hands out addresses, which is
+	// effectively all of them, so the fake starts with it too.
+	for _, pkg := range append([]string{"network", "firewall", "system", "dhcp"}, existing...) {
 		f.working[pkg] = &fakePackage{}
 		f.committed[pkg] = &fakePackage{}
 	}

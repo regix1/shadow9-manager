@@ -218,6 +218,7 @@ type joinOptions struct {
 	zone       string
 	lanZone    string
 	advertise  string
+	tunnelLan  string
 	noRoutes   bool
 	keepKey    bool
 	listenPort int
@@ -262,6 +263,8 @@ func joinFlags() (*flag.FlagSet, *joinOptions) {
 		"override the hub's keepalive seconds; 0 turns keepalives off")
 	flags.IntVar(&options.table, "table", 0,
 		"legacy option; omit it because PBR selects its routing table automatically")
+	flags.StringVar(&options.tunnelLan, "tunnel-lan", "",
+		"build a LAN on this subnet whose traffic uses the tunnel, for example 10.9.9.0/24")
 	flags.BoolVar(&options.siteOnly, "site-only", false,
 		"route only the tunnel and other sites, without a policy-routing default")
 	flags.DurationVar(&options.timeout, "timeout", 20*time.Second,
@@ -279,6 +282,16 @@ func join(args []string) error {
 	}
 	if options.table != 0 {
 		return fmt.Errorf("-table is no longer needed; omit it because PBR selects its own table")
+	}
+	if options.tunnelLan != "" {
+		if options.siteOnly {
+			return fmt.Errorf(
+				"-tunnel-lan needs the policy table that -site-only turns off; use one or the other")
+		}
+		// Checked before the token is spent, so a typo costs nothing.
+		if _, err := openwrt.LanAddress(options.tunnelLan); err != nil {
+			return err
+		}
 	}
 
 	tokenText, err := readToken(options.token, options.tokenFile)
@@ -378,6 +391,7 @@ func join(args []string) error {
 	if lanSubnet, lanErr := openwrt.LanNetwork(router); lanErr == nil {
 		tunnel.LanSubnet = lanSubnet
 	}
+	tunnel.TunnelLan = options.tunnelLan
 	if tunnel.TakesOverTheDefaultRoute() {
 		fmt.Fprintf(os.Stderr,
 			"Note: the hub's allowed IPs contain a default route, so all of this router's\n"+
@@ -556,6 +570,14 @@ func refreshNode(router openwrt.Router, timeout time.Duration) error {
 	if lanSubnet, lanErr := openwrt.LanNetwork(router); lanErr == nil {
 		tunnel.LanSubnet = lanSubnet
 	}
+	// A refresh rewrites everything this node owns, so the tunnel LAN has to
+	// be carried forward from the saved settings or a topology change would
+	// take it away along with whatever is now plugged into it.
+	savedLan, err := savedValue(router, "shadow9.node.lan_subnet")
+	if err != nil {
+		return err
+	}
+	tunnel.TunnelLan = savedLan
 	if err := router.WriteTunnel(tunnel, strings.TrimSuffix(hub, "/")); err != nil {
 		return err
 	}

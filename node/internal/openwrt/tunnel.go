@@ -37,6 +37,57 @@ func PolicyTable(iface string) string {
 	return "pbr_" + iface
 }
 
+// LanSectionName is the network and dhcp section for the tunnel LAN: a
+// separate subnet whose traffic goes through the tunnel, so an operator does
+// not have to build one and attach it themselves.
+func LanSectionName(iface string) string {
+	return iface + "_lan"
+}
+
+// LanDeviceSection is the named section holding the tunnel LAN's bridge. It is
+// named rather than anonymous so a later run addresses the same bridge instead
+// of whatever now sits at an index.
+func LanDeviceSection(iface string) string {
+	return "br_" + iface + "_lan"
+}
+
+// LanDevice is the bridge itself. Linux caps an interface name at 15
+// characters, which "br-wg0-lan" stays well inside.
+func LanDevice(iface string) string {
+	return "br-" + iface + "-lan"
+}
+
+// LanZoneName is the tunnel LAN's own firewall zone. It is deliberately not
+// the tunnel's zone: that one masquerades, and traffic from this LAN to the
+// router's other networks should keep its real source address.
+func LanZoneName(zone string) string {
+	return zone + "lan"
+}
+
+// LanAddress puts the router at the first host address of the tunnel LAN, the
+// convention every other LAN on an OpenWrt router follows.
+func LanAddress(subnet string) (string, error) {
+	address, network, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return "", fmt.Errorf("the tunnel LAN %q is not a subnet: %w", subnet, err)
+	}
+	if network.IP.To4() == nil {
+		return "", fmt.Errorf("the tunnel LAN must be IPv4, and %s is not", subnet)
+	}
+	if !address.Equal(network.IP) {
+		return "", fmt.Errorf(
+			"the tunnel LAN should name a subnet rather than a host: use %s", network)
+	}
+	ones, bits := network.Mask.Size()
+	if ones > bits-2 {
+		return "", fmt.Errorf("the tunnel LAN %s has no room for hosts", subnet)
+	}
+	router := make(net.IP, len(network.IP.To4()))
+	copy(router, network.IP.To4())
+	router[3]++
+	return fmt.Sprintf("%s/%d", router, ones), nil
+}
+
 func routeSectionName(iface string, index int) string {
 	if index == 0 {
 		return RouteSectionName(iface)
@@ -61,7 +112,10 @@ type Tunnel struct {
 	// RuleDisabled carries the rule's current disabled value forward, so a
 	// later join or refresh does not switch a rule the operator turned on back
 	// off. Empty means the rule is new and starts disabled.
-	RuleDisabled      string
+	RuleDisabled string
+	// TunnelLan is a subnet to build a LAN on, in CIDR form. Empty means the
+	// operator did not ask for one and none is created.
+	TunnelLan         string
 	ListenPort        int
 	MTU               int
 	Revision          int
@@ -178,11 +232,29 @@ func (t Tunnel) TakesOverTheDefaultRoute() bool {
 // has had its chance to mark a packet for a different interface.
 const policyRulePriority = 30001
 
+// LanSection names the tunnel LAN this tunnel builds, or "" when none was
+// asked for. Site-only mode has no policy table for it to use.
+func (t Tunnel) LanSection() string {
+	if t.Table == 0 || t.TunnelLan == "" {
+		return ""
+	}
+	return LanSectionName(t.Interface)
+}
+
+// ruleSource is the subnet the steering rule matches. A tunnel LAN exists only
+// to use the tunnel, so it takes precedence over the router's own LAN.
+func (t Tunnel) ruleSource() string {
+	if t.TunnelLan != "" {
+		return t.TunnelLan
+	}
+	return t.LanSubnet
+}
+
 // RuleSection names the steering rule this tunnel writes, or "" when there is
 // none: site-only mode has no policy table to point at, and a router whose LAN
 // subnet could not be read has nothing to match.
 func (t Tunnel) RuleSection() string {
-	if t.Table == 0 || t.LanSubnet == "" {
+	if t.Table == 0 || t.ruleSource() == "" {
 		return ""
 	}
 	return RuleSectionName(t.Interface)
@@ -246,16 +318,50 @@ func (t Tunnel) NetworkCommands() []Command {
 	// enabling it sends the whole LAN through the tunnel while a PBR policy
 	// still picks out narrower traffic. netifd ignores a disabled rule
 	// entirely, so nothing is installed until an operator ticks the box.
+	// The bridge is created with no ports. Only the operator knows which port,
+	// VLAN or SSID belongs on it, and taking one from an existing bridge would
+	// move whatever is plugged into it.
+	if lan := t.LanSection(); lan != "" {
+		device := "network." + LanDeviceSection(t.Interface)
+		key := "network." + lan
+		address, err := LanAddress(t.TunnelLan)
+		if err == nil {
+			mtu := t.MTU
+			if mtu == 0 {
+				mtu = 1420
+			}
+			commands = append(commands,
+				remove(device),
+				set(device, "device"),
+				set(device+".name", LanDevice(t.Interface)),
+				set(device+".type", "bridge"),
+				remove(key),
+				set(key, "interface"),
+				set(key+".device", LanDevice(t.Interface)),
+				set(key+".proto", "static"),
+				set(key+".ipaddr", address),
+				// Matching the tunnel keeps a full-sized packet from this LAN
+				// from needing fragmentation the moment it is encrypted.
+				set(key+".mtu", strconv.Itoa(mtu)),
+			)
+		}
+	}
 	if rule := t.RuleSection(); rule != "" {
 		key := "network." + rule
 		disabled := t.RuleDisabled
 		if disabled == "" {
+			// A LAN built for the tunnel has nothing on it yet, so switching
+			// it on moves no existing traffic and it starts live. The router's
+			// own LAN is the opposite case and starts off.
 			disabled = "1"
+			if t.TunnelLan != "" {
+				disabled = "0"
+			}
 		}
 		commands = append(commands,
 			remove(key),
 			set(key, "rule"),
-			set(key+".src", t.LanSubnet),
+			set(key+".src", t.ruleSource()),
 			set(key+".lookup", PolicyTable(t.Interface)),
 			set(key+".priority", strconv.Itoa(policyRulePriority)),
 			set(key+".disabled", disabled),
@@ -357,6 +463,35 @@ func (t Tunnel) FirewallCommands() []Command {
 		)
 	}
 
+	// The tunnel LAN gets its own zone rather than joining the tunnel's. The
+	// tunnel zone masquerades, and traffic from this LAN to the router's other
+	// networks should arrive with the real source address, not the router's.
+	if t.LanSection() != "" {
+		lanZone := "firewall." + LanZoneName(t.Zone)
+		commands = append(commands,
+			remove(lanZone),
+			set(lanZone, "zone"),
+			set(lanZone+".name", LanZoneName(t.Zone)),
+			set(lanZone+".input", "ACCEPT"),
+			set(lanZone+".output", "ACCEPT"),
+			set(lanZone+".forward", "ACCEPT"),
+			set(lanZone+".mtu_fix", "1"),
+			addList(lanZone+".network", t.LanSection()),
+		)
+		for _, f := range []struct{ name, src, dest string }{
+			{LanZoneName(t.Zone) + "_out", LanZoneName(t.Zone), t.Zone},
+			{LanZoneName(t.Zone) + "_lan", LanZoneName(t.Zone), t.LanZone},
+		} {
+			key := "firewall." + f.name
+			commands = append(commands,
+				remove(key),
+				set(key, "forwarding"),
+				set(key+".src", f.src),
+				set(key+".dest", f.dest),
+			)
+		}
+	}
+
 	// Only needed when this node listens. A dial-out node's return traffic is
 	// conntracked and needs no rule.
 	inbound := "firewall." + t.Zone + "_in"
@@ -372,6 +507,29 @@ func (t Tunnel) FirewallCommands() []Command {
 		)
 	}
 	return commands
+}
+
+// DHCPCommands hands out addresses on the tunnel LAN. Without this the bridge
+// is a subnet nothing can join without a static address, which is most of the
+// work an operator would otherwise be left to do themselves.
+//
+// No dhcp_option for DNS is set on purpose: the router's own resolver is the
+// default, and naming a public resolver here would quietly send this LAN's
+// lookups outside the tunnel it was built to use.
+func (t Tunnel) DHCPCommands() []Command {
+	lan := t.LanSection()
+	if lan == "" {
+		return nil
+	}
+	key := "dhcp." + lan
+	return []Command{
+		remove(key),
+		set(key, "dhcp"),
+		set(key+".interface", lan),
+		set(key+".start", "100"),
+		set(key+".limit", "150"),
+		set(key+".leasetime", "12h"),
+	}
 }
 
 // SettingsCommands records where this node enrolled, so the init script and
@@ -393,9 +551,17 @@ func (t Tunnel) SettingsCommands(hub string) []Command {
 		remove(nodeSection+".table"),
 		remove(nodeSection+".route"),
 		remove(nodeSection+".rule"),
+		remove(nodeSection+".lan"),
+		remove(nodeSection+".lan_subnet"),
 	)
 	if rule := t.RuleSection(); rule != "" {
 		commands = append(commands, set(nodeSection+".rule", rule))
+	}
+	if lan := t.LanSection(); lan != "" {
+		commands = append(commands,
+			set(nodeSection+".lan", lan),
+			set(nodeSection+".lan_subnet", t.TunnelLan),
+		)
 	}
 	if t.Table != 0 {
 		commands = append(commands, set(nodeSection+".table", strconv.Itoa(t.Table)))

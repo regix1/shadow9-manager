@@ -221,6 +221,12 @@ IPv4 tunnels; use `--site-only` for an IPv6 tunnel. LAN traffic bound for the in
 masqueraded to the node's tunnel address; traffic to the tunnel subnet and the other sites
 is excluded, so a remote LAN sees the host that opened the connection.
 
+`shadow9-node join --tunnel-lan 10.9.9.0/24 ...` builds a whole LAN for the tunnel instead
+of rerouting an existing one: a bridge, an address, DHCP, its own firewall zone, and a
+steering rule that starts enabled because nothing is on the new subnet yet. The bridge is
+left without ports, so add a port, VLAN or SSID to it in LuCI and it is live. Uninstall
+takes all of it away again.
+
 A policy join leaves a ready-made way to send the LAN through the tunnel: a named rule
 matching the router's LAN subnet and pointing at `pbr_wg0`, written disabled so nothing
 moves until you tick it on under Network then Routing. A refresh adds it to a node that
