@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 
 	"shadow9-node/internal/enroll"
 	"shadow9-node/internal/openwrt"
+	"shadow9-node/internal/upgrade"
 	"shadow9-node/internal/wgkey"
 )
 
@@ -66,6 +68,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "shadow9-node: %v\n", err)
 			os.Exit(1)
 		}
+	case "update":
+		if err := update(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "shadow9-node: %v\n", err)
+			os.Exit(1)
+		}
 	case "version", "-version", "--version":
 		fmt.Printf("shadow9-node %s\n", version)
 	case "help", "-h", "-help", "--help":
@@ -82,12 +89,83 @@ func usage() {
 
   shadow9-node join -hub URL -token-file PATH [options]
   shadow9-node refresh [options]
+  shadow9-node update [-check] [-version vX.Y.Z]
   shadow9-node uninstall
   shadow9-node version
 
 Enrolls, refreshes or removes this router's Shadow9-managed WireGuard
 configuration. Other interfaces and routing policies are left alone.
 `, version)
+}
+
+// repository is where update looks for releases. It is a variable so a fork
+// can point it elsewhere at build time.
+var repository = "regix1/shadow9-manager"
+
+// update installs a published release over this one. It goes through the
+// router's package manager rather than replacing the binary, so the package
+// database stays honest, the boot service and dependencies come along, and the
+// package scripts see an upgrade rather than a removal and leave the enrolled
+// tunnel alone.
+func update(args []string) error {
+	flags := flag.NewFlagSet("update", flag.ContinueOnError)
+	wanted := flags.String("version", "",
+		"install this release instead of the latest, for example v0.1.9")
+	repo := flags.String("repo", repository, "the GitHub repository to take releases from")
+	check := flags.Bool("check", false, "report what is available and change nothing")
+	timeout := flags.Duration("timeout", 2*time.Minute, "how long to wait on the download")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("update takes no arguments")
+	}
+
+	router := systemRouter()
+	if err := router.Require("uci", "the OpenWrt base system"); err != nil {
+		return fmt.Errorf("%w. This does not look like an OpenWrt router", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	client := &http.Client{}
+
+	release, err := upgrade.Resolve(ctx, client, *repo, *wanted)
+	if err != nil {
+		return err
+	}
+	if release.Version == version {
+		fmt.Printf("Already at %s; nothing to install.\n", version)
+		return nil
+	}
+	file, manager, err := router.PackageFile(release.Version)
+	if err != nil {
+		return err
+	}
+	if *check {
+		if err := upgrade.Published(ctx, client, *repo, release, file); err != nil {
+			return err
+		}
+		fmt.Printf("This router runs %s and %s publishes %s.\n", version, *repo, release.Version)
+		fmt.Printf("    Run 'shadow9-node update' to install %s with %s.\n", file, manager)
+		return nil
+	}
+
+	path := "/tmp/" + file
+	fmt.Printf("Fetching %s from %s.\n", file, release.Tag)
+	if err := upgrade.Fetch(ctx, client, *repo, release, file, path); err != nil {
+		return err
+	}
+	// The tunnel survives because this is an upgrade: the package's prerm sees
+	// PKG_UPGRADE=1 and skips the ownership-checked cleanup entirely.
+	if err := router.InstallPackage(path, manager); err != nil {
+		return err
+	}
+	_ = os.Remove(path)
+	fmt.Printf("Updated from %s to %s. The enrolled tunnel was left in place.\n",
+		version, release.Version)
+	fmt.Println("    Run 'shadow9-node refresh' to pick up anything new in this version.")
+	return nil
 }
 
 func uninstall(args []string) error {

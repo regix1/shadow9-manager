@@ -88,6 +88,9 @@ type fakeShell struct {
 	stopped   []string
 	missing   map[string]bool
 	installed map[string]bool
+	// installedFiles records package files handed to opkg or apk, which is
+	// what an update does.
+	installedFiles []string
 	// pbrStale is set by every commit the pbr service would have to read, and
 	// cleared by a reload. pbrSettleQueries is how many route queries still
 	// answer "no such table" after that reload, because the live service
@@ -260,6 +263,12 @@ func (f *fakeShell) Run(ctx context.Context, stdin Stdin, name string, args ...s
 	case "apk", "opkg":
 		if f.noManager {
 			return nil, fmt.Errorf("exit status 127")
+		}
+		// Installing a package file, as an update does, rather than asking
+		// whether a named package is present.
+		if len(args) > 0 && (args[0] == "install" || args[0] == "add") {
+			f.installedFiles = append(f.installedFiles, args[len(args)-1])
+			return []byte("Installing " + args[len(args)-1] + "\n"), nil
 		}
 		wanted := args[len(args)-1]
 		if f.installed[wanted] {

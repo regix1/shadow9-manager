@@ -343,6 +343,24 @@ package ships no `/etc/uci-defaults` script, because OpenWrt's default post-inst
 bare `uci commit` for any package that owns one, which would commit changes an operator
 left pending in LuCI.
 
+Move an enrolled router to a newer release without uninstalling it:
+
+```sh
+shadow9-node update -check
+shadow9-node update
+```
+
+`-check` reports what this router runs against what the repository publishes and
+confirms the release really carries a package for this architecture, so it never
+offers a version that would 404 on download. The update itself resolves the latest
+release, picks the `.ipk` or `.apk` this OpenWrt version and architecture takes,
+verifies it against the published `SHA256SUMS` before anything runs as root, and
+installs it through `opkg` or `apk`. Going through the package manager rather than
+replacing the binary is deliberate: the package database stays accurate, the boot
+service and dependencies come with it, and the package scripts see `PKG_UPGRADE=1`
+so the ownership-checked cleanup is skipped and the enrolled tunnel is left alone.
+Use `-version vX.Y.Z` to pin a release and `-repo owner/name` for a fork.
+
 Remove only the configuration owned by this client with:
 
 ```sh
@@ -395,6 +413,7 @@ Unlike the hub, this one applies its own configuration and runs `wg-quick` for y
 | `shadow9 wg remove <name>` | Removes the peer and reissues every config it appeared in |
 | `shadow9 wg hub set-endpoint <addr>` | Changes the address peers dial and bumps the topology revision |
 | `shadow9-node refresh` | On a router: pulls current settings while keeping its routing mode and repairing PBR |
+| `shadow9-node update` | On a router: installs the latest release through opkg or apk, keeping the tunnel enrolled |
 | `shadow9-node uninstall` | Removes only the OpenWrt configuration proven to belong to Shadow9 |
 
 When a peer is added, removed, enabled, disabled, or re-enrolled, Shadow9 also synchronizes
