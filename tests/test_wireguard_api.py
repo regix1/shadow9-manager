@@ -424,6 +424,55 @@ class TestLiveHub:
 
         assert private_key not in str(caught.value)
 
+    def test_sync_gives_the_live_interface_the_routes_wg_does_not(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """wg syncconf updates allowed IPs but never the routing table.
+
+        A subnet a node advertises while the hub is already running is
+        unreachable until something creates the route, which at boot is
+        wg-quick and on a live interface is this.
+        """
+        monkeypatch.setattr(Path, "exists", lambda _path: True)
+        monkeypatch.setattr(
+            wireguard_service.shutil, "which", lambda command: f"/usr/bin/{command}"
+        )
+        commands: list[list[str]] = []
+
+        def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            if command[1] == "strip":
+                return subprocess.CompletedProcess(command, 0, stdout="[Interface]\n", stderr="")
+            if command[1:3] == ["show", "wg0"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="peerkey\t10.9.0.2/32 172.16.1.0/24\n",
+                    stderr="",
+                )
+            if "route" in command and "show" in command:
+                # Only the kernel's own prefix is there, plus one route for a
+                # subnet no peer advertises any more.
+                stdout = (
+                    "10.9.0.0/24 proto kernel scope link src 10.9.0.1\n" "10.0.0.0/8 scope link\n"
+                    if "-4" in command
+                    else ""
+                )
+                return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(wireguard_service.subprocess, "run", run)
+        assert wireguard_service.sync_hub_interface("wg0")
+
+        added = [c for c in commands if "route" in c and "replace" in c]
+        assert ["/usr/bin/ip", "-4", "route", "replace", "172.16.1.0/24", "dev", "wg0"] in added
+        assert ["/usr/bin/ip", "-4", "route", "replace", "10.9.0.2/32", "dev", "wg0"] in added
+
+        removed = [c for c in commands if "route" in c and "del" in c]
+        assert ["/usr/bin/ip", "-4", "route", "del", "10.0.0.0/8", "dev", "wg0"] in removed
+        # The kernel's own prefix is not this function's to reconcile.
+        assert not any("10.9.0.0/24" in c for c in removed)
+
     def test_sync_skips_an_interface_that_is_not_running(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

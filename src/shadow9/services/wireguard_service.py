@@ -1296,7 +1296,118 @@ def sync_hub_interface(interface: str) -> bool:
             f"could not synchronize the live {interface} interface "
             f"(wg exited {synced.returncode})"
         )
+    sync_hub_routes(interface)
     return True
+
+
+def _wg_allowed_ips(wg: str, interface: str) -> set[str]:
+    """Read what the running interface accepts, one entry per peer prefix."""
+    try:
+        shown = subprocess.run(
+            [wg, "show", interface, "allowed-ips"],
+            capture_output=True,
+            text=True,
+            timeout=WIREGUARD_SYNC_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError(f"could not read the allowed IPs of {interface}") from error
+    if shown.returncode != 0:
+        raise OSError(
+            f"could not read the allowed IPs of {interface} (wg exited {shown.returncode})"
+        )
+    allowed: set[str] = set()
+    for line in shown.stdout.splitlines():
+        # Each line is a peer's public key followed by its prefixes.
+        for entry in line.split()[1:]:
+            if entry != "(none)":
+                allowed.add(entry)
+    return allowed
+
+
+def _interface_routes(ip: str, interface: str) -> set[str]:
+    """Read the routes already on an interface, ignoring the kernel's own.
+
+    The kernel adds a route for the interface's own address the moment it gets
+    one, and that is not ours to reconcile.
+    """
+    routes: set[str] = set()
+    for family in ("-4", "-6"):
+        try:
+            shown = subprocess.run(
+                [ip, family, "route", "show", "dev", interface],
+                capture_output=True,
+                text=True,
+                timeout=WIREGUARD_SYNC_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise OSError(f"could not read the routes on {interface}") from error
+        if shown.returncode != 0:
+            continue
+        for line in shown.stdout.splitlines():
+            fields = line.split()
+            if not fields or _route_proto(fields) == "kernel":
+                continue
+            routes.add(fields[0])
+    return routes
+
+
+def _route_proto(fields: list[str]) -> str:
+    """Read the protocol out of one `ip route show` line.
+
+    Matching the word anywhere in the line would also catch a route whose
+    destination or device merely contains it, so the value has to be the field
+    directly after `proto`.
+    """
+    try:
+        marker = fields.index("proto")
+    except ValueError:
+        return ""
+    return fields[marker + 1] if marker + 1 < len(fields) else ""
+
+
+def sync_hub_routes(interface: str) -> None:
+    """Give the running interface the routes wg-quick would have created.
+
+    `wg syncconf` updates peers and their allowed IPs but never touches the
+    routing table, so a subnet a node advertises while the hub is already up
+    has no route and the hub cannot reach it. At boot `wg-quick up` builds
+    these from the same config, so this only closes the gap on a live
+    interface and nothing here has to survive a restart.
+
+    A prefix no peer accepts is dead weight on a WireGuard interface, because
+    wg drops that traffic whether or not a route points at it, so reconciling
+    to exactly the allowed IPs is safe as well as correct.
+    """
+    wg = shutil.which("wg")
+    ip = shutil.which("ip")
+    if wg is None or ip is None:
+        missing = "wg" if wg is None else "ip"
+        raise OSError(f"cannot reconcile the routes on {interface}: {missing} was not found")
+
+    wanted = _wg_allowed_ips(wg, interface)
+    # A default route is wg-quick's fwmark and policy-rule business, not a
+    # plain route, and a hub never hands one to a peer anyway.
+    wanted = {entry for entry in wanted if entry not in {"0.0.0.0/0", "::/0"}}
+    present = _interface_routes(ip, interface)
+
+    for target in sorted(wanted - present):
+        family = "-6" if ":" in target else "-4"
+        subprocess.run(
+            [ip, family, "route", "replace", target, "dev", interface],
+            capture_output=True,
+            text=True,
+            timeout=WIREGUARD_SYNC_TIMEOUT,
+            check=False,
+        )
+    for target in sorted(present - wanted):
+        family = "-6" if ":" in target else "-4"
+        subprocess.run(
+            [ip, family, "route", "del", target, "dev", interface],
+            capture_output=True,
+            text=True,
+            timeout=WIREGUARD_SYNC_TIMEOUT,
+            check=False,
+        )
 
 
 def _remember_configs(topology: Topology) -> dict[Path, Optional[bytes]]:
