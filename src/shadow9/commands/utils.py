@@ -464,14 +464,14 @@ def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
 
                         console.print("[cyan]Reinstalling service...[/cyan]")
                         result = subprocess.run(
-                            ["shadow9", "service", "install"], capture_output=True, text=True
+                            ["shadow9", "socks5", "service", "install"], capture_output=True, text=True
                         )
                         if result.returncode == 0:
                             console.print("[green]Service reinstalled successfully![/green]")
                             # Start the service
                             if typer.confirm("Start the service now?", default=True):
-                                subprocess.run(["shadow9", "service", "start"])
-                                subprocess.run(["shadow9", "service", "status"])
+                                subprocess.run(["shadow9", "socks5", "service", "start"])
+                                subprocess.run(["shadow9", "socks5", "service", "status"])
                         else:
                             console.print(f"[red]Service install failed: {result.stderr}[/red]")
                 else:
@@ -485,15 +485,15 @@ def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
 
                         console.print("[cyan]Installing service...[/cyan]")
                         result = subprocess.run(
-                            ["shadow9", "service", "install"], capture_output=True, text=True
+                            ["shadow9", "socks5", "service", "install"], capture_output=True, text=True
                         )
                         if result.returncode == 0:
                             console.print("[green]Service installed successfully![/green]")
                             if typer.confirm("Enable service to start on boot?", default=True):
-                                subprocess.run(["shadow9", "service", "enable"])
+                                subprocess.run(["shadow9", "socks5", "service", "enable"])
                             if typer.confirm("Start the service now?", default=True):
-                                subprocess.run(["shadow9", "service", "start"])
-                                subprocess.run(["shadow9", "service", "status"])
+                                subprocess.run(["shadow9", "socks5", "service", "start"])
+                                subprocess.run(["shadow9", "socks5", "service", "status"])
                         else:
                             console.print(f"[red]Service install failed: {result.stderr}[/red]")
 
