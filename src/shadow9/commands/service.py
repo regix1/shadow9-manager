@@ -131,7 +131,7 @@ Environment="PYTHONPATH={install_path}/src"
 Environment="SHADOW9_HOME={install_path}"
 # The unit is world readable, so the key stays in the 0600 file systemd reads as root.
 EnvironmentFile={paths.env_file}
-ExecStart={install_path}/shadow9 serve --host {host} --port {port}
+ExecStart={install_path}/shadow9 socks5 serve --host {host} --port {port}
 # a clean exit must also come back, so on-failure is not enough
 Restart=always
 RestartSec=5
@@ -209,9 +209,9 @@ WantedBy=multi-user.target
                 f"Install path: [cyan]{install_path}[/cyan]\n"
                 f"Listen: [cyan]{host}:{port}[/cyan]{global_note}\n\n"
                 f"[bold]Next steps:[/bold]\n"
-                f"  shadow9 service start    - Start the service\n"
-                f"  shadow9 service enable   - Enable auto-start on boot\n"
-                f"  shadow9 service status   - Check service status",
+                f"  shadow9 socks5 service start    - Start the service\n"
+                f"  shadow9 socks5 service enable   - Enable auto-start on boot\n"
+                f"  shadow9 socks5 service status   - Check service status",
                 title="Shadow9 Service",
                 border_style="green",
             )
@@ -343,7 +343,7 @@ WantedBy=multi-user.target
         if journal.stdout.strip():
             console.print("[bold]Recent service logs:[/bold]")
             console.print(f"[dim]{journal.stdout.strip()}[/dim]")
-        console.print("[dim]More logs: shadow9 service logs[/dim]")
+        console.print("[dim]More logs: shadow9 socks5 service logs[/dim]")
         raise typer.Exit(1)
 
     @service_app.command("stop")
@@ -551,7 +551,7 @@ def _check_linux():
     """Check if running on Linux."""
     if sys.platform != "linux":
         console.print("[red]Service management is only available on Linux[/red]")
-        console.print("[dim]On Windows/macOS, use: shadow9 serve --background[/dim]")
+        console.print("[dim]On Windows/macOS, use: shadow9 socks5 serve --background[/dim]")
         raise typer.Exit(1)
 
 
@@ -559,7 +559,7 @@ def _check_root():
     """Check if running as root."""
     if os.geteuid() != 0:
         console.print("[red]This command requires root privileges[/red]")
-        console.print("[dim]Run with: sudo shadow9 service ...[/dim]")
+        console.print("[dim]Run with: sudo shadow9 socks5 service ...[/dim]")
         raise typer.Exit(1)
 
 
@@ -567,5 +567,5 @@ def _check_installed():
     """Check if service is installed."""
     if not Path(SERVICE_FILE).exists():
         console.print("[red]Service is not installed[/red]")
-        console.print("[dim]Run: sudo shadow9 service install[/dim]")
+        console.print("[dim]Run: sudo shadow9 socks5 service install[/dim]")
         raise typer.Exit(1)

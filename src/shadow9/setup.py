@@ -478,9 +478,9 @@ class SystemSetup:
 
         # Show completion
         commands = [
-            ("shadow9 serve", "Start the SOCKS5 proxy server"),
-            ("shadow9 user generate", "Create user credentials"),
-            ("shadow9 status", "Check proxy status"),
+            ("shadow9 socks5 serve", "Start the SOCKS5 proxy server"),
+            ("shadow9 socks5 user generate", "Create user credentials"),
+            ("shadow9 socks5 status", "Check proxy status"),
             ("shadow9 --help", "View all available commands"),
         ]
 

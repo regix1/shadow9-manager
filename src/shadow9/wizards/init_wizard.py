@@ -42,7 +42,7 @@ def run_init_wizard() -> Config | None:
 
         console.print(
             "\n  [dim]serve runs in the foreground. For background operation,"
-            " use 'shadow9 service install' and 'shadow9 service start'.[/dim]"
+            " use 'shadow9 socks5 service install' and 'shadow9 socks5 service start'.[/dim]"
         )
 
         server = ServerConfig(host=host, port=port, max_connections=max_connections)

@@ -10,7 +10,6 @@ from typer.testing import CliRunner
 from shadow9.cli import app
 from shadow9.commands import components as components_commands
 
-
 runner = CliRunner()
 
 
@@ -61,7 +60,7 @@ class TestTheTransportsAreNotServices:
     @pytest.mark.parametrize("name", ["obfs4proxy", "snowflake-client"])
     @pytest.mark.parametrize("action", ["start", "stop", "restart"])
     def test_it_refuses_and_explains(self, name: str, action: str) -> None:
-        result = runner.invoke(app, ["components", action, name])
+        result = runner.invoke(app, ["socks5", "components", action, name])
 
         assert result.exit_code == 1
         said = plain(result.stdout)
@@ -72,7 +71,7 @@ class TestTheTransportsAreNotServices:
         ran = _Ran()
         monkeypatch.setattr(subprocess, "run", ran)
 
-        runner.invoke(app, ["components", "stop", "obfs4proxy"])
+        runner.invoke(app, ["socks5", "components", "stop", "obfs4proxy"])
 
         assert ran.calls == [], "it tried to manage a binary that has no unit"
 
@@ -90,7 +89,7 @@ class TestStoppingTor:
         ran = _Ran()
         monkeypatch.setattr(subprocess, "run", ran)
 
-        result = runner.invoke(app, ["components", "stop", "tor"], input="n\n")
+        result = runner.invoke(app, ["socks5", "components", "stop", "tor"], input="n\n")
 
         assert result.exit_code == 1
         said = plain(result.stdout)
@@ -104,7 +103,7 @@ class TestStoppingTor:
         ran = _Ran()
         monkeypatch.setattr(subprocess, "run", ran)
 
-        result = runner.invoke(app, ["components", "stop", "tor", "--yes"])
+        result = runner.invoke(app, ["socks5", "components", "stop", "tor", "--yes"])
 
         assert result.exit_code == 0, result.stdout
         assert ["systemctl", "stop", "tor"] in ran.calls
@@ -118,7 +117,7 @@ class TestStoppingTor:
         )
         monkeypatch.setattr(subprocess, "run", _Ran())
 
-        result = runner.invoke(app, ["components", "stop", "tor"])
+        result = runner.invoke(app, ["socks5", "components", "stop", "tor"])
 
         assert result.exit_code == 0, result.stdout
         said = plain(result.stdout)
@@ -134,7 +133,7 @@ class TestStoppingTor:
         ran = _Ran()
         monkeypatch.setattr(subprocess, "run", ran)
 
-        result = runner.invoke(app, ["components", "stop", "tor"])
+        result = runner.invoke(app, ["socks5", "components", "stop", "tor"])
 
         assert result.exit_code == 0
         assert ["systemctl", "stop", "tor"] in ran.calls
@@ -143,7 +142,7 @@ class TestStoppingTor:
         monkeypatch.setattr(components_commands, "units_pulling_in", lambda unit: [])
         monkeypatch.setattr(subprocess, "run", _Ran(returncode=1))
 
-        result = runner.invoke(app, ["components", "stop", "tor"])
+        result = runner.invoke(app, ["socks5", "components", "stop", "tor"])
 
         assert result.exit_code == 1
 
@@ -156,24 +155,22 @@ class TestBootPersistence:
         ran = _Ran()
         monkeypatch.setattr(subprocess, "run", ran)
 
-        result = runner.invoke(app, ["components", action, "tor"])
+        result = runner.invoke(app, ["socks5", "components", action, "tor"])
 
         assert result.exit_code == 0, result.stdout
         assert ["systemctl", action, "tor"] in ran.calls
 
-    def test_disable_says_it_did_not_stop_anything(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_disable_says_it_did_not_stop_anything(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Otherwise an operator assumes disable stopped it and walks away."""
         monkeypatch.setattr(subprocess, "run", _Ran())
 
-        result = runner.invoke(app, ["components", "disable", "tor"])
+        result = runner.invoke(app, ["socks5", "components", "disable", "tor"])
 
         assert "still running" in plain(result.stdout)
 
     @pytest.mark.parametrize("action", ["enable", "disable"])
     def test_the_transports_still_refuse(self, action: str) -> None:
-        result = runner.invoke(app, ["components", action, "obfs4proxy"])
+        result = runner.invoke(app, ["socks5", "components", action, "obfs4proxy"])
 
         assert result.exit_code == 1
         assert "not a service" in plain(result.stdout)
@@ -185,7 +182,7 @@ class TestStartAndRestart:
         ran = _Ran()
         monkeypatch.setattr(subprocess, "run", ran)
 
-        result = runner.invoke(app, ["components", action, "tor"])
+        result = runner.invoke(app, ["socks5", "components", action, "tor"])
 
         assert result.exit_code == 0, result.stdout
         assert ["systemctl", action, "tor"] in ran.calls
@@ -211,7 +208,11 @@ class TestTabCompletion:
     @pytest.mark.parametrize("action", ["start", "stop", "restart"])
     def test_every_action_has_the_completer_attached(self, action: str) -> None:
         """A completer that exists but is not wired up is the same as none at all."""
-        group = next(item for item in app.registered_groups if item.name == "components")
+        socks5 = next(item for item in app.registered_groups if item.name == "socks5")
+        assert socks5.typer_instance is not None
+        group = next(
+            item for item in socks5.typer_instance.registered_groups if item.name == "components"
+        )
         assert group.typer_instance is not None
         found = next(
             item for item in group.typer_instance.registered_commands if item.name == action
@@ -227,7 +228,7 @@ class TestTabCompletion:
 
 class TestNaming:
     def test_an_unknown_component_lists_the_real_ones(self) -> None:
-        result = runner.invoke(app, ["components", "start", "kettle"])
+        result = runner.invoke(app, ["socks5", "components", "start", "kettle"])
 
         assert result.exit_code == 1
         said = plain(result.stdout)

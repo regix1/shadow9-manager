@@ -1,7 +1,7 @@
 """
 Manage the third-party pieces the proxy depends on.
 
-`shadow9 status` reports on these but could not act on them, so an operator who saw Tor
+`shadow9 socks5 status` reports on these but could not act on them, so an operator who saw Tor
 listed had to know it was `tor.service` and go to systemctl. These commands close that gap.
 
 Only Tor has a lifecycle. The two pluggable transports are binaries that Tor starts as
@@ -28,7 +28,7 @@ OWN_SERVICE = "shadow9.service"
 
 
 class Component(NamedTuple):
-    """One of the things `shadow9 status` lists under Proxy Components."""
+    """One of the things `shadow9 socks5 status` lists under Proxy Components."""
 
     name: str
     label: str
@@ -96,7 +96,7 @@ def _require_systemd() -> None:
     """Stop early where there is no systemd to talk to."""
     if sys.platform != "linux":
         console.print("[red]Starting and stopping components needs systemd, so Linux only[/red]")
-        console.print("[dim]'shadow9 components status' still works here[/dim]")
+        console.print("[dim]'shadow9 socks5 components status' still works here[/dim]")
         raise typer.Exit(1)
 
 
@@ -282,7 +282,7 @@ def register_component_commands(app: typer.Typer) -> None:
             raise typer.Exit(1)
         console.print(f"[green]{component.label} will not start on boot[/green]")
         console.print(
-            f"[dim]It is still running now if it was. Use 'shadow9 components stop {name}' "
+            f"[dim]It is still running now if it was. Use 'shadow9 socks5 components stop {name}' "
             f"to stop it.[/dim]"
         )
 

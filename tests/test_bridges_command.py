@@ -9,7 +9,6 @@ from shadow9.bridge_list import BridgeType
 from shadow9.cli import app
 from shadow9.commands import bridges as bridge_commands
 
-
 runner = CliRunner()
 
 
@@ -35,7 +34,7 @@ class TestNaming:
         assert bridge_commands.complete_bridge_type("zzz") == []
 
     def test_an_unknown_type_lists_the_real_ones(self) -> None:
-        result = runner.invoke(app, ["bridges", "show", "kettle"])
+        result = runner.invoke(app, ["socks5", "bridges", "show", "kettle"])
 
         assert result.exit_code == 1
         said = plain(result.stdout)
@@ -43,39 +42,37 @@ class TestNaming:
 
     def test_none_is_rejected_rather_than_shown_empty(self) -> None:
         """'none' is a real BridgeType but has no bridges, so it must not silently work."""
-        result = runner.invoke(app, ["bridges", "show", "none"])
+        result = runner.invoke(app, ["socks5", "bridges", "show", "none"])
 
         assert result.exit_code == 1
 
 
 class TestList:
     def test_it_counts_the_bridges_of_each_type(self) -> None:
-        result = runner.invoke(app, ["bridges", "list"])
+        result = runner.invoke(app, ["socks5", "bridges", "list"])
 
         assert result.exit_code == 0, result.stdout
         said = plain(result.stdout)
         assert "obfs4" in said and "snowflake" in said
 
     def test_a_missing_transport_is_called_out(self) -> None:
-        result = runner.invoke(app, ["bridges", "list"])
+        result = runner.invoke(app, ["socks5", "bridges", "list"])
 
         assert "not installed" in plain(result.stdout)
 
-    def test_an_installed_transport_shows_its_path(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_an_installed_transport_shows_its_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             bridge_commands,
             "_transport_paths",
             lambda: {BridgeType.OBFS4: "/usr/bin/obfs4proxy"},
         )
 
-        result = runner.invoke(app, ["bridges", "list"])
+        result = runner.invoke(app, ["socks5", "bridges", "list"])
 
         assert "/usr/bin/obfs4proxy" in plain(result.stdout)
 
     def test_one_type_can_be_asked_for_on_its_own(self) -> None:
-        result = runner.invoke(app, ["bridges", "list", "--type", "snowflake"])
+        result = runner.invoke(app, ["socks5", "bridges", "list", "--type", "snowflake"])
 
         assert result.exit_code == 0, result.stdout
         said = plain(result.stdout)
@@ -85,14 +82,14 @@ class TestList:
 
 class TestShow:
     def test_it_prints_a_line_per_bridge(self) -> None:
-        result = runner.invoke(app, ["bridges", "show", "obfs4"])
+        result = runner.invoke(app, ["socks5", "bridges", "show", "obfs4"])
 
         assert result.exit_code == 0, result.stdout
         lines = [line for line in plain(result.stdout).splitlines() if line.strip()]
         assert len(lines) == len(bridge_commands.CATALOG[BridgeType.OBFS4])
 
     def test_the_lines_are_torrc_bridge_lines(self) -> None:
-        result = runner.invoke(app, ["bridges", "show", "snowflake"])
+        result = runner.invoke(app, ["socks5", "bridges", "show", "snowflake"])
 
         assert plain(result.stdout).lstrip().startswith("Bridge ")
 
@@ -112,7 +109,7 @@ class TestCheck:
             bridges_module.PluggableTransportManager, "check_transport_available", available
         )
 
-        result = runner.invoke(app, ["bridges", "check", "obfs4"])
+        result = runner.invoke(app, ["socks5", "bridges", "check", "obfs4"])
 
         assert result.exit_code == 0, result.stdout
         assert "works" in plain(result.stdout)
@@ -131,7 +128,7 @@ class TestCheck:
             bridges_module.PluggableTransportManager, "check_transport_available", unavailable
         )
 
-        result = runner.invoke(app, ["bridges", "check", "snowflake"])
+        result = runner.invoke(app, ["socks5", "bridges", "check", "snowflake"])
 
         assert result.exit_code == 1
         assert "not usable" in plain(result.stdout)

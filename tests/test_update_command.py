@@ -79,7 +79,7 @@ def position_of(stub: StubProcess, token: str) -> int:
 def update_command() -> Callable[..., None]:
     """The update callback, registered on a throwaway app."""
     app = typer.Typer()
-    utils.register_util_commands(app)
+    utils.register_util_commands(app, typer.Typer())
     for command in app.registered_commands:
         callback = command.callback
         if callback is not None and callback.__name__ == "update":
@@ -835,7 +835,7 @@ class TestDependencies:
         update_command()
 
         unit = service_file.read_text(encoding="utf-8")
-        assert f"ExecStart={repo / 'shadow9'} serve --host 127.0.0.1 --port 1080" in unit
+        assert f"ExecStart={repo / 'shadow9'} socks5 serve --host 127.0.0.1 --port 1080" in unit
         assert calls_with(stub, "systemctl daemon-reload")
 
     def test_install_happens_after_the_pull(

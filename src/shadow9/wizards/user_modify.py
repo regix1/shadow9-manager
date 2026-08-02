@@ -49,7 +49,7 @@ def run_user_modify_wizard(
 
         if not users:
             console.print(
-                "[yellow]No users configured. Use 'shadow9 user new' to create one.[/yellow]"
+                "[yellow]No users configured. Use 'shadow9 socks5 user new' to create one.[/yellow]"
             )
             return True
 
@@ -125,7 +125,9 @@ def run_user_modify_wizard(
                     border_style="green",
                 )
             )
-            console.print("[yellow]Restart service to apply: shadow9 service restart[/yellow]")
+            console.print(
+                "[yellow]Restart service to apply: shadow9 socks5 service restart[/yellow]"
+            )
         else:
             console.print("[yellow]No changes were made.[/yellow]")
 

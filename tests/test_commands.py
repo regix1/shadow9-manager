@@ -17,7 +17,6 @@ from shadow9.commands import user as user_commands
 from shadow9.commands import utils
 from shadow9.wizards import api_setup
 
-
 runner = CliRunner()
 
 
@@ -169,7 +168,7 @@ class TestStop:
 
         monkeypatch.setattr(probe, "listener_on_port", no_port_lookup)
 
-        result = runner.invoke(app, ["stop"])
+        result = runner.invoke(app, ["socks5", "stop"])
 
         assert result.exit_code == 0, result.stdout
         assert "Server stopped" in plain(result.stdout)
@@ -188,7 +187,7 @@ class TestStop:
         killed: list[int] = []
         monkeypatch.setattr(probe, "terminate", lambda pid: killed.append(pid) or True)
 
-        result = runner.invoke(app, ["stop"], input="n\n")
+        result = runner.invoke(app, ["socks5", "stop"], input="n\n")
 
         assert result.exit_code == 1, result.stdout
         said = plain(result.stdout)
@@ -207,7 +206,7 @@ class TestStop:
         killed: list[int] = []
         monkeypatch.setattr(probe, "terminate", lambda pid: killed.append(pid) or True)
 
-        result = runner.invoke(app, ["stop", "--yes"])
+        result = runner.invoke(app, ["socks5", "stop", "--yes"])
 
         assert result.exit_code == 0, result.stdout
         assert killed == [4242]
@@ -293,7 +292,7 @@ class TestCheckTor:
     def test_the_supplied_port_is_the_one_tested(self, monkeypatch: pytest.MonkeyPatch) -> None:
         tested = self._connector(monkeypatch, connects=True)
 
-        result = runner.invoke(app, ["check-tor", "--tor-port", "9150"])
+        result = runner.invoke(app, ["socks5", "check-tor", "--tor-port", "9150"])
 
         assert result.exit_code == 0, result.stdout
         assert tested == [9150]
@@ -302,7 +301,7 @@ class TestCheckTor:
         """A red line on the terminal is not enough for a script to notice."""
         self._connector(monkeypatch, connects=False)
 
-        result = runner.invoke(app, ["check-tor", "--tor-port", "9150"])
+        result = runner.invoke(app, ["socks5", "check-tor", "--tor-port", "9150"])
 
         assert result.exit_code == 1, result.stdout
 
@@ -361,12 +360,10 @@ def test_status_reports_configured_proxy_and_api_ports(
     monkeypatch.setattr(utils.Config, "load", classmethod(load_config))
     monkeypatch.setattr(api_commands, "_read_api_config", read_api_config)
     monkeypatch.setattr(setup_module, "check_setup", check_setup)
-    monkeypatch.setattr(
-        utils.TorConnector, "detect_tor_service", staticmethod(detect_tor_service)
-    )
+    monkeypatch.setattr(utils.TorConnector, "detect_tor_service", staticmethod(detect_tor_service))
     monkeypatch.setattr(probe, "_something_is_listening", check_listener)
 
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["socks5", "status"])
 
     assert result.exit_code == 0, result.stdout
     state = "listening" if listening else "not listening"
@@ -405,7 +402,7 @@ def test_user_generate_dry_run_prints_credentials_without_creating_a_user(
 
     result = runner.invoke(
         app,
-        ["user", "generate", "--dry-run", "--config", "missing-dry-run-config.yaml"],
+        ["socks5", "user", "generate", "--dry-run", "--config", "missing-dry-run-config.yaml"],
     )
 
     assert result.exit_code == 0, result.stdout
@@ -435,6 +432,7 @@ def test_user_generate_hides_typed_password_and_displays_generated_password(
     monkeypatch.setattr(user_commands, "_offer_service_restart", Mock())
 
     arguments = [
+        "socks5",
         "user",
         "generate",
         "--username",

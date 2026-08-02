@@ -846,7 +846,7 @@ def save_peer(
 
     A peer's lifecycle is a user's lifecycle, which is why the fields live here and not in
     a second file. A peer that has no user yet gets one with a random password nobody is
-    told, because a phone on the tunnel is not a proxy login; `shadow9 user modify` sets a
+    told, because a phone on the tunnel is not a proxy login; `shadow9 socks5 user modify` sets a
     real password if that user should have one.
 
     Args:

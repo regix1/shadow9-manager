@@ -629,7 +629,7 @@ def get_settings() -> Settings:
     # anything. A ceiling changed under this process is applied by restarting it.
     #
     # The division here is between the workers of this one service, not between this
-    # service and the proxy. They are not in the same cgroup: `shadow9 service install`
+    # service and the proxy. They are not in the same cgroup: `shadow9 socks5 service install`
     # writes one unit, which runs the proxy alone, and the API is started separately. An
     # operator who does put both under one unit is giving each of them the unit's whole
     # MemoryMax to size against, and should give the API its own unit, or set MemoryMax

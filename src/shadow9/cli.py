@@ -124,15 +124,23 @@ def main(
         console.print(ctx.get_help())
 
 
+socks5_app = typer.Typer(
+    name="socks5",
+    help="SOCKS5 proxy: server, users, Tor and bridges",
+    no_args_is_help=True,
+)
+
 # Register all commands from submodules
-register_server_commands(app)
-register_user_commands(app)
-register_service_commands(app)
-register_util_commands(app)
+register_server_commands(socks5_app)
+register_user_commands(socks5_app)
+register_service_commands(socks5_app)
+register_util_commands(app, socks5_app)
 register_api_commands(app)
 register_wireguard_commands(app)
-register_component_commands(app)
-register_bridge_commands(app)
+register_component_commands(socks5_app)
+register_bridge_commands(socks5_app)
+
+app.add_typer(socks5_app, name="socks5")
 
 
 # Entry point for the CLI

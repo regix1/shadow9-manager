@@ -98,8 +98,8 @@ def register_bridge_commands(app: typer.Typer) -> None:
 
         console.print(table)
         console.print(
-            "[dim]Assign one to a user with 'shadow9 user modify', and see which each "
-            "user has with 'shadow9 user list'.[/dim]"
+            "[dim]Assign one to a user with 'shadow9 socks5 user modify', and see which each "
+            "user has with 'shadow9 socks5 user list'.[/dim]"
         )
 
     @bridges_app.command("show")

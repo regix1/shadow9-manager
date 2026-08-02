@@ -279,8 +279,8 @@ def _read_key_backup(backup_dir: Path, files: tuple[KeyFile, ...]) -> tuple[Back
     return tuple(by_name[key_file.name] for key_file in files)
 
 
-def register_util_commands(app: typer.Typer) -> None:
-    """Register utility commands with the main app."""
+def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
+    """Register utility commands: proxy ones on the socks5 group, the rest on the main app."""
 
     show_app = typer.Typer(help="Show current settings and paths.")
     app.add_typer(show_app, name="show")
@@ -366,7 +366,7 @@ def register_util_commands(app: typer.Typer) -> None:
         console.print(f"\n[green]Configuration file created: {output}[/green]")
         show_master_key(generate_master_key())
 
-    @app.command("check-tor")
+    @socks5_app.command("check-tor")
     def check_tor(
         tor_port: Annotated[
             int | None,
@@ -501,8 +501,8 @@ def register_util_commands(app: typer.Typer) -> None:
                 Panel(
                     "[bold green]Proxy Setup Complete![/bold green]\n\n"
                     "Start the proxy:\n"
-                    "  [cyan]shadow9 user generate[/cyan]  # Create user credentials\n"
-                    "  [cyan]shadow9 serve[/cyan]          # Start SOCKS5 proxy",
+                    "  [cyan]shadow9 socks5 user generate[/cyan]  # Create user credentials\n"
+                    "  [cyan]shadow9 socks5 serve[/cyan]          # Start SOCKS5 proxy",
                     title="Ready",
                     border_style="green",
                 )
@@ -517,7 +517,7 @@ def register_util_commands(app: typer.Typer) -> None:
                 )
             )
 
-    @app.command()
+    @socks5_app.command()
     def status() -> None:
         """Show proxy status, listening ports, and Tor connectivity."""
         from ..setup import check_setup
@@ -770,7 +770,9 @@ def register_util_commands(app: typer.Typer) -> None:
             if _roll_back(repo_root, current_commit) and _start_and_check(repo_root, running):
                 console.print(f"[green][OK] Back on {version} ({_short(current_commit)})[/green]")
             else:
-                console.print("[red]The server is not running. Start it with: shadow9 serve[/red]")
+                console.print(
+                    "[red]The server is not running. Start it with: shadow9 socks5 serve[/red]"
+                )
             raise typer.Exit(1)
 
         setup_script = repo_root / "setup"
@@ -1063,7 +1065,7 @@ SHADOW9_MASTER_KEY={master_key}
             console.print(f"[dim]Removed because they were absent in the backup: {removed}[/dim]")
         console.print(
             "[yellow]The Shadow9 service is stopped. Start it again with "
-            "'shadow9 service start'.[/yellow]"
+            "'shadow9 socks5 service start'.[/yellow]"
         )
 
     @key_app.command("check")
@@ -1331,7 +1333,7 @@ def _start_server(repo_root: Path, as_service: bool) -> bool:
         )
     except OSError as e:
         console.print(f"[yellow]Warning: failed to restart server: {e}[/yellow]")
-        console.print("[dim]Start it with: shadow9 serve[/dim]")
+        console.print("[dim]Start it with: shadow9 socks5 serve[/dim]")
         return False
     return True
 
@@ -1341,7 +1343,7 @@ def stop_running_server() -> RunningServer:
     Stop the proxy if it is running, and report how it was running.
 
     Finds the server by identity rather than by whoever holds a port: the service unit
-    first, then shadow9's own process. `shadow9 stop` uses this for the same reason the
+    first, then shadow9's own process. `shadow9 socks5 stop` uses this for the same reason the
     updater does, because killing the holder of a port has stopped unrelated programs.
     """
     if shutil.which("systemctl"):
@@ -1389,7 +1391,7 @@ def stop_running_server() -> RunningServer:
 def _start_and_check(repo_root: Path, running: RunningServer) -> bool:
     """Start the proxy again and report whether it is really serving."""
     if not running.was_running:
-        console.print("[dim]Server was not running. Start with: shadow9 serve[/dim]")
+        console.print("[dim]Server was not running. Start with: shadow9 socks5 serve[/dim]")
         return True
 
     console.print("[>] Restarting server...")
@@ -1543,11 +1545,11 @@ def _use_checkout_for_service(repo_root: Path) -> bool:
         None,
     )
     wrapper = str(repo_root / "shadow9")
-    if old is None or old.startswith(f"ExecStart={wrapper} serve"):
+    if old is None or old.startswith(f"ExecStart={wrapper} socks5 serve"):
         return True
 
     serve_args = old.split(" serve", 1)[1]
-    replacement = f"ExecStart={wrapper} serve{serve_args}"
+    replacement = f"ExecStart={wrapper} socks5 serve{serve_args}"
     try:
         write_file_safely(
             service_file,

@@ -28,7 +28,6 @@ from shadow9.wireguard.addresses import parse_address, parse_network
 from shadow9.wireguard.keys import generate_keypair
 from shadow9.wireguard.render import Peer, PeerRole, Topology
 
-
 # cheap enough that a test can afford one per credential, and still the encoded shape the
 # store checks a record against when it reads the file back
 _CHEAP_HASHER = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
@@ -430,9 +429,8 @@ class TestCredentialFileLock:
             assert holding.wait(timeout=10)
 
             started = time.monotonic()
-            with pytest.raises(TimeoutError):
-                with lock_file(target, timeout=0.2):
-                    pass
+            with pytest.raises(TimeoutError), lock_file(target, timeout=0.2):
+                pass
             assert time.monotonic() - started < 5
         finally:
             release.set()
@@ -461,9 +459,8 @@ class TestCredentialFileLock:
     def test_taking_it_twice_in_one_thread_does_not_wait_for_itself(self, tmp_path):
         target = tmp_path / "credentials.enc"
 
-        with lock_file(target, timeout=5):
-            with lock_file(target, timeout=5):
-                pass
+        with lock_file(target, timeout=5), lock_file(target, timeout=5):
+            pass
 
     def test_a_change_that_writes_from_inside_the_lock_does_not_wait_for_itself(self, tmp_path):
         """Every change holds the file across its write, and the write takes the lock too."""
@@ -496,9 +493,8 @@ class TestCredentialFileLock:
                 time.sleep(0.05)
             assert holding.exists()
 
-            with pytest.raises(TimeoutError):
-                with lock_file(target, timeout=0.5):
-                    pass
+            with pytest.raises(TimeoutError), lock_file(target, timeout=0.5):
+                pass
         finally:
             holder.kill()
             holder.wait(timeout=60)
@@ -734,14 +730,14 @@ class TestOneFileTwoStores:
             for index in range(4):
                 try:
                     auth.add_user(f"proxy{index}", "SecurePass123!@#")
-                except Exception as e:  # noqa: BLE001 - reported, not swallowed
+                except Exception as e:
                     failures.append(str(e))
 
         def add_through_the_api_store() -> None:
             for index in range(4):
                 try:
                     asyncio.run(repo.create(_credential(f"api{index}")))
-                except Exception as e:  # noqa: BLE001 - reported, not swallowed
+                except Exception as e:
                     failures.append(str(e))
 
         proxy_side = threading.Thread(target=add_through_the_proxy_store)
@@ -998,9 +994,7 @@ class TestStoredRecordsAreChecked:
 
         assert creds_file.read_bytes() == original
 
-    def test_an_out_of_range_port_update_keeps_the_store_readable(
-        self, tmp_path: Path
-    ) -> None:
+    def test_an_out_of_range_port_update_keeps_the_store_readable(self, tmp_path: Path) -> None:
         creds_file = tmp_path / "credentials.enc"
         auth = AuthManager(credentials_file=creds_file)
         auth.add_credential(
@@ -1022,9 +1016,7 @@ class TestStoredRecordsAreChecked:
         assert reloaded.load_error is None
         assert rejected is True
 
-    def test_a_negative_rate_limit_update_keeps_the_store_readable(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_negative_rate_limit_update_keeps_the_store_readable(self, tmp_path: Path) -> None:
         creds_file = tmp_path / "credentials.enc"
         auth = AuthManager(credentials_file=creds_file)
         auth.add_credential(
@@ -1046,9 +1038,7 @@ class TestStoredRecordsAreChecked:
         assert reloaded.load_error is None
         assert rejected is True
 
-    def test_an_invalid_added_credential_keeps_the_store_readable(
-        self, tmp_path: Path
-    ) -> None:
+    def test_an_invalid_added_credential_keeps_the_store_readable(self, tmp_path: Path) -> None:
         creds_file = tmp_path / "credentials.enc"
         auth = AuthManager(credentials_file=creds_file)
         auth.add_credential(
@@ -1658,9 +1648,7 @@ class TestPeerSettingsOnAStoredRecord:
         )
 
         with pytest.raises(ValueError, match=r"10\.20\.0\.0/24"):
-            auth_module._check_peer_fields(
-                credential, parse_network("10.20.0.0/24")
-            )
+            auth_module._check_peer_fields(credential, parse_network("10.20.0.0/24"))
 
     def test_a_route_carrying_host_bits_is_refused_rather_than_masked_off(self, tmp_path):
         """192.168.1.1/24 and 192.168.1.0/24 differ, and the difference is what routes."""
@@ -2017,6 +2005,7 @@ class TestAStoreWithNoMasterKey:
         result = CliRunner().invoke(
             app,
             [
+                "socks5",
                 "user",
                 "generate",
                 "--username",
@@ -2057,6 +2046,7 @@ class TestAStoreWithNoMasterKey:
         result = CliRunner().invoke(
             app,
             [
+                "socks5",
                 "serve",
                 "--host",
                 "127.0.0.1",
@@ -2146,9 +2136,9 @@ class TestAStoreWithNoMasterKey:
         auth = AuthManager(credentials_file=creds_file, master_key="a-master-key")
         auth.add_user("alice", "SecurePass123!@#")
 
-        assert AuthManager(
-            credentials_file=creds_file, master_key="a-master-key"
-        ).verify("alice", "SecurePass123!@#")
+        assert AuthManager(credentials_file=creds_file, master_key="a-master-key").verify(
+            "alice", "SecurePass123!@#"
+        )
 
 
 class TestThePlaintextOptIn:

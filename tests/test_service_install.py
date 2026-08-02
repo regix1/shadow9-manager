@@ -1,5 +1,5 @@
 """
-Tests for `shadow9 service install`.
+Tests for `shadow9 socks5 service install`.
 
 Nothing here touches the real /etc/systemd/system or /usr/local/bin. The unit file path is
 pointed at tmp_path, systemctl is replaced with a recorder, and symlink creation is recorded
@@ -155,7 +155,7 @@ def test_installed_unit_does_not_carry_the_master_key(
     assert "SHADOW9_MASTER_KEY=" not in unit
     env_file = paths.get_paths().env_file
     assert f"EnvironmentFile={env_file}" in unit
-    assert f"ExecStart={install_root}/shadow9 serve --host 127.0.0.1 --port 1080" in unit
+    assert f"ExecStart={install_root}/shadow9 socks5 serve --host 127.0.0.1 --port 1080" in unit
     assert _saved_master_key(env_file) == MASTER_KEY
 
 
@@ -314,7 +314,7 @@ def test_start_rejects_a_service_that_entered_auto_restart(
     assert "Service started" not in output
     assert "Recent service logs" in output
     assert "Tor service not detected" in output
-    assert "More logs: shadow9 service logs" in output
+    assert "More logs: shadow9 socks5 service logs" in output
 
 
 def test_uninstall_removes_wireguard_services_and_restores_the_saved_config(

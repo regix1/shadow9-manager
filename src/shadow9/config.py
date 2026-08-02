@@ -680,7 +680,7 @@ class Config:
         0644 rather than the helper's 0600 default. There is nothing secret in here, the
         file used to be created under the umask, and the rename installs a new file owned
         by whoever ran the save. At 0600 a sudo run would leave the operator's own
-        `shadow9 user list` failing with a PermissionError from Config.load.
+        `shadow9 socks5 user list` failing with a PermissionError from Config.load.
         """
         data = {
             "server": asdict(self.server),

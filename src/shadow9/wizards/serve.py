@@ -69,7 +69,7 @@ def show_serve_preview(host: str, port: int) -> None:
             f"[bold]Server Configuration[/bold]\n\n"
             f"  Listen: [cyan]{host}:{port}[/cyan]\n\n"
             f"[dim]User settings control Tor routing, bridges, and security levels.[/dim]\n"
-            f"[dim]For background operation: shadow9 service install[/dim]",
+            f"[dim]For background operation: shadow9 socks5 service install[/dim]",
             border_style="cyan",
         )
     )

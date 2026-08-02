@@ -51,10 +51,10 @@ def _offer_service_restart(reason: str = "Changes will apply after restart.") ->
     # Check if systemctl is available (Linux with systemd)
     if not shutil.which("systemctl"):
         console.print(f"\n[yellow]{reason}[/yellow]")
-        console.print("[dim]Restart manually: shadow9 service restart[/dim]")
+        console.print("[dim]Restart manually: shadow9 socks5 service restart[/dim]")
         return
 
-    # Check if shadow9 service is running
+    # Check if the shadow9 systemd service is running
     try:
         result = subprocess.run(
             ["systemctl", "is-active", "--quiet", "shadow9.service"], capture_output=True
@@ -65,7 +65,7 @@ def _offer_service_restart(reason: str = "Changes will apply after restart.") ->
 
     if not service_running:
         console.print(f"\n[dim]{reason}[/dim]")
-        console.print("[dim]Start with: shadow9 service start[/dim]")
+        console.print("[dim]Start with: shadow9 socks5 service start[/dim]")
         return
 
     # Service is running - offer to restart
@@ -80,11 +80,11 @@ def _offer_service_restart(reason: str = "Changes will apply after restart.") ->
                 console.print("[green][OK] Service restarted[/green]")
             else:
                 console.print(f"[red]Failed to restart: {result.stderr}[/red]")
-                console.print("[dim]Try: sudo shadow9 service restart[/dim]")
+                console.print("[dim]Try: sudo shadow9 socks5 service restart[/dim]")
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
     else:
-        console.print("[dim]Restart later: shadow9 service restart[/dim]")
+        console.print("[dim]Restart later: shadow9 socks5 service restart[/dim]")
 
 
 def _parse_allowed_ports(ports: str) -> list[int]:
@@ -620,7 +620,8 @@ def register_user_commands(app: typer.Typer) -> None:
 
             console.print(table)
             console.print(
-                "\n[dim]Tip: Use 'shadow9 user list -i' for interactive mode with actions[/dim]"
+                "\n[dim]Tip: Use 'shadow9 socks5 user list -i' "
+                "for interactive mode with actions[/dim]"
             )
             return
 

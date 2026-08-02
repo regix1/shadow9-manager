@@ -59,7 +59,7 @@ def register_server_commands(app: typer.Typer) -> None:
         """Start the SOCKS5 proxy server.
 
         User settings control Tor routing, bridges, and security levels.
-        For background operation, use: shadow9 service install && shadow9 service start
+        For background operation, install it as a service: shadow9 socks5 service install
         """
         # Config.load whether or not the file is there. It handles a missing one itself,
         # and it is also the only path that applies the SHADOW9_ environment variables, so
@@ -227,7 +227,7 @@ async def _serve(config_path: str, host: Optional[str], port: Optional[int]) -> 
         if not auth_manager.list_users():
             console.print("[red]No users configured.[/red]")
             console.print("\nCreate a user first:")
-            console.print("  [cyan]shadow9 user generate[/cyan]")
+            console.print("  [cyan]shadow9 socks5 user generate[/cyan]")
             return False
 
         # Group users by bridge type (only those needing Tor)
