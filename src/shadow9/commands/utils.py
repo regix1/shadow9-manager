@@ -305,7 +305,7 @@ def _offer_first_user() -> None:
 def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
     """Register utility commands: proxy ones on the socks5 group, the rest on the main app."""
 
-    show_app = typer.Typer(help="Show current settings and paths.")
+    show_app = typer.Typer(help="Show current settings and paths.", no_args_is_help=True)
     app.add_typer(show_app, name="show")
 
     @show_app.command("config")
@@ -816,7 +816,10 @@ def register_util_commands(app: typer.Typer, socks5_app: typer.Typer) -> None:
 
     # The key that encrypts the credential store. Named in full because "api key" is a
     # different secret entirely, and an unqualified "key" gave no way to tell them apart.
-    key_app = typer.Typer(help="Manage the master key that encrypts stored credentials")
+    key_app = typer.Typer(
+        help="Manage the master key that encrypts stored credentials",
+        no_args_is_help=True,
+    )
     app.add_typer(key_app, name="master-key")
 
     @key_app.command("generate")

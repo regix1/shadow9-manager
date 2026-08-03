@@ -65,7 +65,10 @@ def _transport_paths() -> dict[BridgeType, str | None]:
 def register_bridge_commands(app: typer.Typer) -> None:
     """Register the bridge subcommands with the main app."""
 
-    bridges_app = typer.Typer(help="Tor bridges the proxy can route a user through.")
+    bridges_app = typer.Typer(
+        help="Manage the Tor bridges available to route a user through.",
+        no_args_is_help=True,
+    )
     app.add_typer(bridges_app, name="bridges")
 
     @bridges_app.command("list")

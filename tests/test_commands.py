@@ -41,6 +41,35 @@ def test_no_arguments_show_help() -> None:
     assert "menu" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["show"],
+        ["master-key"],
+        ["socks5", "bridges"],
+        ["socks5", "components"],
+        ["socks5", "user"],
+    ],
+)
+def test_bare_group_shows_help(args: list[str]) -> None:
+    """A group invoked with no subcommand prints its help instead of an error."""
+    result = runner.invoke(app, args)
+
+    output = plain(result.stdout)
+    assert result.exit_code == 2
+    assert "Usage:" in output
+    assert "--help" in output
+
+
+def test_bare_root_still_exits_zero() -> None:
+    """Unlike every group, the root command exits 0 and prints help when bare."""
+    result = runner.invoke(app, [])
+
+    output = plain(result.stdout)
+    assert result.exit_code == 0
+    assert "Usage:" in output
+
+
 def test_show_config_shows_wireguard_values(monkeypatch: pytest.MonkeyPatch) -> None:
     config = Config()
     config.server.host = "127.0.0.21"

@@ -266,7 +266,7 @@ def post_enrollment(
 def init(
     endpoint: Annotated[
         Optional[str],
-        typer.Option("--endpoint", "-e", help="host:port peers dial, e.g. 203.0.113.10:51820"),
+        typer.Option("--endpoint", "-e", help="Host:port peers dial, e.g. 203.0.113.10:51820"),
     ] = None,
     network: Annotated[
         Optional[str], typer.Option("--network", "-n", help="Tunnel network, e.g. 10.9.0.0/24")
@@ -846,6 +846,9 @@ def device_add(
     for the device to scan. That is the opposite of a node join, where the node makes its
     own key and the hub never sees the private half.
 
+    To remove a device later, use `shadow9 wg remove <name>`; the device subgroup has no
+    remove command of its own.
+
     Examples:
         shadow9 wg device add phone
         shadow9 wg device add laptop --full-tunnel
@@ -1077,9 +1080,15 @@ def remove(
     _print_cleartext_notice()
 
 
+# token, list, and remove are hub-only operations, so wg hub also lists them here.
+hub_app.command("token")(token)
+hub_app.command("list")(list_peers)
+hub_app.command("remove")(remove)
+
+
 @hub_app.command("set-endpoint")
 def hub_set_endpoint(
-    address: Annotated[str, typer.Argument(help="host:port peers should dial")],
+    address: Annotated[str, typer.Argument(help="Host:port peers should dial")],
     config: Annotated[
         str, typer.Option("--config", "-c", help="Path to configuration file")
     ] = DEFAULT_CONFIG_FILE,

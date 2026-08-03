@@ -174,7 +174,10 @@ def _refuse_on_demand(component: Component) -> None:
 def register_component_commands(app: typer.Typer) -> None:
     """Register the component subcommands with the main app."""
 
-    components_app = typer.Typer(help="Manage Tor and the bridge transports the proxy uses.")
+    components_app = typer.Typer(
+        help="Manage Tor and the bridge transports the proxy uses.",
+        no_args_is_help=True,
+    )
     app.add_typer(components_app, name="components")
 
     @components_app.command("status")
@@ -219,7 +222,7 @@ def register_component_commands(app: typer.Typer) -> None:
             typer.Argument(help="Component to start", autocompletion=complete_component),
         ],
     ) -> None:
-        """Start a component."""
+        """Start a component's systemd unit. Only tor has one."""
         component = find_component(name)
         if component.unit is None:
             _refuse_on_demand(component)
@@ -253,7 +256,7 @@ def register_component_commands(app: typer.Typer) -> None:
             typer.Argument(help="Component to start on boot", autocompletion=complete_component),
         ],
     ) -> None:
-        """Start a component on boot."""
+        """Enable a component to start on boot."""
         component = find_component(name)
         if component.unit is None:
             _refuse_on_demand(component)
@@ -272,7 +275,7 @@ def register_component_commands(app: typer.Typer) -> None:
             ),
         ],
     ) -> None:
-        """Stop a component starting on boot, without stopping it now."""
+        """Disable a component from starting on boot, without stopping it now."""
         component = find_component(name)
         if component.unit is None:
             _refuse_on_demand(component)
@@ -297,7 +300,8 @@ def register_component_commands(app: typer.Typer) -> None:
             typer.Option("--yes", "-y", help="Do not ask when something else depends on it"),
         ] = False,
     ) -> None:
-        """Stop a component, saying first what else on this host depends on it."""
+        """Stop a component's systemd unit (only tor has one), saying first what
+        else on this host depends on it."""
         component = find_component(name)
         if component.unit is None:
             _refuse_on_demand(component)

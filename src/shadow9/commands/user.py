@@ -218,7 +218,8 @@ def register_user_commands(app: typer.Typer) -> None:
     ) -> None:
         """Generate a user with optional custom username/password.
 
-        If username or password not provided, secure random values are generated.
+        Prompts for any value not passed as a flag. A blank answer to username or
+        password yields a secure random one.
         """
         try:
             _user_generate_impl(

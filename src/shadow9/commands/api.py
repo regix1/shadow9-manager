@@ -29,7 +29,7 @@ console = Console()
 # Create the API command group
 api_app = typer.Typer(
     name="api",
-    help="API management commands",
+    help="REST API server: proxy status and users, plus WireGuard node enrollment.",
     no_args_is_help=True,
 )
 
@@ -95,7 +95,7 @@ def start(
     reload: Annotated[bool, typer.Option("--reload", "-r", help="Enable auto-reload")] = False,
 ) -> None:
     """
-    Start the REST API server using saved configuration.
+    Start the REST API server (proxy status/users, WireGuard node enrollment).
 
     Uses settings from config/api.yaml. Run 'shadow9 api setup' first to configure.
 
@@ -246,7 +246,7 @@ def stop(
         bool, typer.Option("--yes", "-y", help="Do not ask about an unrecognised process")
     ] = False,
 ) -> None:
-    """Stop the running API server."""
+    """Stop the running REST API server (does not stop the proxy itself)."""
     config = _read_api_config(config_path) or {}
     api_host = config.get("host", "127.0.0.1")
     api_port = config.get("port", 8080)
