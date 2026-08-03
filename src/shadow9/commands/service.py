@@ -302,7 +302,7 @@ WantedBy=multi-user.target
 
     @service_app.command("start")
     def service_start():
-        """Start the Shadow9 service."""
+        """Start the Shadow9 proxy as a systemd background service."""
         _check_linux()
         _check_root()
         _check_installed()
@@ -348,7 +348,7 @@ WantedBy=multi-user.target
 
     @service_app.command("stop")
     def service_stop():
-        """Stop the Shadow9 service."""
+        """Stop the Shadow9 proxy's systemd service only, leaving a terminal `serve` run alone."""
         _check_linux()
         _check_root()
         _check_installed()
@@ -362,7 +362,7 @@ WantedBy=multi-user.target
 
     @service_app.command("restart")
     def service_restart():
-        """Restart the Shadow9 service."""
+        """Restart the Shadow9 proxy as a systemd background service."""
         _check_linux()
         _check_root()
         _check_installed()
@@ -375,6 +375,11 @@ WantedBy=multi-user.target
         else:
             console.print("[red]Failed to restart service[/red]")
             raise typer.Exit(1)
+
+    # stop already lives on the menu people see first and finds the unit by itself,
+    # so the matching start and restart belong there too, not only under service.
+    app.command("start")(service_start)
+    app.command("restart")(service_restart)
 
     @service_app.command("enable")
     def service_enable():

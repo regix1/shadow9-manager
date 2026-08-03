@@ -275,6 +275,33 @@ def test_start_reports_a_service_that_stayed_running(monkeypatch: pytest.MonkeyP
     assert ("systemctl", "is-active", service.SERVICE_NAME) in calls
 
 
+@pytest.mark.parametrize("path", [["start"], ["restart"]])
+def test_start_and_restart_are_also_on_the_menu_itself(
+    path: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """stop sits beside serve, so the matching start and restart have to be there too."""
+    calls: list[tuple[str, ...]] = []
+
+    def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        parts = tuple(command)
+        calls.append(parts)
+        output = "active\n" if parts[:2] == ("systemctl", "is-active") else ""
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(service, "_check_linux", _skip_check)
+    monkeypatch.setattr(service, "_check_root", _skip_check)
+    monkeypatch.setattr(service, "_check_installed", _skip_check)
+    monkeypatch.setattr(service.subprocess, "run", run)
+    monkeypatch.setattr(service.time, "sleep", lambda _seconds: None)
+    app = Typer()
+    service.register_service_commands(app)
+
+    result = CliRunner().invoke(app, path)
+
+    assert result.exit_code == 0, result.output
+    assert ("systemctl", path[0], service.SERVICE_NAME) in calls
+
+
 def test_start_rejects_a_service_that_entered_auto_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

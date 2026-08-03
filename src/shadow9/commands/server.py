@@ -56,10 +56,11 @@ def register_server_commands(app: typer.Typer) -> None:
             bool, typer.Option("--interactive", "-i", help="Run interactive configuration")
         ] = False,
     ) -> None:
-        """Start the SOCKS5 proxy server.
+        """Start the SOCKS5 proxy server in this terminal.
 
         User settings control Tor routing, bridges, and security levels.
-        For background operation, install it as a service: shadow9 socks5 service install
+        For background operation, install the service once with
+        shadow9 socks5 service install, then use shadow9 socks5 start.
         """
         # Config.load whether or not the file is there. It handles a missing one itself,
         # and it is also the only path that applies the SHADOW9_ environment variables, so
@@ -134,7 +135,8 @@ def register_server_commands(app: typer.Typer) -> None:
         ] = False,
     ) -> None:
         """
-        Stop a running Shadow9 server.
+        Stop the Shadow9 proxy, wherever it is running (the systemd service or a `serve`
+        process in a terminal).
 
         Looks for the server by identity first, the service unit and then shadow9's own
         process, because killing whoever happens to hold a port has stopped unrelated
